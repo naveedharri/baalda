@@ -4,25 +4,45 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
 import { docsForResource, docsForResources, orgRole, resolveResource } from "./lookup.js";
+import { ancestorFolderIds } from "./resolver.js";
 
 export type AccessMode = "private" | "readonly" | "open";
 export type AccessResource = {
   resourceType: "folder" | "file" | "vault";
   resourceId: string;
 };
-export type AccessAudience = { type: "org" } | { type: "users"; userIds: string[] };
+export type AccessAudience =
+  | { type: "org" }
+  | { type: "users"; userIds: string[] }
+  /** One access group (migration 097). `open` writes an `edit` row,
+   *  `readonly` a `view` row; `private` writes a group `denied` row where the
+   *  group reaches the item from above (migration 100: its deepest row
+   *  decides), else just removes what the group gave there. */
+  | { type: "group"; groupId: string };
 
 type Queryable = Pick<pg.Pool | pg.PoolClient, "query">;
 
 export class AccessManagementError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 403 | 404,
+    readonly status: 400 | 403 | 404 | 409,
     readonly code: string,
   ) {
     super(message);
   }
 }
+
+/**
+ * Default access (the org row on the vault resource) is fixed (2026-11-25):
+ * new vaults start sealed, converted vaults were sealed by migration 101, and a
+ * vault that was never shared keeps "members keep what they write". No surface
+ * may change it any more — sealing a never-shared vault would take every
+ * member's own notes off their disk. Access comes from groups and personal
+ * levels instead. Shared by `POST /shares`, `DELETE /shares/:id`,
+ * `PUT team-access`, the bulk API and MCP, so they cannot disagree.
+ */
+export const DEFAULT_ACCESS_FIXED_MESSAGE =
+  "Default access can't be changed any more. Give people access with access groups or their own level.";
 
 export interface AccessChangeDeps {
   disconnectDoc?: (vaultId: string, docId: string) => void;
@@ -97,6 +117,15 @@ export async function setJoinDefault(
   db: pg.Pool = defaultPool,
 ): Promise<AccessMode> {
   await requireAccessManager(organizationId, userId, db);
+  // New members always start on Only what's shared (2026-11-25): they get
+  // access from the groups they join. Older desktops still offer the setting.
+  if (mode !== "private") {
+    throw new AccessManagementError(
+      "New members start on No access unless you give them a level or add them to an access group.",
+      409,
+      "join_default_fixed",
+    );
+  }
   return withAuditActor(userId, async (client) => {
     await ensureSettings(client, organizationId);
     const { rows } = await client.query<{ join_default: AccessMode }>(
@@ -164,6 +193,14 @@ async function validateAudience(
   actorUserId: string,
 ): Promise<string[]> {
   if (audience.type === "org") return [];
+  if (audience.type === "group") {
+    const { rowCount } = await db.query(
+      "SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2",
+      [audience.groupId, organizationId],
+    );
+    if (!rowCount) throw new AccessManagementError("Unknown group", 404, "group_not_found");
+    return [];
+  }
   const ids = [...new Set(audience.userIds.filter(Boolean))];
   if (ids.length === 0 || ids.length > 500) {
     throw new AccessManagementError(
@@ -202,18 +239,30 @@ async function clearResourceOverrides(
   organizationId: string,
   resource: AccessResource,
   userIds: string[],
+  /** Clear only this group's rows (a group audience). */
+  groupId: string | null = null,
+  /** Receives the permission of every row removed (lets a group write tell a narrowing apart). */
+  removed?: string[],
 ): Promise<number> {
   // The vault branch has no `$2` (the resource IS the org), so its audience is
   // `$2`; a gap in the numbering leaves Postgres unable to type the unused slot.
+  // The Everyone (org) audience never clears a GROUP's rows: those belong to the
+  // group's own Access tab.
+  if (groupId !== null) userIds = [groupId];
+  const principal = groupId !== null ? "group" : "user";
   const audienceAt = (n: number) =>
-    userIds.length ? `AND principal_type = 'user' AND principal_id = ANY($${n}::text[])` : "";
+    userIds.length
+      ? `AND principal_type = '${principal}' AND principal_id = ANY($${n}::text[])`
+      : "AND principal_type <> 'group'";
   const audience = audienceAt(3);
   if (resource.resourceType === "file") {
     const result = await db.query(
       `DELETE FROM shares
-        WHERE org_id = $1 AND resource_type = 'file' AND resource_id = $2 ${audience}`,
+        WHERE org_id = $1 AND resource_type = 'file' AND resource_id = $2 ${audience}
+       RETURNING permission`,
       userIds.length ? [organizationId, resource.resourceId, userIds] : [organizationId, resource.resourceId],
     );
+    for (const row of result.rows as Array<{ permission: string }>) removed?.push(row.permission);
     return result.rowCount ?? 0;
   }
   if (resource.resourceType === "folder") {
@@ -230,9 +279,11 @@ async function clearResourceOverrides(
         WHERE org_id = $1
           AND ((resource_type = 'folder' AND resource_id IN (SELECT id FROM subtree))
             OR (resource_type = 'file' AND resource_id IN (SELECT id FROM target_files)))
-          ${audience}`,
+          ${audience}
+       RETURNING permission`,
       userIds.length ? [organizationId, resource.resourceId, userIds] : [organizationId, resource.resourceId],
     );
+    for (const row of result.rows as Array<{ permission: string }>) removed?.push(row.permission);
     return result.rowCount ?? 0;
   }
 
@@ -249,10 +300,60 @@ async function clearResourceOverrides(
                 SELECT id, vault_id FROM notes UNION ALL SELECT id, vault_id FROM files
               ) d JOIN vaults v ON v.id = d.vault_id
                WHERE d.id = s.resource_id AND v.organization_id = $1))
-        ) ${audienceAt(2)}`,
+        ) ${audienceAt(2)}
+     RETURNING s.permission`,
     userIds.length ? [organizationId, userIds] : [organizationId],
   );
+  for (const row of result.rows as Array<{ permission: string }>) removed?.push(row.permission);
   return result.rowCount ?? 0;
+}
+
+/**
+ * Drop the "Sales may raise them" marks (`access_group_raises`) these people
+ * hold at `resource` and inside it. A setting made just for a person is the
+ * newest word on that place: it clears their own settings inside it
+ * ({@link clearResourceOverrides}), and a mark is one of those. Left in place, an
+ * older mark kept a group lifting them past the No access just written for
+ * them, while the owner saw No access and the person kept every note.
+ */
+export async function clearRaiseMarks(
+  db: Queryable,
+  organizationId: string,
+  resource: AccessResource,
+  userIds: string[],
+): Promise<number> {
+  if (userIds.length === 0) return 0;
+  if (resource.resourceType === "vault") {
+    const r = await db.query(
+      "DELETE FROM access_group_raises WHERE organization_id = $1 AND user_id = ANY($2::text[])",
+      [organizationId, userIds],
+    );
+    return r.rowCount ?? 0;
+  }
+  if (resource.resourceType === "file") {
+    const r = await db.query(
+      `DELETE FROM access_group_raises
+        WHERE organization_id = $1 AND user_id = ANY($3::text[]) AND resource_type = 'file' AND resource_id = $2`,
+      [organizationId, resource.resourceId, userIds],
+    );
+    return r.rowCount ?? 0;
+  }
+  const r = await db.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id FROM folders WHERE id = $2
+       UNION
+       SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     ), target_files AS (
+       SELECT id FROM notes WHERE folder_id IN (SELECT id FROM subtree)
+       UNION SELECT id FROM files WHERE folder_id IN (SELECT id FROM subtree)
+     )
+     DELETE FROM access_group_raises
+      WHERE organization_id = $1 AND user_id = ANY($3::text[])
+        AND ((resource_type = 'folder' AND resource_id IN (SELECT id FROM subtree))
+          OR (resource_type = 'file' AND resource_id IN (SELECT id FROM target_files)))`,
+    [organizationId, resource.resourceId, userIds],
+  );
+  return r.rowCount ?? 0;
 }
 
 function storedPermission(mode: AccessMode): "denied" | "readonly" | "edit" {
@@ -285,6 +386,9 @@ export async function applyBulkAccess(
     ).values(),
   ];
   await requireAccessManager(input.organizationId, input.actorUserId, db);
+  if (input.audience.type === "org" && resources.some((r) => r.resourceType === "vault")) {
+    throw new AccessManagementError(DEFAULT_ACCESS_FIXED_MESSAGE, 409, "default_access_fixed");
+  }
   await validateResources(db, input.organizationId, resources);
   const selectedUsers = await validateAudience(db, input.organizationId, input.audience, input.actorUserId);
   const currentMembers = await db.query<{ user_id: string }>(
@@ -294,9 +398,23 @@ export async function applyBulkAccess(
 
   const client = await db.connect();
   let cleared = 0;
+  let groupDenied = false;
+  const removedPermissions: string[] = [];
   try {
     await client.query("BEGIN");
     await setAuditActor(client, input.actorUserId);
+    // Hold the group while its rows are written: a delete at the same moment
+    // either waits for this write (and its trigger then removes these rows
+    // too) or has already gone, and this write is refused. Without the lock a
+    // write could land after the delete, leaving rows for a group that no
+    // longer exists.
+    if (input.audience.type === "group") {
+      const { rowCount } = await client.query(
+        "SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2 FOR SHARE",
+        [input.audience.groupId, input.organizationId],
+      );
+      if (!rowCount) throw new AccessManagementError("Unknown group", 404, "group_not_found");
+    }
     const revision = await nextAccessRevision(client, input.organizationId);
     for (const resource of resources) {
       cleared += await clearResourceOverrides(
@@ -304,11 +422,16 @@ export async function applyBulkAccess(
         input.organizationId,
         resource,
         selectedUsers,
+        input.audience.type === "group" ? input.audience.groupId : null,
+        removedPermissions,
       );
+      if (input.audience.type === "users") {
+        await clearRaiseMarks(client, input.organizationId, resource, selectedUsers);
+      }
     }
 
     const wholeVault = resources[0].resourceType === "vault";
-    if (wholeVault) {
+    if (wholeVault && input.audience.type !== "group") {
       if (input.audience.type === "org") {
         await client.query(
           "DELETE FROM member_access_snapshots WHERE organization_id = $1",
@@ -323,16 +446,50 @@ export async function applyBulkAccess(
       }
     }
 
+    // A group's No access is the absence of a row, unless the group still
+    // reaches the item from above (a folder or the vault): then a `denied` row
+    // stops that group's reach from here down (resolver `rowsGroupGrant`:
+    // within one group the deepest row wins).
+    const groupNoAccess: AccessResource[] = [];
+    if (input.audience.type === "group" && input.mode === "private") {
+      for (const resource of resources) {
+        if (resource.resourceType === "vault") continue;
+        if (await groupReachesFromAbove(client, input.organizationId, input.audience.groupId, resource)) {
+          groupNoAccess.push(resource);
+        }
+      }
+    }
+    for (const resource of groupNoAccess) {
+      groupDenied = true;
+      await client.query(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id,
+            permission, created_by, access_revision)
+         VALUES ($1,$2,$3,$4,'group',$5,'denied',$6,$7)`,
+        [randomUUID(), input.organizationId, resource.resourceType, resource.resourceId,
+          (input.audience as { groupId: string }).groupId, input.actorUserId, revision],
+      );
+    }
     const principalIds =
-      input.audience.type === "org" ? [input.organizationId] : selectedUsers;
-    const principalType = input.audience.type === "org" ? "org" : "user";
+      input.audience.type === "org"
+        ? [input.organizationId]
+        : input.audience.type === "group"
+          ? input.mode === "private"
+            ? []
+            : [input.audience.groupId]
+          : selectedUsers;
+    const principalType =
+      input.audience.type === "org" ? "org" : input.audience.type === "group" ? "group" : "user";
     for (const resource of resources) {
       // The vault's existing `view` posture already has grant+cap semantics in
       // `vaultBaseline`; item rows need the combined `readonly` permission.
+      // A group row is a pure grant: `view` or `edit`, never a cap.
       const permission =
-        resource.resourceType === "vault" && input.mode === "readonly"
-          ? "view"
-          : storedPermission(input.mode);
+        input.audience.type === "group"
+          ? input.mode === "open" ? "edit" : "view"
+          : resource.resourceType === "vault" && input.mode === "readonly"
+            ? "view"
+            : storedPermission(input.mode);
       for (const principalId of principalIds) {
         await client.query(
           `INSERT INTO shares
@@ -374,7 +531,17 @@ export async function applyBulkAccess(
   let disconnectedDocs = 0;
   // Every mode can narrow somebody after replacement, so re-auth all affected
   // editors. A transport failure must not roll back the committed ACL.
-  for (const doc of docs) {
+  // A group row only ADDS, so a group write narrows nobody unless it removed a
+  // row that gave more than the new level (edit → view, anything → No access).
+  // Widening arrives by itself on the next token mint, like team-access.
+  const groupRank = (permission: string) => (permission === "edit" ? 2 : permission === "view" ? 1 : 0);
+  const narrowed =
+    input.audience.type !== "group" ||
+    groupDenied ||
+    removedPermissions.some(
+      (permission) => groupRank(permission) > (input.mode === "open" ? 2 : input.mode === "readonly" ? 1 : 0),
+    );
+  for (const doc of narrowed ? docs : []) {
     try {
       deps.disconnectDoc?.(doc.vaultId, doc.docId);
       disconnectedDocs += deps.disconnectDoc ? 1 : 0;
@@ -389,7 +556,40 @@ export async function applyBulkAccess(
     resourcesChanged: resources.length,
     overridesCleared: cleared,
     membersAffected:
-      input.audience.type === "org" ? currentMembers.rows.length : selectedUsers.length,
+      input.audience.type === "org"
+        ? currentMembers.rows.length
+        : input.audience.type === "group"
+          ? (
+              await db.query("SELECT 1 FROM access_group_members WHERE group_id = $1", [input.audience.groupId])
+            ).rowCount ?? 0
+          : selectedUsers.length,
     disconnectedDocs,
   };
+}
+
+/** True when `groupId` holds a `view`/`edit` row on an ANCESTOR of the
+ *  resource (a parent folder, or the vault), i.e. it reaches it from above. */
+async function groupReachesFromAbove(
+  db: pg.PoolClient,
+  organizationId: string,
+  groupId: string,
+  resource: AccessResource,
+): Promise<boolean> {
+  const { rows: loc } = await db.query<{ folder_id: string | null }>(
+    resource.resourceType === "folder"
+      ? "SELECT parent_id AS folder_id FROM folders WHERE id = $1"
+      : `SELECT folder_id FROM notes WHERE id = $1 AND deleted_at IS NULL
+         UNION ALL SELECT folder_id FROM files WHERE id = $1 LIMIT 1`,
+    [resource.resourceId],
+  );
+  const chain = await ancestorFolderIds(db, loc[0]?.folder_id ?? null);
+  const { rowCount } = await db.query(
+    `SELECT 1 FROM shares
+      WHERE principal_type = 'group' AND principal_id = $1 AND permission IN ('view', 'edit')
+        AND ((resource_type = 'vault' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id = ANY($3::text[])))
+      LIMIT 1`,
+    [groupId, organizationId, chain],
+  );
+  return (rowCount ?? 0) > 0;
 }

@@ -22,6 +22,8 @@ import {
   myLevelJoin,
   orgMembers,
   personalLevels,
+  groupLevels,
+  memberGroupMap,
   type SkillViewer,
 } from "./access.js";
 import type {
@@ -153,7 +155,11 @@ async function audiences(db: pg.Pool | pg.PoolClient, orgId: string, rows: Skill
   if (rows.length === 0) return out;
   const members = await orgMembers(db, orgId);
   const own = await personalLevels(db, rows.map((r) => r.id));
-  for (const r of rows) out.set(r.id, audienceOf(everyoneLevel(r), members, own.get(r.id)));
+  const groups = await groupLevels(db, rows.map((r) => r.id));
+  const byUser = await memberGroupMap(db, orgId);
+  for (const r of rows) {
+    out.set(r.id, audienceOf(everyoneLevel(r), members, own.get(r.id), { byUser, levels: groups.get(r.id) }));
+  }
   return out;
 }
 

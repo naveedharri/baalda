@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 .dashboard-dialog.dashboard-gallery-dialog{width:min(1220px,calc(100vw - 40px));padding:26px;max-height:calc(100dvh - 40px)}
 .dashboard-gallery-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px;flex-wrap:wrap;font-size:12px}
-.dashboard-gallery-toolbar input{width:260px;max-width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-pill);background:var(--bg-subtle);color:var(--text-primary);font:inherit}
+.dashboard-gallery-toolbar input{width:220px;max-width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-pill);background:var(--bg-subtle);color:var(--text-primary);font:inherit}
 .dashboard-gallery-filters{display:flex;gap:5px;flex-wrap:wrap}.dashboard-gallery-filters button{border:0;border-radius:var(--radius-pill);padding:8px 13px;background:transparent;color:var(--text-secondary);font:inherit;cursor:pointer}.dashboard-gallery-filters button[aria-pressed=true]{background:var(--accent-soft);color:var(--accent);font-weight:600}
 .dashboard-gallery-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;max-height:53dvh;overflow-y:auto;padding:3px 5px 8px 3px;scrollbar-gutter:stable;margin-bottom:18px}
 .dashboard-gallery-card{position:relative;aspect-ratio:1/0.95;min-width:0;min-height:0;isolation:isolate;overflow:hidden;border:1px solid color-mix(in srgb,var(--text-secondary) 32%,var(--bg-surface));border-radius:16px;background:var(--bg-surface);box-shadow:0 2px 5px rgb(0 0 0 / 9%);transition:border-color 160ms,box-shadow 160ms}
@@ -10,8 +10,11 @@
 .dashboard-gallery-picture{position:absolute;inset:0;background:var(--bg-subtle)}
 .dashboard-template-thumbnail{display:block;width:100%;height:100%;object-fit:cover;object-position:top;pointer-events:none}
 .dashboard-gallery-card-name{position:absolute;bottom:12px;left:12px;max-width:calc(100% - 24px);box-sizing:border-box;display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0;padding:6px 10px;border-radius:9px;background:var(--bg-surface);color:var(--text-primary);box-shadow:0 1px 5px rgb(0 0 0 / 12%);font-size:12px;line-height:1.4;pointer-events:none}
-.dashboard-gallery-card-actions{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;align-content:center;gap:8px;padding:16px;background:rgb(20 20 35 / 22%);opacity:0;transition:opacity 160ms;pointer-events:none}
-.dashboard-gallery-card:hover .dashboard-gallery-card-actions,.dashboard-gallery-card:focus-within .dashboard-gallery-card-actions{opacity:1;pointer-events:auto}
+.dashboard-gallery-card-actions{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;align-content:center;gap:8px;padding:16px;background:rgb(20 20 35 / 0%);opacity:0;transition:background-color 160ms;pointer-events:none}
+/* No opacity animation here: in WebKit an animating opacity gets its own GPU layer for the length
+   of the fade, and on a card grid at a fractional offset that re-rounds every card by 1px, so the
+   grid jiggled while the pointer crossed cards. Only the tint fades (a plain repaint). */
+.dashboard-gallery-card:hover .dashboard-gallery-card-actions,.dashboard-gallery-card:focus-within .dashboard-gallery-card-actions{opacity:1;background:rgb(20 20 35 / 22%);pointer-events:auto}
 .dashboard-gallery-card-actions button{font-size:12px;padding:9px 13px;cursor:pointer;border:1px solid transparent;border-radius:var(--radius-md);box-shadow:0 2px 8px rgb(0 0 0 / 15%)}
 .dashboard-gallery-card-actions .secondary{background:var(--bg-surface);color:var(--text-primary);border:1px solid var(--border)}
 .dashboard-gallery-card-actions button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
@@ -36,3 +39,9 @@
 @media(max-width:900px){.vault-dashboards .dashboard-gallery-grid,.dashboard-gallery-dialog .vault-dashboards .dashboard-gallery-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:560px){.dashboard-gallery-grid,.vault-dashboards .dashboard-gallery-grid,.dashboard-gallery-dialog .vault-dashboards .dashboard-gallery-grid{grid-template-columns:1fr}.dashboard-dialog.dashboard-gallery-dialog:has(.dashboard-gallery-expanded){height:calc(100dvh - 24px);width:calc(100vw - 24px)}}
 .dashboard-gallery-grid{align-items:start;grid-auto-rows:max-content}
+/* Search lives at the right end of the style row: an icon that opens a field. */
+.dashboard-gallery:not(:has(.dashboard-gallery-expanded)) > .dashboard-gallery-toolbar{flex-wrap:nowrap}
+.dashboard-gallery-search{display:flex;align-items:center;gap:6px;margin-left:auto;flex:none}
+.dashboard-gallery-search input{padding:7px 12px}
+.dashboard-gallery-search-btn{display:grid;place-items:center;width:32px;height:32px;border:0;border-radius:var(--radius-pill);background:transparent;color:var(--text-secondary);cursor:pointer}
+.dashboard-gallery-search-btn:hover,.dashboard-gallery-search.open .dashboard-gallery-search-btn{background:var(--bg-subtle);color:var(--text-primary)}

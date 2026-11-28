@@ -5,6 +5,7 @@ import { Readable, Transform } from "node:stream";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import type { PoolClient } from "pg";
 import { pool } from "../../db/pool.js";
 import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import {
@@ -104,6 +105,16 @@ export const blobRoutes = new Hono();
  * which is unchanged.
  */
 export const FILES_WITH_BYTES_FEATURE = "files-with-bytes";
+
+/**
+ * `/health` feature: `intent` accepts `size: 0` (an empty `__init__.py`, an empty
+ * `.gitkeep`-style file). It answers like a dedupe hit: nothing to upload. A
+ * desktop that does not see it keeps empty files local, as it always has.
+ */
+export const EMPTY_FILES_FEATURE = "empty-files";
+
+/** sha256 of zero bytes: the only content a 0-byte file can have. */
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /**
  * Who hears that a one-step upload created or moved a `files` row.
@@ -755,20 +766,41 @@ function staleBase(c: Context, current: BlobRow) {
  * drain re-checks for a live row on the key first, so a sibling that shares the
  * content keeps its bytes.
  */
-async function retireSupersededDocBlobs(docId: string | null, keepBlobId: string): Promise<void> {
+export async function retireSupersededDocBlobs(docId: string | null, keepBlobId: string): Promise<void> {
   if (!docId) return;
+  // Two uploads finishing together each mark their row ready, then each retire
+  // "every row but mine": the first deleted the second's row, the second the
+  // first's, and the file was left with NO version. A third device then saw a
+  // file it knows with nothing on the server, re-uploaded its old bytes, and
+  // both edits were reverted on every device. So retirements of one doc run
+  // one at a time, and a row a concurrent retirement already removed keeps the
+  // newest survivor instead: a ready file always keeps exactly one version.
+  let client: PoolClient | null = null;
   try {
-    const { rowCount } = await pool.query(
-      "DELETE FROM blobs WHERE doc_id = $1 AND id <> $2 AND status = 'ready'",
+    client = await pool.connect();
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`blob-retire:${docId}`]);
+    const { rowCount } = await client.query(
+      `DELETE FROM blobs
+        WHERE doc_id = $1 AND status = 'ready'
+          AND id <> COALESCE(
+            (SELECT id FROM blobs WHERE id = $2 AND doc_id = $1 AND status = 'ready'),
+            (SELECT id FROM blobs WHERE doc_id = $1 AND status = 'ready'
+              ORDER BY updated_at DESC, id DESC LIMIT 1)
+          )`,
       [docId, keepBlobId],
     );
+    await client.query("COMMIT");
     if (rowCount) {
       console.info(`[blobs] retired ${rowCount} superseded row(s) for file ${docId}`);
     }
   } catch (err) {
+    await client?.query("ROLLBACK").catch(() => {});
     // Never fail an upload that has already landed over housekeeping — a stale
     // sibling is a duplicate listing, not lost content.
     console.warn(`[blobs] could not retire superseded rows for file ${docId}:`, err);
+  } finally {
+    client?.release();
   }
 }
 
@@ -971,7 +1003,7 @@ async function checkStorageQuota(
 /** A positive, integral byte count, or null. */
 function normalizeSize(raw: unknown): number | null {
   const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) return null;
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
   return n;
 }
 
@@ -1012,7 +1044,10 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
   }
   const size = normalizeSize(body.size);
   if (size === null) {
-    return c.json({ error: "size must be a positive integer", code: "invalid_size" }, 400);
+    return c.json({ error: "size must be a whole number of bytes", code: "invalid_size" }, 400);
+  }
+  if (size === 0 && sha256 !== EMPTY_SHA256) {
+    return c.json({ error: "An empty file's sha256 must be the hash of no bytes", code: "invalid_sha256" }, 400);
   }
   const filename = typeof body.filename === "string" ? body.filename : null;
   // `docId`: these bytes are a registered tree file. Same meaning as the legacy
@@ -1170,6 +1205,25 @@ blobRoutes.post("/vaults/:vaultId/blobs/intent", async (c) => {
 
   const quota = await checkStorageQuota(vaultId, org, size);
   if (quota) return c.json(quota, 402);
+
+  // An empty file has no bytes to send, so there is no PUT and no `complete`:
+  // the row is made ready here, in this database whatever the store (a
+  // zero-byte object buys nothing, and `resolveStoreForRow` always reads
+  // Postgres rows), unclaimed so `dedupedAnswer` binds it to the file exactly
+  // like any dedupe hit, registration included.
+  if (size === 0) {
+    const { rows } = await pool.query<BlobRow>(
+      `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, data, rel_path, filename,
+                          storage_provider, storage_key, status, created_by, doc_id)
+       VALUES ($1, $2, $3, $4, 0, $5, '\\x'::bytea, $6, $7, 'postgres', NULL, 'ready', $8, NULL)
+       ON CONFLICT DO NOTHING
+       RETURNING ${BLOB_ROW_COLUMNS}`,
+      [randomUUID(), vaultId, org, sha256, mime, relPath, filename, session.userId],
+    );
+    const empty = rows[0] ?? (await findBlob(vaultId, sha256, docId));
+    if (!empty) return c.json({ error: "Upload conflicted. Retry" }, 409);
+    return dedupedAnswer(empty);
+  }
 
   // An existing PENDING row for the same content is re-used rather than
   // conflicting: the per-doc unique index would refuse a second insert anyway, and
@@ -1983,9 +2037,20 @@ blobRoutes.get("/vaults/:vaultId/blobs", async (c) => {
   // `status = 'ready'` only: a pending row is an upload in flight (or an
   // abandoned one), and listing it would tell the desktop's attachment diff a
   // file it cannot download already exists.
+  // A doc-bound blob is listed at its `files` row's CURRENT path: the blob's
+  // own `rel_path` is where it was uploaded, and a rename or a folder move
+  // only moves the `files` row. Listing the upload path told every other
+  // device the file still had its old name (so a rename never reached them,
+  // and a new device downloaded it under the old name).
   const { rows } = await pool.query<BlobRow & { rel_path: string | null }>(
-    `SELECT ${BLOB_ROW_COLUMNS}
-       FROM blobs WHERE vault_id = $1 AND status = 'ready' ORDER BY rel_path`,
+    `SELECT b.id, b.sha256, b.size, b.mime,
+            COALESCE(f.path, b.rel_path) AS rel_path,
+            COALESCE(regexp_replace(f.path, '^.*/', ''), b.filename) AS filename,
+            b.doc_id
+       FROM blobs b
+       LEFT JOIN files f ON f.id = b.doc_id AND f.vault_id = b.vault_id
+      WHERE b.vault_id = $1 AND b.status = 'ready'
+      ORDER BY 5`,
     [vaultId],
   );
   // Private-by-default: a scoped member only sees blobs referenced by notes

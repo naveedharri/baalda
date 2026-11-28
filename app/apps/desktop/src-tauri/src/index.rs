@@ -13,7 +13,7 @@ use crate::extract::kind_for;
 use crate::notefile::sha256_hex;
 use crate::parse::{parse_html, parse_note, parse_plain, ParsedNote};
 use crate::stats::now_ms;
-use crate::vault::{is_ignored_name, is_indexable_file, is_note_file, rel_from_abs};
+use crate::vault::{is_ignored_name, is_indexable_file, is_indexable_in, is_note_file, rel_from_abs};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -162,6 +162,19 @@ fn set_disk_base_on(conn: &Connection, doc_id: &str, sha256: &str) -> AppResult<
 /// by `linkKey` in `src/lib/editor/wikilinkResolve.ts`.
 fn link_key(s: &str) -> String {
     s.nfc().collect::<String>().to_lowercase()
+}
+
+/// Whether a doc id has anything of its own on this device: local CRDT history
+/// or a recorded disk base. An id with none is a fresh local mint nothing else
+/// knows, safe to give way to the note's real id.
+fn id_has_history(conn: &Connection, id: &str) -> AppResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM yjs_updates WHERE doc_id = ?1)
+             OR EXISTS(SELECT 1 FROM yjs_snapshot WHERE doc_id = ?1)
+             OR EXISTS(SELECT 1 FROM yjs_disk_base WHERE doc_id = ?1)",
+        params![id],
+        |r| r.get(0),
+    )?)
 }
 
 fn read_yjs_state_vectors(conn: &Connection) -> AppResult<Vec<YjsStateVector>> {
@@ -334,6 +347,11 @@ impl Index {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let idx = Index::new(conn);
         idx.migrate()?;
+        // A follow that deferred its link pass and never reached the end (the
+        // app quit, the vault switched) owes that pass now.
+        if let Err(e) = idx.flush_deferred_links() {
+            log::warn!("[index] deferred link pass failed: {e}");
+        }
         Ok(idx)
     }
 
@@ -424,6 +442,13 @@ impl Index {
                 parent_id TEXT,
                 name      TEXT,
                 path      TEXT
+            );
+
+            -- Named switches that must survive a crash. Today only
+            -- 'links_dirty': a rename made with its link pass deferred
+            -- (`rename_note_opts`) and not yet followed by one.
+            CREATE TABLE IF NOT EXISTS index_flags (
+                name TEXT PRIMARY KEY
             );
 
             CREATE INDEX IF NOT EXISTS idx_links_dst ON links(dst_note_id);
@@ -726,12 +751,26 @@ impl Index {
         let mut folders_written = 0usize;
         let mut stale = 0usize;
 
+        // The vault's sync rules (#401): an excluded path leaves the index like a
+        // dot folder does. Only the INDEX rows go; the CRDT tables and file
+        // identities are keyed by doc_id and never touched here, so lifting the
+        // rule later brings the same note back with the same history.
+        let rules = crate::sync_rules::active(vault);
         for entry in WalkDir::new(vault)
             .into_iter()
             .filter_entry(|e| {
                 // Skip ignored dirs entirely (don't descend into .context/.git/dotfolders).
                 let name = e.file_name().to_string_lossy();
-                !(e.depth() > 0 && is_ignored_name(&name))
+                if e.depth() == 0 {
+                    return true;
+                }
+                if is_ignored_name(&name) {
+                    return false;
+                }
+                match (&rules, rel_from_abs(vault, e.path())) {
+                    (Some(r), Ok(rel)) => !r.excludes_entry(&rel, e.file_type().is_dir()),
+                    _ => true,
+                }
             })
             .filter_map(|e| e.ok())
         {
@@ -813,10 +852,56 @@ impl Index {
         }
 
         // Drop notes whose files are gone from disk.
+        let mut seen_folded: Option<HashMap<String, Option<String>>> = None;
         for (path, (id, _, rowid)) in &indexed {
             // A new path may already have claimed this ID by filesystem
             // identity. Never delete that relocated row from the old snapshot.
             if !seen_notes.contains(path) && self.id_for_path(&tx, path)?.as_ref() == Some(id) {
+                // The same file under this disk's spelling (`casef/b.md` on a
+                // disk whose folder is `CaseF/`): older builds indexed it a
+                // second time under a fresh id, and dropping THIS row kept the
+                // fresh one, so the note lost the id the server knows it by.
+                // When only this row has history, it takes the disk's spelling
+                // and the fresh row goes.
+                let folded = seen_folded.get_or_insert_with(|| {
+                    let mut m: HashMap<String, Option<String>> = HashMap::new();
+                    for p in &seen_notes {
+                        m.entry(link_key(p))
+                            .and_modify(|v| *v = None)
+                            .or_insert_with(|| Some(p.clone()));
+                    }
+                    m
+                });
+                if let Some(Some(twin)) = folded.get(&link_key(path)) {
+                    let twin_id = self.id_for_path(&tx, twin)?;
+                    let takes_over = match twin_id.as_deref() {
+                        None => true,
+                        Some(t) => t != id.as_str() && !id_has_history(&tx, t)?,
+                    };
+                    if takes_over && id_has_history(&tx, id)? {
+                        if let Some(t) = twin_id.as_deref() {
+                            let twin_rowid: i64 = tx.query_row(
+                                "SELECT rowid FROM notes WHERE id = ?1",
+                                params![t],
+                                |r| r.get(0),
+                            )?;
+                            Self::delete_note_rows(&tx, t, twin_rowid)?;
+                            tx.execute("DELETE FROM note_file_identity WHERE doc_id = ?1", params![t])?;
+                        }
+                        // Re-keyed in place (the upsert is by id), never deleted
+                        // first: an unreadable file keeps this row for the next open.
+                        let twin_abs = vault.join(twin);
+                        if skip_unreadable(self.index_one(&tx, vault, &twin_abs, Some(id.clone())), &twin_abs)?.is_some() {
+                            log::info!(
+                                "[index] {twin}: one row again, keyed by {id} (dropped the fresh twin {} left under another spelling)",
+                                twin_id.as_deref().unwrap_or("-")
+                            );
+                            notes_changed = true;
+                            stale += 1;
+                        }
+                        continue;
+                    }
+                }
                 Self::delete_note_rows(&tx, id, *rowid)?;
                 notes_changed = true;
                 stale += 1;
@@ -1118,7 +1203,7 @@ impl Index {
             let Ok(rel) = rel_from_abs(vault, abs) else {
                 continue;
             };
-            if !is_indexable_file(&rel) {
+            if !is_indexable_in(vault, &rel) {
                 continue;
             }
             let prior = self.file_state(&tx, &rel)?;
@@ -1319,9 +1404,35 @@ impl Index {
     /// folder subtree (prefix rewrite). Inbound links, keyed by `dst_note_id`,
     /// are untouched, so a *move* never breaks a link.
     pub fn rename_note(&self, vault: &Path, old_abs: &Path, new_abs: &Path) -> AppResult<()> {
+        self.rename_note_opts(vault, old_abs, new_abs, false)
+    }
+
+    /// [`Self::rename_note`], optionally leaving its whole-vault link pass for
+    /// later. Following a teammate's folder move renames hundreds of notes one
+    /// at a time, and the pass (every note's path and title, every link) cost
+    /// ~50 ms per note on a 1,200-note vault and grows with the vault: the
+    /// follow paid it N times under the index lock. With `defer_links` the
+    /// rename records `links_dirty` in the SAME transaction instead; the next
+    /// link pass of any kind runs in full and clears it
+    /// ([`Self::resolve_links`]), as do [`Self::flush_deferred_links`] (the
+    /// follow calls it once at the end) and the next open, so a crash
+    /// mid-follow still ends in exactly the links a per-rename pass gives.
+    /// Links already resolved are keyed by note id and stay right meanwhile;
+    /// only a link whose best match changes with these paths waits.
+    pub fn rename_note_opts(
+        &self,
+        vault: &Path,
+        old_abs: &Path,
+        new_abs: &Path,
+        defer_links: bool,
+    ) -> AppResult<()> {
         let old_rel = rel_from_abs(vault, old_abs)?;
         let new_rel = rel_from_abs(vault, new_abs)?;
         let tx = self.conn.unchecked_transaction()?;
+        // Did any NOTE row move? Link resolution reads nothing but the notes
+        // table, so a rename that moved none (a teammate's moved image, video
+        // or script, followed one file at a time) cannot change a single link.
+        let mut moved_notes = false;
 
         // Exact file rename/move (preserves doc_id).
         if let Some(id) = self.id_for_path(&tx, &old_rel)? {
@@ -1330,6 +1441,7 @@ impl Index {
                 params![new_rel, id],
             )?;
             Self::remember_file_identity(&tx, &id, &new_rel, new_abs)?;
+            moved_notes = true;
         }
 
         // Folder move: rewrite the path prefix of every descendant note, keeping
@@ -1343,6 +1455,7 @@ impl Index {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         for (id, path) in children {
+            moved_notes = true;
             let suffix = &path[old_prefix.len()..];
             let new_path = format!("{new_rel}/{suffix}");
             tx.execute(
@@ -1357,9 +1470,103 @@ impl Index {
         // and the ids are gathered above only for the descendants, so narrowing
         // here would be easy to get subtly wrong for a rename that changes a
         // basename other notes link to.
-        self.resolve_links(&tx, LinkScope::All)?;
+        //
+        // Skipped when no note moved: following a teammate's move of a folder
+        // holding 2,000 files paid this full pass once PER FILE (about 40 ms on a
+        // 1,200-note vault, held under the index lock every UI command and the
+        // watcher queue behind), which is what made such a move take minutes.
+        if moved_notes && defer_links {
+            tx.execute(
+                "INSERT OR IGNORE INTO index_flags (name) VALUES ('links_dirty')",
+                [],
+            )?;
+        } else if moved_notes {
+            self.resolve_links(&tx, LinkScope::All)?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Run the link pass a deferred rename owes, if any. True when one ran.
+    pub fn flush_deferred_links(&self) -> AppResult<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        if !Self::links_dirty(&tx)? {
+            return Ok(false);
+        }
+        // `resolve_links` sees the flag, runs in full and clears it.
+        self.resolve_links(&tx, LinkScope::All)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn links_dirty(tx: &Connection) -> AppResult<bool> {
+        Ok(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM index_flags WHERE name = 'links_dirty')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Give the note at `rel` the id the registry knows it by (the sync layer's
+    /// fork heal). Like `rebind_note_id`, but a row holding `doc_id` under
+    /// another spelling of the SAME path (a case/Unicode twin an older build
+    /// left) is dropped first instead of refusing. Any other holder refuses.
+    pub fn heal_note_id(&self, rel: &str, doc_id: &str) -> AppResult<bool> {
+        let Some(current) = self.id_for_path(&self.conn, rel)? else {
+            return Ok(false);
+        };
+        if current == doc_id {
+            return Ok(true);
+        }
+        let holder: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT path, rowid FROM notes WHERE id = ?1",
+                params![doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((held_at, rowid)) = holder {
+            if held_at == rel || link_key(&held_at) != link_key(rel) {
+                return Ok(false);
+            }
+            let tx = self.conn.unchecked_transaction()?;
+            Self::delete_note_rows(&tx, doc_id, rowid)?;
+            tx.commit()?;
+        }
+        let rebound = self.rebind_note_id(rel, doc_id)?;
+        if rebound {
+            log::info!("[index] {rel}: keyed by its registered id {doc_id} (was {current})");
+        }
+        Ok(rebound)
+    }
+
+    /// Key the note at `rel` by the doc a bridge just wrote it for.
+    ///
+    /// `write_note` re-indexes the bytes it lands, and `index_one` reuses an id
+    /// only for a path it has seen: a background bridge writing a teammate's
+    /// note that is not on disk yet (or not indexed yet) got a FRESH id, so the
+    /// editor (keyed by the index id) and sync (keyed by the server id) held two
+    /// Y.Docs for one file. The writer's id wins when the row is new or its id
+    /// holds no local CRDT and no disk base; a row with history of its own (or
+    /// another registered note's never-hydrated placeholder, which has a disk
+    /// base) is left alone, as is an id another path holds (`rebind_note_id`
+    /// refuses).
+    pub fn adopt_writer_id(&self, rel: &str, doc_id: &str) -> AppResult<bool> {
+        let Some(current) = self.id_for_path(&self.conn, rel)? else {
+            return Ok(false);
+        };
+        if current == doc_id {
+            return Ok(true);
+        }
+        if id_has_history(&self.conn, &current)? {
+            return Ok(false);
+        }
+        let rebound = self.rebind_note_id(rel, doc_id)?;
+        if rebound {
+            log::info!("[index] {rel}: keyed by its doc id {doc_id} (was a fresh local id {current})");
+        }
+        Ok(rebound)
     }
 
     /// Re-key the note row at `rel` to `doc_id`, keeping its content.
@@ -1678,6 +1885,14 @@ impl Index {
     fn resolve_links(&self, tx: &Connection, scope: LinkScope<'_>) -> AppResult<()> {
         #[cfg(test)]
         self.resolve_calls.set(self.resolve_calls.get() + 1);
+        // A deferred rename (`rename_note_opts`) is still owed a full pass: a
+        // narrower one now would leave the links its paths changed unresolved.
+        let scope = if Self::links_dirty(tx)? {
+            tx.execute("DELETE FROM index_flags WHERE name = 'links_dirty'", [])?;
+            LinkScope::All
+        } else {
+            scope
+        };
         // Build lookup maps from all notes.
         let mut by_basename: HashMap<String, String> = HashMap::new();
         let mut by_title: HashMap<String, String> = HashMap::new();
@@ -1846,6 +2061,24 @@ impl Index {
         Ok(true)
     }
 
+    /// Indexed note paths strictly below the folder `rel` (an exact path
+    /// prefix, case as stored). The watcher's present-folder sweep compares
+    /// them with what the walk found.
+    pub fn note_paths_under(&self, rel: &str) -> AppResult<Vec<String>> {
+        let prefix = format!("{rel}/");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM notes WHERE substr(path, 1, ?2) = ?1")?;
+        let rows = stmt.query_map(params![prefix, prefix.chars().count() as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     fn id_for_path(&self, tx: &Connection, rel: &str) -> AppResult<Option<String>> {
         Ok(tx
             .query_row("SELECT id FROM notes WHERE path = ?1", params![rel], |r| {
@@ -1881,12 +2114,25 @@ impl Index {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         // Hard links may share an identity. Never collapse ambiguous owners,
-        // and never adopt a copy while the old path still exists (any kind).
+        // and never adopt a copy while the old path still exists (any kind)...
         if let [(id, previous)] = candidates.as_slice() {
-            if std::fs::symlink_metadata(vault.join(previous))
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            {
-                return Ok(Some(id.clone()));
+            let prev_abs = vault.join(previous);
+            match std::fs::symlink_metadata(&prev_abs) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(id.clone())),
+                // ...unless the old path IS this file under another spelling: a
+                // case-insensitive disk answers `casef/b.md` for `CaseF/b.md`.
+                // A teammate's note written at the server's `casef/` into this
+                // disk's `CaseF/` folder is then reported by the watcher under
+                // the disk's spelling, and without this it got a SECOND row with
+                // a fresh id: the server's delete of the real id found no local
+                // note and the file came back for everyone as a new note.
+                Ok(_)
+                    if rel_from_abs(vault, abs).is_ok_and(|rel| rel != *previous && link_key(&rel) == link_key(previous))
+                        && note_file_identity::identity(&prev_abs).as_deref() == Some(file_id.as_str()) =>
+                {
+                    return Ok(Some(id.clone()));
+                }
+                _ => {}
             }
         }
         Ok(None)
@@ -4282,6 +4528,38 @@ mod tests {
     }
 
     #[test]
+    fn a_note_written_under_another_case_spelling_keeps_one_row_and_its_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        std::fs::create_dir(v.join("CaseF")).unwrap();
+        // Only a case-insensitive disk (macOS, Windows) makes the two spellings
+        // one file; on a case-sensitive one there is nothing to merge.
+        write_note(v, "casef/b.md", "# b").unwrap_or_default();
+        if !v.join("CaseF/b.md").exists() {
+            return;
+        }
+        let idx = Index::open(v).unwrap();
+        // The registry materializes the server's path and binds the server's id.
+        idx.index_note(v, &v.join("casef/b.md")).unwrap();
+        assert!(idx.rebind_note_id("casef/b.md", "server-id").unwrap());
+        // Then the watcher reports the same file under the disk's spelling.
+        idx.index_note(v, &v.join("CaseF/b.md")).unwrap();
+        let rows: Vec<(String, String)> = idx
+            .conn
+            .prepare("SELECT id, path FROM notes")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("server-id".to_string(), "CaseF/b.md".to_string())]);
+        // A real copy under a different name still gets its own row.
+        std::fs::copy(v.join("CaseF/b.md"), v.join("CaseF/copy.md")).unwrap();
+        idx.index_note(v, &v.join("CaseF/copy.md")).unwrap();
+        assert_ne!(idx.id_for_path(&idx.conn, "CaseF/copy.md").unwrap().as_deref(), Some("server-id"));
+    }
+
+    #[test]
     fn external_html_rename_preserves_id_in_split_watcher_batches() {
         let tmp = tempfile::tempdir().unwrap();
         let v = tmp.path();
@@ -4521,6 +4799,104 @@ mod tests {
     /// watcher indexes a fresh uuid, so sync must put the registry's
     /// doc_id back onto the row. Backlinks must survive the re-key.
     #[test]
+    fn heal_note_id_drops_a_case_twin_holding_the_id_but_refuses_another_note() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        std::fs::create_dir_all(v.join("CaseF")).unwrap();
+        std::fs::write(v.join("CaseF/b.md"), "# b\n").unwrap();
+        idx.rebuild(&v).unwrap();
+        idx.conn
+            .execute("INSERT INTO notes (id, path, title, mtime) VALUES ('server-id', 'casef/b.md', 'b', 0)", [])
+            .unwrap();
+        assert!(idx.heal_note_id("CaseF/b.md", "server-id").unwrap());
+        let rows: Vec<(String, String)> = idx
+            .conn
+            .prepare("SELECT id, path FROM notes WHERE lower(path) = 'casef/b.md'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("server-id".to_string(), "CaseF/b.md".to_string())]);
+        // An id another note holds is refused.
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().map(|m| m.id);
+        if let Some(alpha) = alpha {
+            assert!(!idx.heal_note_id("CaseF/b.md", &alpha).unwrap());
+            assert_eq!(idx.get_note_meta("CaseF/b.md").unwrap().unwrap().id, "server-id");
+        }
+    }
+
+    #[test]
+    fn a_reopen_heals_a_case_twin_left_by_an_older_build() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        // The disk folder is CaseF/; an older build left the server's spelling
+        // (casef/b.md, with history) AND a fresh row for the disk's spelling.
+        std::fs::create_dir_all(v.join("CaseF")).unwrap();
+        std::fs::write(v.join("CaseF/b.md"), "# b\n").unwrap();
+        idx.rebuild(&v).unwrap();
+        let fresh = idx.get_note_meta("CaseF/b.md").unwrap().unwrap().id;
+        idx.conn
+            .execute(
+                "INSERT INTO notes (id, path, title, mtime, sha256) VALUES ('server-id', 'casef/b.md', 'b', 0, NULL)",
+                [],
+            )
+            .unwrap();
+        idx.set_disk_base("server-id", "abc").unwrap();
+        idx.rebuild(&v).unwrap();
+        let rows: Vec<(String, String)> = idx
+            .conn
+            .prepare("SELECT id, path FROM notes WHERE lower(path) = 'casef/b.md'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("server-id".to_string(), "CaseF/b.md".to_string())], "fresh was {fresh}");
+        // A second reopen changes nothing.
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.get_note_meta("CaseF/b.md").unwrap().unwrap().id, "server-id");
+    }
+
+    #[test]
+    fn a_bridge_write_keys_a_new_file_by_the_writers_doc_id() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        // A background bridge lands a teammate's note that was not on disk yet.
+        std::fs::write(v.join("Arrived.md"), "# arrived\n").unwrap();
+        idx.index_note(&v, &v.join("Arrived.md")).unwrap();
+        let fresh = idx.get_note_meta("Arrived.md").unwrap().unwrap().id;
+        assert_ne!(fresh, "server-doc");
+        assert!(idx.adopt_writer_id("Arrived.md", "server-doc").unwrap());
+        assert_eq!(idx.get_note_meta("Arrived.md").unwrap().unwrap().id, "server-doc");
+        // A second write is a no-op.
+        assert!(idx.adopt_writer_id("Arrived.md", "server-doc").unwrap());
+
+        // A row whose own id holds local history keeps it.
+        let beta = idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id;
+        idx.append_yjs_update(&beta, &[0, 0]).unwrap();
+        assert!(!idx.adopt_writer_id("sub/Beta.md", "other-doc").unwrap());
+        assert_eq!(idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id, beta);
+
+        // So does one with a disk base (a registered note's placeholder).
+        std::fs::write(v.join("Placeholder.md"), "").unwrap();
+        idx.index_note(&v, &v.join("Placeholder.md")).unwrap();
+        let ph = idx.get_note_meta("Placeholder.md").unwrap().unwrap().id;
+        idx.set_disk_base(&ph, "e3b0").unwrap();
+        assert!(!idx.adopt_writer_id("Placeholder.md", "other-doc").unwrap());
+        assert_eq!(idx.get_note_meta("Placeholder.md").unwrap().unwrap().id, ph);
+
+        // An id another path already holds is refused, never merged.
+        std::fs::write(v.join("Second.md"), "x").unwrap();
+        idx.index_note(&v, &v.join("Second.md")).unwrap();
+        assert!(!idx.adopt_writer_id("Second.md", "server-doc").unwrap());
+        assert_eq!(idx.get_note_meta("Arrived.md").unwrap().unwrap().id, "server-doc");
+    }
+
+    #[test]
     fn rebind_note_id_rekeys_a_row_and_keeps_backlinks() {
         let (_tmp, v) = seed_vault();
         let idx = Index::open(&v).unwrap();
@@ -4610,6 +4986,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dst, Some(beta_id));
+    }
+
+    #[test]
+    fn renaming_a_non_note_file_skips_the_link_pass() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        std::fs::write(v.join("sub/photo.png"), b"png").unwrap();
+        std::fs::create_dir_all(v.join("pics")).unwrap();
+        std::fs::rename(v.join("sub/photo.png"), v.join("pics/photo.png")).unwrap();
+
+        let before = idx.resolve_call_count();
+        idx.rename_note(&v, &v.join("sub/photo.png"), &v.join("pics/photo.png"))
+            .unwrap();
+        assert_eq!(idx.resolve_call_count(), before, "no note moved, no link can change");
+
+        // A note (or a folder holding notes) still re-resolves.
+        std::fs::create_dir_all(v.join("other")).unwrap();
+        std::fs::rename(v.join("sub/Beta.md"), v.join("other/Beta.md")).unwrap();
+        idx.rename_note(&v, &v.join("sub/Beta.md"), &v.join("other/Beta.md"))
+            .unwrap();
+        assert_eq!(idx.resolve_call_count(), before + 1);
+        std::fs::rename(v.join("other"), v.join("other2")).unwrap();
+        idx.rename_note(&v, &v.join("other"), &v.join("other2")).unwrap();
+        assert_eq!(idx.resolve_call_count(), before + 2);
+    }
+
+    #[test]
+    fn a_deferred_link_pass_runs_once_and_survives_a_reopen() {
+        let (_tmp, v) = seed_vault();
+        // Alpha links [[sub/Beta]] by path: moving Beta breaks that match, the
+        // case a deferred pass must still settle.
+        write_note(&v, "Alpha.md", "# Alpha\n\n[[sub/Beta]]").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap().id;
+        let beta = idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id;
+        let dst = |idx: &Index| -> Option<String> {
+            idx.conn
+                .query_row(
+                    "SELECT dst_note_id FROM links WHERE src_note_id=?1 AND dst_path_raw LIKE 'sub/Beta%'",
+                    params![alpha],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(dst(&idx), Some(beta.clone()));
+
+        std::fs::create_dir_all(v.join("other")).unwrap();
+        std::fs::rename(v.join("sub/Beta.md"), v.join("other/Gamma2.md")).unwrap();
+        let before = idx.resolve_call_count();
+        idx.rename_note_opts(&v, &v.join("sub/Beta.md"), &v.join("other/Gamma2.md"), true)
+            .unwrap();
+        assert_eq!(idx.resolve_call_count(), before, "deferred: no pass yet");
+        assert!(Index::links_dirty(&idx.conn).unwrap());
+
+        // The flush runs the full pass once and clears the debt.
+        assert!(idx.flush_deferred_links().unwrap());
+        assert_eq!(idx.resolve_call_count(), before + 1);
+        assert!(!idx.flush_deferred_links().unwrap(), "nothing owed twice");
+        let settled = dst(&idx);
+
+        // Same rename on a fresh copy, never flushed: a reopen settles it the
+        // same way (an app quit mid-follow).
+        let (_tmp2, v2) = seed_vault();
+        write_note(&v2, "Alpha.md", "# Alpha\n\n[[sub/Beta]]").unwrap();
+        {
+            let idx2 = Index::open(&v2).unwrap();
+            idx2.rebuild(&v2).unwrap();
+            std::fs::create_dir_all(v2.join("other")).unwrap();
+            std::fs::rename(v2.join("sub/Beta.md"), v2.join("other/Gamma2.md")).unwrap();
+            idx2.rename_note_opts(&v2, &v2.join("sub/Beta.md"), &v2.join("other/Gamma2.md"), true)
+                .unwrap();
+        }
+        let idx2 = Index::open(&v2).unwrap();
+        assert!(!Index::links_dirty(&idx2.conn).unwrap(), "the open ran the owed pass");
+        let alpha2 = idx2.get_note_meta("Alpha.md").unwrap().unwrap().id;
+        let reopened: Option<String> = idx2
+            .conn
+            .query_row(
+                "SELECT dst_note_id FROM links WHERE src_note_id=?1 AND dst_path_raw LIKE 'sub/Beta%'",
+                params![alpha2],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reopened.is_some(), settled.is_some());
+
+        // A narrower pass that finds the debt runs in full instead.
+        std::fs::rename(v.join("other/Gamma2.md"), v.join("other/Gamma3.md")).unwrap();
+        idx.rename_note_opts(&v, &v.join("other/Gamma2.md"), &v.join("other/Gamma3.md"), true)
+            .unwrap();
+        let tx = idx.conn.unchecked_transaction().unwrap();
+        idx.resolve_links(&tx, LinkScope::Touched(&[])).unwrap();
+        tx.commit().unwrap();
+        assert!(!Index::links_dirty(&idx.conn).unwrap());
     }
 
     #[test]

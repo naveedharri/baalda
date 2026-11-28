@@ -13,7 +13,15 @@
 import { markAccessTreeStale } from "../accessTreeStale";
 import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
 import type { VaultAppearanceSettings } from "../appearanceSettings";
-import { NOT_CREATOR_DETAIL, NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
+import {
+  NOT_CREATOR_DETAIL,
+  NOT_CREATOR_MESSAGE,
+  VIEW_ONLY_DELETE_DETAIL,
+  VIEW_ONLY_DELETE_MESSAGE,
+  isNoEditDeleteRefusal,
+  isNotCreatorCode,
+  notCreatorCodeOf,
+} from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { NoteBridge } from "../bridge";
@@ -31,6 +39,16 @@ import { hintUpdateAvailable } from "../updateHint";
 import { isNoteExt } from "../formats";
 import { markOnce } from "../perf";
 import { api, authManager } from "../auth/authManager";
+import { normalizeFolders, normalizeTypes, patternsProblem, SyncRuleSet } from "../syncRules/match";
+import {
+  BAALDAIGNORE_FEATURE,
+  DEFAULT_BAALDAIGNORE,
+  isUsableRulesFile,
+  MORE_FILE_TYPES_FEATURE,
+  rulesDocFor,
+  rulesTextOf,
+  sameRulesText,
+} from "../syncRules/baaldaignore";
 import {
   isVaultKeyBlocked,
   onVaultKeyEvent,
@@ -43,6 +61,7 @@ import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import { statusToWire, type ActivityStatus } from "../prefs";
 import { toast } from "../toast";
+import { renameRefusedMessage } from "../renameGate";
 import { AttachmentSync, findEmbedReferences, routesToAttachmentSync } from "./attachments";
 import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
@@ -59,10 +78,12 @@ import { SEED_BATCH_MAX_ITEMS } from "./seedRegister";
 import {
   BOOTSTRAP_ONLY,
   FILES_WITH_BYTES,
+  EMPTY_FILES,
   FOLDER_DELETE_IF_EMPTY,
   serverFeatures as cachedServerFeatures,
 } from "../serverFeatures";
 import { collectCrdtGarbage } from "./crdtGc";
+import { healForkedIds } from "./forkHeal";
 import { pickUniqueEmptyRename } from "./emptyRename";
 import {
   IPC_CONCURRENCY,
@@ -102,7 +123,7 @@ import {
 import { bytesToBase64, type VoiceFrame } from "./vaultProtocol";
 import { svFromBase64 } from "./ackedSv";
 import { ReadOnlyRejections } from "./readOnlyRejections";
-import { setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
+import { setEmptyFileRefiller, setReadOnlyCopyKeeper } from "../bridge/readOnlyDocs";
 import { SyncPauseTracker, type SyncPause } from "./syncPause";
 import {
   createDeferredWithContent,
@@ -149,6 +170,10 @@ function reasonOf(err: unknown): string {
  */
 const REGISTRY_MAP_PUBLISH_MS = 100;
 
+/** How long a note's file must stay EXACTLY empty, while its doc holds text,
+ *  before the doc's text is written back over it (see `setEmptyFileRefiller`). */
+const EMPTY_FILE_REFILL_MS = 5_000;
+
 /**
  * Coalescing window for the presence re-announce a registry map change earns.
  *
@@ -170,6 +195,12 @@ const LOCAL_CHANGE_DEBOUNCE_MS = 800;
 const MERGE_PUSH_WAIT_MS = 60_000;
 /** Re-check interval while a bulk run holds the uploader slot. */
 const LOCAL_CHANGE_RETRY_MS = 2_000;
+/** A local change whose push failed for a reason a retry can fix (timeout,
+ *  5xx, a dropped socket) goes back on the queue this long after, at most
+ *  {@link LOCAL_CHANGE_MAX_RETRIES} times. Offline is not a retry: the queue
+ *  simply waits for the channel (`localChangesAwaitChannel`). */
+const LOCAL_CHANGE_FAILURE_RETRY_MS = 15_000;
+const LOCAL_CHANGE_MAX_RETRIES = 5;
 /**
  * Grace window before a disk-observed delete is propagated to the server.
  *
@@ -215,6 +246,12 @@ export const DELETE_DECISION_REASON =
   "removed from this folder in a bulk delete. It stays for your team and will be restored here";
 /** How long an appeared folder stays a candidate for a move's new half. */
 const FOLDER_CANDIDATE_TTL_MS = 10_000;
+/** How long after an over-cap note batch a vanished file beside it is refused
+ *  too (see `binaryBesideNoteDeletes`): long enough for the pull that puts
+ *  the folder back. */
+const HELD_BINARY_REFUSE_MS = 60_000;
+/** How long the text pass reuses one read of the lock view. */
+const READ_ONLY_TEXT_TTL_MS = 10_000;
 
 /** `path` is `folder` or inside it. */
 function isUnder(path: string, folder: string): boolean {
@@ -314,6 +351,7 @@ const USER_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullR
   "delete-confirmed",
   "revert",
   "shared-navigation",
+  "rules",
 ]);
 
 /**
@@ -384,7 +422,18 @@ export type RegistryPullReason =
   | "revert"
   // #221: the user answered a held bulk delete.
   | "delete-restore"
+  // #401: the vault's sync rules changed (this device saved them, or a frame).
+  | "rules"
   | "delete-confirmed"
+  // The attachment pass removed files a teammate deleted: their emptied
+  // folders are the registry's to remove.
+  | "deleted-files-removed"
+  // A pass released the claim on a deleted note's path that a new file holds
+  // now: the next pass registers it (`InboundHost.claimsReleased`).
+  | "claims-released"
+  // A file held back by a recent own delete of its path: asked again once the
+  // mark ages out (`InboundHost.pullAfter`).
+  | "own-delete-expired"
   // #262: a `meta` frame (last-edited stamps only), after its throttle.
   | "meta-frame";
 
@@ -444,6 +493,24 @@ const DOC_STATUS_OWNS_BADGE: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
   "deleted",
   "too-large",
 ]);
+
+/** How long a folder deleted on disk waits for its contents' deletes. */
+export const GONE_FOLDER_SETTLE_MS = 60_000;
+
+/**
+ * The delay before asking again whether a vanished folder is empty enough to
+ * delete on the server, or null to give up. Its notes and files go first, each
+ * by its own queue, and a big file's delete can take a while: the old fixed 4
+ * tries at the 2.5 s grace gave up after about 10 s, so a folder holding a
+ * 120 MB video stayed on the server and came back, empty, on every device
+ * (the deleting one too). Now: 2.5 s, 5 s, then 10 s, for up to
+ * {@link GONE_FOLDER_SETTLE_MS}. Registry pulls wait meanwhile (`goneFolders`),
+ * so nothing re-creates the folder while it waits.
+ */
+export function goneFolderRetryDelay(attempt: number, elapsedMs: number): number | null {
+  if (elapsedMs >= GONE_FOLDER_SETTLE_MS) return null;
+  return Math.min(DISK_DELETE_GRACE_MS * 2 ** Math.max(0, attempt - 1), 10_000);
+}
 
 export class SyncManager implements InboundHost {
   registry = new VaultRegistry(api);
@@ -660,6 +727,8 @@ export class SyncManager implements InboundHost {
   private readOnlyRejections: ReadOnlyRejections | null = null;
   /** Read-only docs whose differing file already has its quiet copy this session. */
   private readonly readOnlyCopied = new Set<string>();
+  /** Docs whose empty file is waiting to be written back (see the refiller). */
+  private readonly emptyRefills = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * The collection id {@link vaultEngine} was started for.
    *
@@ -785,6 +854,10 @@ export class SyncManager implements InboundHost {
    *  .md on disk. Drained by {@link runLocalChangePush}, debounced so a burst
    *  (an AI writing many files) coalesces into one run. */
   private localChanges = new Map<string, string>();
+  /** The local-change drain found the channel down and kept its queue. */
+  private localChangesAwaitChannel = false;
+  /** Failed-push retries per doc for the local-change queue. */
+  private localChangeAttempts = new Map<string, number>();
   /** Resolvers waiting for the next local-change drain to finish (#284). */
   private localDrainWaiters: Array<() => void> = [];
   /** The closed-app edits pass ran for this vault open (#284). */
@@ -825,9 +898,23 @@ export class SyncManager implements InboundHost {
   private folderCandidates = new Map<string, number>();
   /** {@link drainFolderMoves} is deciding: `goneFolders` was already taken. */
   private pairingFolders = false;
+  /** Paths removed on disk while a folder move was being paired, which no
+   *  mapping named yet (the notes were still recorded under the old folder).
+   *  Judged again once the move has re-pointed them (path → seenAt). */
+  private removedWhilePairing = new Map<string, number>();
   /** {@link drainDiskDeletes} is running: it took `goneFolders` and the pending
    *  deletes at its start, so they no longer show that a pull must wait. */
   private diskDeleteDrainsInFlight = 0;
+  /** Folders of the last over-cap note batch (held or refused), and when. The
+   *  binary delete queue refuses files under them for a while: before, a folder
+   *  deleted in Finder came back with its notes and without its files, which
+   *  had already been deleted for everyone. */
+  private heldDeleteDirs: { dirs: string[]; at: number } | null = null;
+  /** The text pass's cached lock view (see `readOnlyPaths` in the attachment wiring). */
+  private readOnlyForText: { at: number; check: Promise<(relPath: string) => boolean> } | null = null;
+  /** Docs the running disk-delete drain is judging (rename or delete). Their
+   *  incoming updates are held like those of a pending delete. */
+  private drainingDocs = new Set<string>();
   /**
    * The vault root folder is gone while the app is open (#221): renamed, moved
    * or unmounted. Latched until the vault is reopened (teardown clears it);
@@ -892,9 +979,10 @@ export class SyncManager implements InboundHost {
    * event is what would let an unrelated permission change plus one transient
    * short listing take a whole vault off disk.
    *
-   * It shrinks in exactly one way: when the access-check round trip contradicts
-   * an entry ({@link revocationRefused}), which is the server's own resolver
-   * saying the doc is readable after all.
+   * It shrinks only on evidence the doc is readable: the access-check round
+   * trip contradicts an entry, or a registry pull finds the note or file in its
+   * listing again (both through {@link revocationRefused}). Emptied, it reads as
+   * null, the same as a fresh session that was never told anything.
    */
   private serverRevoked = new Set<string>();
   /** Docs holding local-only ops from an out-of-band merge (a resident bridge
@@ -1024,6 +1112,16 @@ export class SyncManager implements InboundHost {
   private docStatus: SyncStatus | null = null;
   /** Latest vault-channel status (the always-on background feed). */
   private vaultStatus: VaultSyncStatus = "idle";
+  /**
+   * The vault channel WAS synced and has dropped since (offline, server down).
+   * Disk deletes made meanwhile wait for it instead of failing: a network error
+   * used to count as a refusal, so the next pull after reconnecting put the
+   * deleted note back (and a binary came back after three listing failures).
+   * Never set before a first `synced`, so a startup is still judged by
+   * `isLive`, never by this.
+   */
+  private channelDown = false;
+  private deletesAwaitChannel = false;
 
   // Vault-wide presence: which teammate is viewing which note. Keyed by userId
   // (last-write-wins across a user's devices), fed by the engine's presence
@@ -1454,6 +1552,24 @@ export class SyncManager implements InboundHost {
     this.onAclChangedListener = cb;
   }
 
+  /** Doc ids whose disk delete THIS session sent to the server and the server
+   *  accepted: the only evidence that a note is "removed for the team". */
+  private readonly deletedForTeam = new Set<string>();
+  private onDeletedForTeam: ((docId: string) => void) | undefined;
+
+  /** Did the server accept this session's delete of that doc? */
+  wasDeletedForTeam(docId: string): boolean {
+    return this.deletedForTeam.has(docId);
+  }
+
+  /** UI subscribes here to re-word the open note's "deleted on disk" banner
+   *  once the delete actually reached the team (never before the server said so:
+   *  a refused delete or move is put back, and the banner used to say "removed
+   *  for the team" anyway). */
+  setDeletedForTeamListener(cb: ((docId: string) => void) | undefined): void {
+    this.onDeletedForTeam = cb;
+  }
+
   /**
    * UI subscribes here for the open vault's {relPath → docId} index
    * (`store.docIdByPath`) — the bridge between rows, which the sidebar knows by
@@ -1652,6 +1768,7 @@ export class SyncManager implements InboundHost {
     // text the server refused with a 403.
     if (reason === "reauth" || reason === "acl-revoked") {
       this.attachments?.forgetTextRefusals();
+      this.attachments?.forgetAccessRefusals();
     }
     // Which trigger asked for this pull. A pull that keeps re-arming itself is
     // invisible without this line — the badge just blinks "Syncing" — and the
@@ -1659,7 +1776,14 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
-    if (reason === "registry-frame") this.attachmentsOwedByFrame = true;
+    // A reconnect may have missed a `sync-rules-changed` frame (#401).
+    if (reason === "channel-synced") {
+      const scope = this.scope;
+      if (scope?.isCurrent() && scope.orgId) void this.refreshSyncRules(scope, scope.orgId);
+    }
+    // A reconnect owes the blob mirror a pass too: downloads cut off by the drop
+    // are retried even when the catch-up pull finds no registry change.
+    if (reason === "registry-frame" || reason === "channel-synced") this.attachmentsOwedByFrame = true;
     this.armRegistryPull(reason, opts?.fileChange === true);
   }
 
@@ -1690,7 +1814,8 @@ export class SyncManager implements InboundHost {
       : 250;
     if (USER_PULL_REASONS.has(reason)) this.releasePullBrake();
     const idle = this.registryPullIdleStreak;
-    if (BRAKED_PULL_REASONS.has(reason) && idle >= REGISTRY_PULL_BRAKE_AFTER) {
+    const braked = BRAKED_PULL_REASONS.has(reason) && idle >= REGISTRY_PULL_BRAKE_AFTER;
+    if (braked) {
       let wait = Math.min(
         REGISTRY_PULL_BRAKE_MAX_MS,
         REGISTRY_PULL_BRAKE_BASE_MS * 2 ** Math.min(idle - REGISTRY_PULL_BRAKE_AFTER, 8),
@@ -1705,6 +1830,15 @@ export class SyncManager implements InboundHost {
       }
     }
     const dueAt = now + delay;
+    if (this.registryPullTimer && braked && dueAt > this.registryPullDueAt) {
+      // A braked request never pushes back a pull already due sooner: it rides
+      // that pull, which answers it too. Without this, a teammate's new note
+      // (a registry frame, due in ~2 s) followed by the `reauth` the server
+      // sends with it waited out the brake instead: 4, 8, 16, 30 s for a member
+      // whose pulls change nothing (2026-11-28 five-app test).
+      if (!gapDelayed) this.registryPullGapOnly = false;
+      return;
+    }
     if (this.registryPullTimer) {
       // Already armed. Re-arming is the coalescing, but only up to a point: past
       // REGISTRY_PULL_MAX_WAIT_MS the frames are a storm, not a burst, and
@@ -1895,6 +2029,12 @@ export class SyncManager implements InboundHost {
 
   /** True while the blob mirror has a debounced pass armed — the binary half of
    *  {@link hasPendingRegistryPull} (teardown assertions / tests). */
+  /** Tree binaries on this disk the server does not hold and no pass sends,
+   *  with why (`AttachmentSync.localOnlyPaths`). */
+  localOnlyFilePaths(): Array<[path: string, why: "unsynced" | "kept"]> {
+    return this.attachments?.localOnlyPaths() ?? [];
+  }
+
   hasPendingAttachmentReconcile(): boolean {
     return this.attachments?.hasPendingReconcile() ?? false;
   }
@@ -1929,10 +2069,40 @@ export class SyncManager implements InboundHost {
   private async scanClosedAppEdits(scope: VaultScope): Promise<void> {
     if (this.closedEditsScanned || this.rootMissing) return;
     this.closedEditsScanned = true;
+    await this.closedEditsPass(scope);
+  }
+
+  /** Registered folders still on disk that a `tree` event named: their files
+   *  may be other files now (a swap), which no file event reported. */
+  private presentFolderSweeps = new Set<string>();
+
+  /**
+   * After a folder-move drain: the mapped notes under a registered folder that
+   * a `tree` event named while it was still there. A whole directory moved is
+   * ONE event, so a path under a folder that stayed can hold other bytes now
+   * (`mv A t; mv B A; mv t B`) and no file event says so; the watcher re-hashed
+   * the index rows under it and the closed-app pass pushes what drifted from
+   * its disk base, with every gate it applies (view-only, equal to the CRDT,
+   * the open note, empty files). Run after the drain, never before: a rotation
+   * reads B's notes against B's CRDT, and ingesting A's bytes into them first
+   * made the rotation unreadable (2026-11-28 five-app swap test: the owner's
+   * disk showed both notes swapped while the server and every teammate kept
+   * the old text, with no error).
+   */
+  private async sweepPresentFolders(scope: VaultScope): Promise<void> {
+    if (this.presentFolderSweeps.size === 0 || !scope.isCurrent() || this.rootMissing) return;
+    if (this.diskDeleteTimer || this.channelDown || this.liveSince == null) return; // the next drain takes them
+    const folders = [...this.presentFolderSweeps];
+    this.presentFolderSweeps.clear();
+    const under = (p: string) => folders.some((f) => isUnder(p, f));
+    await this.closedEditsPass(scope, under);
+  }
+
+  private async closedEditsPass(scope: VaultScope, only?: (relPath: string) => boolean): Promise<void> {
     const result = await runClosedAppEdits({
       isLive: () => this.liveSince != null,
       isCurrent: () => scope.isCurrent() && this.enabled,
-      mappedNotes: () => this.registry.mappedNotes(),
+      mappedNotes: () => (only ? this.registry.mappedNotes().filter((n) => only(n.relPath)) : this.registry.mappedNotes()),
       listDrift: (entries) => ipc.listDiskDrift(entries, scope.vaultEpoch),
       openDocId: () => this.docStore?.suppressedDoc() ?? null,
       isPermanentFailure: (docId) => this.permanentFailures.has(docId),
@@ -1946,6 +2116,12 @@ export class SyncManager implements InboundHost {
       docText: (docId) => this.localText(docId),
       fileText: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
       recordBase: (docId, sha256) => ipc.setDiskBase(docId, sha256, scope.vaultEpoch),
+      // Still exactly empty right now, and only from a CRDT that holds text.
+      refillEmpty: async (docId, relPath) => {
+        if ((await ipc.readNote(relPath, scope.vaultEpoch).catch(() => null)) !== "") return false;
+        if (!scope.isCurrent()) return false;
+        return this.materializeContent(docId, relPath);
+      },
       enqueue: (chunk) => {
         for (const n of chunk) {
           this.emptyEverywhere.delete(n.docId);
@@ -1957,7 +2133,8 @@ export class SyncManager implements InboundHost {
       log: (message) => this.note("info", "closed-app-edits", message),
     });
     if (result && result.queued > 0) {
-      this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
+      if (only) console.info(`[sync] ${result.queued} notes under a folder changed on disk are going out`);
+      else this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
     }
   }
 
@@ -2067,6 +2244,10 @@ export class SyncManager implements InboundHost {
    * only stopped sharing. See `BinaryDeleteQueue.suppressNext`.
    */
   suppressBinaryDelete(relPath: string): void {
+    // The registry's mark too: the queue's own claim is spent by the FIRST
+    // event for the path, and a second report of the same removal must not
+    // become a server delete either.
+    this.registry.markOwnRemovals?.([relPath]);
     this.binaryDeletes?.suppressNext(relPath);
   }
 
@@ -2221,6 +2402,9 @@ export class SyncManager implements InboundHost {
   }
 
   handleServerRevoked(docIds: string[], truncated: boolean, scope: VaultScope): void {
+    // A note the sync rules hide is outside sync: what happens to its access
+    // changes nothing on this disk (#401).
+    docIds = docIds.filter((id) => !this.registry.isParked(id));
     if (!scope.isCurrent() || docIds.length === 0) return;
     this.aclChangedAt = Date.now();
     // Unioned, never replaced: a later connect's list is bounded by whatever is
@@ -2342,7 +2526,9 @@ export class SyncManager implements InboundHost {
       // to Trash is a rename). Held for the drain, which pairs it with a folder
       // that appeared (#221); on its own it changes nothing it did not before.
       if (kind === "tree" && gone === true) {
-        if (relPath && this.registry.getFolderId?.(relPath)) {
+        // A folder the registry removed itself (an access change, a teammate's
+        // delete) is not one the user deleted on disk.
+        if (relPath && this.registry.getFolderId?.(relPath) && !this.registry.isOwnRemoval?.(relPath)) {
           this.goneFolders.set(relPath, Date.now());
           this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
           queuedDelete = true;
@@ -2384,6 +2570,12 @@ export class SyncManager implements InboundHost {
         // pass, ~1.5 s apart, for days (#98). The plan bug is fixed too, but no
         // planner asymmetry may ever be able to chain pulls through us again.
         if (this.registry.consumeMaterialized(relPath)) continue;
+        // A registered folder still there: what is inside may be other files
+        // now (see `sweepPresentFolders`), checked once the drain has run.
+        if (gone !== true && relPath && this.registry.getFolderId?.(relPath) && this.liveSince != null) {
+          this.presentFolderSweeps.add(relPath);
+          if (!this.diskDeleteTimer) this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+        }
         // A path that APPEARED and that no registered folder owns yet: possibly
         // the new half of a folder move. Recorded either way; the drain checks
         // that it really is a folder before pairing anything with it.
@@ -2412,10 +2604,16 @@ export class SyncManager implements InboundHost {
       if (!mapping) {
         // Possibly the arrival half of a rename whose departure half is pending.
         // Recorded either way; `drainDiskDeletes` decides by content hash.
-        if (
-          (this.pendingDiskDeletes.size > 0 || this.goneFolders.size > 0) &&
-          !this.registry.isOwnMove?.(relPath)
-        ) {
+        // Only the path an own move put a file ONTO is skipped (a conflict
+        // copy, the name a followed move gave the note): pairing it renamed a
+        // teammate's note on the server. The name a move took a file FROM is
+        // the person's again at once, like `queueDiskDelete`: a note a
+        // teammate moved and this person moved straight back must pair as a
+        // rename, or its old path went out as a delete for everyone and the
+        // words came back as a new note (2026-11-28 five-app test).
+        const ownMoveTarget =
+          this.registry.isOwnMove?.(relPath) === true && this.registry.isOwnMoveSource?.(relPath) !== true;
+        if ((this.pendingDiskDeletes.size > 0 || this.goneFolders.size > 0) && !ownMoveTarget) {
           this.renameCandidates.set(relPath, Date.now());
           queuedDelete = true; // hold the pull until the drain has decided
         }
@@ -2498,13 +2696,30 @@ export class SyncManager implements InboundHost {
    */
   private queueDiskDelete(scope: VaultScope, relPath: string): boolean {
     if (this.liveSince == null) return false;
-    // The registry moved this file itself (a same-path conflict copy): the path
-    // is still the teammate's note and is about to be materialized back. Neither
-    // a delete nor half of a rename — pairing it renamed their note on the server.
-    if (this.registry.isOwnMove?.(relPath)) return false;
+    // The registry removed this file itself: a revocation or a teammate's
+    // delete applied here, never this user deleting it (#419, #420).
+    if (this.registry.isOwnRemoval?.(relPath)) return false;
+    // The registry moved this file AWAY from here itself (a same-path conflict
+    // copy, a refused rename put back): the path is still the teammate's note
+    // or about to hold the file again. Neither a delete nor half of a rename —
+    // pairing it renamed their note on the server. The path a move put a file
+    // ONTO is not skipped: deleting it right after is a real delete.
+    if (this.registry.isOwnMoveSource?.(relPath) ?? this.registry.isOwnMove?.(relPath)) return false;
+    // The file a move put here is gone again: a later arrival here is the
+    // person's own (a move straight back), so it may pair as a rename.
+    this.registry.releaseOwnMoveTarget?.(relPath);
     const mapping = this.registry.getMapping(relPath);
-    if (!mapping) return false;
-    if (!this.registry.isPushed(mapping.docId)) {
+    if (!mapping) {
+      // Inside a folder that just moved on disk, before the move is paired: the
+      // note is still mapped at its old path. Dropped here, the next pull wrote
+      // it back as an empty file and the delete was lost.
+      if (this.pairingFolders || this.goneFolders.size > 0 || this.diskDeleteDrainsInFlight > 0) {
+        if (this.removedWhilePairing.size > 50_000) this.removedWhilePairing.clear();
+        this.removedWhilePairing.set(relPath, Date.now());
+      }
+      return false;
+    }
+    if (!(this.registry.serverHoldsContent?.(mapping.docId) ?? this.registry.isPushed(mapping.docId))) {
       console.info(
         `[sync] ${relPath} was deleted on disk but its content was never confirmed on the server — not propagating`,
       );
@@ -2522,6 +2737,9 @@ export class SyncManager implements InboundHost {
     if (docId === undefined) return;
     this.pendingDeleteByPath.delete(relPath);
     this.pendingDiskDeletes.delete(docId);
+    // The file is back: anything held for it applies there now.
+    const scope = this.scope;
+    if (scope?.isCurrent()) this.settleParkedDocs(scope, null, 0);
   }
 
   private armDiskDeleteDrain(scope: VaultScope, delayMs: number): void {
@@ -2529,9 +2747,10 @@ export class SyncManager implements InboundHost {
     this.diskDeleteTimer = setTimeout(() => {
       this.diskDeleteTimer = null;
       if (!scope.isCurrent()) return;
-      void this.drainDiskDeletes(scope).catch((e) =>
-        console.warn("[sync] disk delete drain failed", e),
-      );
+      void this.drainDiskDeletes(scope)
+        .catch((e) => console.warn("[sync] disk delete drain failed", e))
+        .then(() => this.sweepPresentFolders(scope))
+        .catch((e) => console.warn("[sync] present-folder sweep failed", e));
     }, delayMs);
   }
 
@@ -2563,15 +2782,41 @@ export class SyncManager implements InboundHost {
    */
   private async drainDiskDeletes(scope: VaultScope): Promise<void> {
     if (!this.enabled || !scope.isCurrent()) return;
-    let pending = [...this.pendingDiskDeletes].map(([docId, e]) => ({
-      docId,
-      relPath: e.relPath,
-    }));
+    // Offline: decide nothing and drop nothing. The pending maps stay as they
+    // are (which also keeps the registry pull waiting, see
+    // `pullAfterDiskDeletes`), and the drain runs again the moment the channel
+    // is back, ahead of the reconnect pull.
+    if (this.channelDown) {
+      this.deletesAwaitChannel = true;
+      return;
+    }
+    // A path the registry removed itself never leaves as a user delete, however
+    // it got here (the second rail behind `queueDiskDelete`, #419).
+    const ownRemoval = (relPath: string) => this.registry.isOwnRemoval?.(relPath) === true;
+    let pending = [...this.pendingDiskDeletes]
+      .map(([docId, e]) => ({ docId, relPath: e.relPath }))
+      .filter((p) => !ownRemoval(p.relPath));
     this.pendingDiskDeletes.clear();
     this.pendingDeleteByPath.clear();
+    for (const p of pending) this.drainingDocs.add(p.docId);
+    // Notes under a vanished folder too: a resident bridge keeps the path it
+    // was promoted at, so it is retired with the drained notes at the end.
+    const goneAtStart = [...this.goneFolders.keys()];
+    // Whether this drain decides any NOTE delete, or only asks again whether a
+    // folder whose notes already went is empty yet (see binaryBesideNoteDeletes).
+    this.drainDecidesNotes = pending.length > 0 || goneAtStart.some((f) => !this.goneFolderAttempts.has(f));
+    const underGone =
+      goneAtStart.length === 0
+        ? []
+        : this.registry
+            .mappedNotes()
+            .filter((n) => goneAtStart.some((f) => isUnder(n.relPath, f)))
+            .map((n) => n.docId);
+    for (const id of underGone) this.drainingDocs.add(id);
+    const drained = [...new Set([...pending.map((p) => p.docId), ...underGone])];
     let candidates = [...this.renameCandidates.keys()];
     this.renameCandidates.clear();
-    const goneFolders = [...this.goneFolders.keys()];
+    const goneFolders = [...this.goneFolders.keys()].filter((f) => !ownRemoval(f));
     this.goneFolders.clear();
     /** Vanished registered folders this drain may remove from the server once
      *  their contents are gone (see {@link propagateGoneFolders}): not the ones
@@ -2601,6 +2846,21 @@ export class SyncManager implements InboundHost {
           this.pairingFolders = false;
         }
         if (!scope.isCurrent() || this.rootMissing) return;
+        // Removed inside the new folder while the move was being paired: mapped
+        // there now, so they are judged in this drain like any other delete.
+        if (this.removedWhilePairing.size > 0) {
+          const late = [...this.removedWhilePairing.keys()].filter((p) => out.movedTo.some((t) => isUnder(p, t)));
+          this.removedWhilePairing.clear();
+          const lateSet = new Set(late);
+          for (const p of late) this.queueDiskDelete(scope, p);
+          for (const [docId, e] of [...this.pendingDiskDeletes]) {
+            if (!lateSet.has(e.relPath)) continue;
+            this.pendingDiskDeletes.delete(docId);
+            this.pendingDeleteByPath.delete(e.relPath);
+            this.drainingDocs.add(docId);
+            pending.push({ docId, relPath: e.relPath });
+          }
+        }
         foldersToRemove = foldersToRemove.filter((g) => !out.movedFrom.some((f) => isUnder(g, f)));
         pending = pending.filter((p) => !out.movedFrom.some((f) => isUnder(p.relPath, f)));
         candidates = candidates.filter((c) => !out.movedTo.some((t) => isUnder(c, t)));
@@ -2635,8 +2895,36 @@ export class SyncManager implements InboundHost {
         { concurrency: REGISTRY_CONCURRENCY, shouldStop: () => !scope.isCurrent() },
       );
       if (!scope.isCurrent()) return;
-      const gone = stillGone.filter((x): x is { docId: string; relPath: string } => x != null);
+      let gone = stillGone.filter((x): x is { docId: string; relPath: string } => x != null);
       if (gone.length === 0) return;
+
+      // 1b. Moved INTO a folder the vault's sync rules hide (#401), e.g. in
+      //     Finder: the watcher never reports the new half as a change, only as
+      //     `ignored`. Same text there ⇒ the note is parked, never deleted for
+      //     everyone; the server copy stays where it was for the team.
+      if (this.recentIgnored.size > 0) {
+        const hidden = await this.hiddenArrivals(scope);
+        if (!scope.isCurrent()) return;
+        if (hidden.size > 0) {
+          const kept: typeof gone = [];
+          for (const item of gone) {
+            const text = await this.docText(item.docId, item.relPath);
+            if (!scope.isCurrent()) return;
+            // An empty note pairs with an empty hidden file too: a wrong pairing
+            // only keeps the server copy, the safe direction.
+            const sha = text == null ? null : await sha256Hex(text);
+            const to = sha ? hidden.get(sha)?.shift() : undefined;
+            if (sha && to) {
+              this.registry.parkMovedOut(item.docId, item.relPath, to);
+              this.tellMovedToHidden(item.relPath);
+              continue;
+            }
+            kept.push(item);
+          }
+          gone = kept;
+          if (gone.length === 0) return;
+        }
+      }
 
       // 2. Blast radius FIRST (see {@link diskDeleteCap}) — but ONLY for a
       //    window that carries no rename candidates at all.
@@ -2732,8 +3020,12 @@ export class SyncManager implements InboundHost {
       }
 
       // 4. The user already removed these files from disk. Propagate that final
-      //    choice without manufacturing another retained copy.
-      await this.propagateAndForget(deletes, scope);
+      //    choice without manufacturing another retained copy. Asked once more
+      //    right before the request: the pairing above awaited, and a removal
+      //    pass may have started meanwhile.
+      const finalDeletes = deletes.filter((d) => !ownRemoval(d.relPath));
+      if (finalDeletes.length === 0) return;
+      await this.propagateAndForget(finalDeletes, scope);
     } finally {
       if (folderStep && foldersToRemove.length > 0 && scope.isCurrent() && !this.rootMissing) {
         try {
@@ -2743,6 +3035,17 @@ export class SyncManager implements InboundHost {
         }
       }
       this.diskDeleteDrainsInFlight = Math.max(0, this.diskDeleteDrainsInFlight - 1);
+      // Updates held while these were judged land now, at the path the drain
+      // left them (a rename's new path; a deleted doc no longer resolves).
+      // A resident bridge keeps the path it was promoted at, so retire it
+      // first: the held update then takes the cold path, which asks the
+      // registry and writes at the renamed path, never the old one.
+      if (drained.length > 0 && scope.isCurrent()) {
+        const store = this.docStore;
+        if (store) await Promise.all(drained.map((id) => store.release(id).catch(() => {})));
+      }
+      for (const id of drained) this.drainingDocs.delete(id);
+      if (drained.length > 0 && scope.isCurrent()) this.settleParkedDocs(scope, null, 0);
       // Whatever happened above, a batch that asked for a pull gets one now —
       // unless the vault root is gone, when no pull may run at all.
       if (this.pullAfterDiskDeletes && scope.isCurrent() && !this.rootMissing) {
@@ -2752,8 +3055,13 @@ export class SyncManager implements InboundHost {
     }
   }
 
-  /** Retries per vanished folder whose contents were still settling. */
-  private readonly goneFolderAttempts = new Map<string, number>();
+  /** Does the running disk-delete drain decide any note delete (or only
+   *  re-ask a vanished folder that waits for its contents)? */
+  private drainDecidesNotes = false;
+
+  /** Retries per vanished folder whose contents were still settling, and when
+   *  the first one was made (see {@link goneFolderRetryDelay}). */
+  private readonly goneFolderAttempts = new Map<string, { n: number; since: number }>();
 
   /**
    * The last step of a disk-delete window: a registered folder that vanished
@@ -2784,7 +3092,11 @@ export class SyncManager implements InboundHost {
       if (!exists) stillGone.push(top);
     }
     if (!scope.isCurrent() || stillGone.length === 0) return;
-    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))].sort(
+    const all = [...new Set(stillGone.flatMap((t) => this.registry.mappedFoldersUnder(t)))]
+      // A subfolder the registry removed itself (an access change) is not part
+      // of what the user deleted (#419).
+      .filter((p) => !this.registry.isOwnRemoval?.(p))
+      .sort(
       (a, b) => b.split("/").length - a.split("/").length || b.localeCompare(a),
     );
     if (all.length === 0) return;
@@ -2813,14 +3125,19 @@ export class SyncManager implements InboundHost {
         this.goneFolderAttempts.delete(top);
         continue;
       }
-      const n = (this.goneFolderAttempts.get(top) ?? 0) + 1;
-      if (n > 4) {
+      const now = Date.now();
+      const prev = this.goneFolderAttempts.get(top);
+      const n = (prev?.n ?? 0) + 1;
+      const since = prev?.since ?? now;
+      const delay = goneFolderRetryDelay(n, now - since);
+      if (delay === null) {
         this.goneFolderAttempts.delete(top);
+        console.warn(`[sync] ${top}: its contents were still being deleted after ${Math.round((now - since) / 1000)} s; the folder stays on the server`);
         continue;
       }
-      this.goneFolderAttempts.set(top, n);
-      this.goneFolders.set(top, Date.now());
-      this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+      this.goneFolderAttempts.set(top, { n, since });
+      this.goneFolders.set(top, now);
+      this.armDiskDeleteDrain(scope, delay);
     }
   }
 
@@ -2843,6 +3160,8 @@ export class SyncManager implements InboundHost {
           `${d.relPath} was deleted on this device and removed from the server for everyone`,
           { docId: d.docId, path: d.relPath },
         );
+        this.deletedForTeam.add(d.docId);
+        this.onDeletedForTeam?.(d.docId);
         // The OPEN note keeps its bridge deliberately. The editor is still
         // mounted (the banner offers to close it), and destroying the Y.Doc
         // under CodeMirror throws on the next keystroke — which is why the
@@ -2931,6 +3250,7 @@ export class SyncManager implements InboundHost {
       if (!scope.isCurrent()) return propagated;
       const byPath = new Map(outcomes.map((o) => [o.path, o]));
       const putBack: Array<{ docId: string; relPath: string }> = [];
+      const viewOnly: Array<{ docId: string; relPath: string }> = [];
       for (const d of deleted) {
         const out = byPath.get(d.relPath);
         if (out?.status === "deleted") {
@@ -2941,9 +3261,14 @@ export class SyncManager implements InboundHost {
           putBack.push(d);
           continue;
         }
+        if (out?.status === "denied") {
+          viewOnly.push(d);
+          continue;
+        }
         refused(d, out?.reason ?? "the server did not answer for this note", out?.code ?? null);
       }
       await this.putBackNotCreator(putBack, scope);
+      await this.putBackNotCreator(viewOnly, scope, VIEW_ONLY_DELETE_MESSAGE);
       return propagated;
     }
 
@@ -2956,6 +3281,10 @@ export class SyncManager implements InboundHost {
         } catch (e) {
           if (notCreatorCodeOf(e)) {
             await this.putBackNotCreator([d], scope);
+            return;
+          }
+          if (isNoEditDeleteRefusal(e)) {
+            await this.putBackNotCreator([d], scope, VIEW_ONLY_DELETE_MESSAGE);
             return;
           }
           // Offline, or the server refused (no edit grant). The mapping is
@@ -2984,14 +3313,16 @@ export class SyncManager implements InboundHost {
   private async putBackNotCreator(
     items: ReadonlyArray<{ docId: string; relPath: string }>,
     scope: VaultScope,
+    why: string = NOT_CREATOR_MESSAGE,
   ): Promise<void> {
+    const detail = why === VIEW_ONLY_DELETE_MESSAGE ? VIEW_ONLY_DELETE_DETAIL : NOT_CREATOR_DETAIL;
     for (const d of items) {
       if (!scope.isCurrent()) return;
-      await this.registry.restoreRefusedDelete(d.relPath, d.docId);
+      await this.registry.restoreRefusedDelete(d.relPath, d.docId, detail);
       this.note(
         "info",
         "disk-delete",
-        `${d.relPath} was put back: ${NOT_CREATOR_MESSAGE.toLowerCase()}`,
+        `${d.relPath} was put back: ${why.charAt(0).toLowerCase()}${why.slice(1)}`,
         { docId: d.docId, path: d.relPath },
       );
     }
@@ -3140,7 +3471,31 @@ export class SyncManager implements InboundHost {
   ): Promise<void> {
     console.info(`[sync] ${from} → ${to} (renamed on disk; keeping doc ${docId})`);
     try {
-      await this.registry.renamePath(from, to);
+      const res = await this.registry.moveOnServer(from, to);
+      if (!res.ok && res.refused) {
+        // The server will not take this rename (the person can only view the
+        // note, a lock, …). Put the old name back rather than leave a renamed
+        // copy the server never heard of beside the note the next pull restores.
+        if (scope.isCurrent() && (await this.registry.revertRefusedMove(from, to))) {
+          // The index met the file at `to` and may have minted it a fresh
+          // id; give the old path its kept id back.
+          try {
+            await ipc.rebindNoteId(from, docId, scope.vaultEpoch);
+          } catch (e) {
+            if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't rebind ${from} to ${docId}`, e);
+          }
+          toast(renameRefusedMessage(from, false, res.code, res.status), "error");
+          this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the rename`, { docId, path: from });
+          // Edits made under the refused name came back with the file, but the
+          // put-back is an own move, so the watcher never reads them: queue the
+          // note like a successful rename does, or they wait for a relaunch.
+          if (scope.isCurrent()) {
+            this.localChanges.set(docId, from);
+            this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+          }
+        }
+        return;
+      }
     } catch (e) {
       console.warn(`[sync] couldn't move the mapping ${from} → ${to}`, e);
       return;
@@ -3250,9 +3605,18 @@ export class SyncManager implements InboundHost {
     const gone = topmost(
       goneFolders.filter((g) => !dirsCi.has(g.toLowerCase()) && this.registry.getFolderId?.(g)),
     );
-    const cands = topmost(
-      candidateFolders.filter((c) => dirs.has(c) && !this.registry.getFolderId?.(c)),
-    );
+    const unregistered = (d: string) => !this.registry.getFolderId?.(d);
+    const tops = topmost(candidateFolders.filter((c) => dirs.has(c) && unregistered(c)));
+    // A folder moved into a NEW parent (Finder's "New Folder with Selection",
+    // `mkdir -p dst && mv src dst/`) shows up as that parent alone; the moved
+    // folder sits below it. Judged against the parent only, nothing matched,
+    // every note went over as a separate rename and its binaries stayed behind
+    // at the old path on the server (2026-11-28 five-app test). Every
+    // unregistered folder under a candidate is a candidate too; the parent
+    // still comes first, so a plain rename to it wins a tie.
+    const cands = [
+      ...new Set([...tops, ...[...dirs].filter((d) => unregistered(d) && tops.some((t) => isUnder(d, t)))]),
+    ];
     if (gone.length === 0 || cands.length === 0) return out;
 
     const mapped = this.registry.mappedNotes();
@@ -3296,67 +3660,301 @@ export class SyncManager implements InboundHost {
     };
     const usedCands = new Set<string>();
 
-    for (const g of gone) {
+    // The watcher names only the TOPMOST vanished folder, so the registered
+    // folders below it that are gone too are read off the items they held.
+    const goneBelow = (g: string): string[] => {
+      const found = new Set<string>();
+      for (const p of [...mapped.map((n) => n.relPath), ...mappedFiles.map((f) => f.relPath)]) {
+        if (!isUnder(p, g) || p === g) continue;
+        for (let d = parentDirOf(p); d && d !== g && isUnder(d, g); d = parentDirOf(d)) {
+          if (!dirsCi.has(d.toLowerCase()) && this.registry.getFolderId?.(d)) found.add(d);
+        }
+      }
+      return topmost([...found]);
+    };
+
+    // PLAN deepest first, so a sub-folder renamed or moved in the same breath as
+    // its parent (`mv P/Sub P/Sub2 && mv P P2`, a git checkout, an agent's two
+    // `mv`s) is already paired when the parent is judged: its items count for
+    // the parent when their new place lies under the parent's candidate, and are
+    // no evidence either way when they went elsewhere ("move Sub out, delete the
+    // emptied P"). Judged by position alone, the renamed sub-folder sank the
+    // parent below the ratio; its other notes went over one by one into a NEW
+    // folder and the old one, emptied, was deleted with its sharing rows
+    // (2026-11-28 five-app test). Then MOVE parents first.
+    type Plan = {
+      g: string;
+      to: string;
+      under: Array<{ docId: string; relPath: string }>;
+      matched: Set<string>;
+      matchedFiles: Set<string>;
+      files: number;
+      filesTotal: number;
+    };
+    const plans: Plan[] = [];
+    /** The TOPMOST planned folder strictly below `g` that holds `p`: the one
+     *  whose own landing says where `p` went relative to `g`. */
+    const ownerBelow = (p: string, g: string): Plan | undefined => {
+      let best: Plan | undefined;
+      for (const pl of plans) {
+        if (pl.g === g || !isUnder(pl.g, g) || !isUnder(p, pl.g)) continue;
+        if (!best || pl.g.length < best.g.length) best = pl;
+      }
+      return best;
+    };
+    /** A paired sub-folder is evidence for `g` → `c` only when it landed where
+     *  its parent would be under `c` (renamed in place or carried along). Any
+     *  candidate ABOVE that spot also "contains" it; counted there, a folder two
+     *  levels down paired with the renamed top folder and scrambled every id
+     *  beneath it (2026-11-28 scale test). */
+    const landsUnder = (o: Plan, g: string, c: string): boolean => {
+      const rel = o.g.slice(g.length + 1);
+      const i = rel.lastIndexOf("/");
+      const want = i === -1 ? c : c + "/" + rel.slice(0, i);
+      return (parentDirOf(o.to) ?? "") === want;
+    };
+    const planFor = async (g: string): Promise<boolean> => {
+      for (const s of goneBelow(g)) if (!(await planFor(s))) return false;
       const under = mapped.filter((n) => isUnder(n.relPath, g));
       const filesUnder = mappedFiles.filter((f) => isUnder(f.relPath, g));
       // no evidence either way — the pull decides, as before
-      if (under.length === 0 && filesUnder.length === 0) continue;
+      if (under.length === 0 && filesUnder.length === 0) return true;
       const shas = filesUnder.length > 0 ? await localBinaryShas() : null;
-      if (!scope.isCurrent()) return out;
-      const total = under.length + filesUnder.length;
-      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
-      // The notes-only rule this replaced still qualifies on its own, so adding
-      // binaries to the evidence can only ever turn a fallback into a move.
-      const needNotes = under.length > 0 ? Math.ceil(under.length * FOLDER_MOVE_MIN_RATIO) : Infinity;
-      let best: { to: string; matched: Set<string>; files: number; score: number } | null = null;
+      if (!scope.isCurrent()) return false;
+      let best: (Plan & { score: number }) | null = null;
       for (const c of cands) {
         if (usedCands.has(c)) continue;
-        const present = under.filter((n) => notesOnDisk.has(c + n.relPath.slice(g.length)));
-        const filesPresent = shas
-          ? filesUnder.filter((f) => shas.has(c + f.relPath.slice(g.length)))
-          : [];
-        // cannot reach the ratio: no hashing at all
-        if (present.length < needNotes && present.length + filesPresent.length < need) continue;
+        let notesTotal = 0;
+        let filesTotal = 0;
         const matched = new Set<string>();
+        const matchedFiles = new Set<string>();
+        const present: Array<{ docId: string; relPath: string }> = [];
+        const filesPresent: typeof filesUnder = [];
+        for (const n of under) {
+          const o = ownerBelow(n.relPath, g);
+          if (!o) {
+            notesTotal++;
+            if (notesOnDisk.has(c + n.relPath.slice(g.length))) present.push(n);
+          } else if (landsUnder(o, g, c)) {
+            notesTotal++;
+            if (o.matched.has(n.docId)) matched.add(n.docId);
+          }
+        }
+        for (const f of filesUnder) {
+          const o = ownerBelow(f.relPath, g);
+          if (!o) {
+            filesTotal++;
+            if (shas?.has(c + f.relPath.slice(g.length))) filesPresent.push(f);
+          } else if (landsUnder(o, g, c)) {
+            filesTotal++;
+            if (o.matchedFiles.has(f.relPath)) matchedFiles.add(f.relPath);
+          }
+        }
+        const total = notesTotal + filesTotal;
+        if (total === 0) continue;
+        const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+        // The notes-only rule this replaced still qualifies on its own, so adding
+        // binaries to the evidence can only ever turn a fallback into a move.
+        const needNotes = notesTotal > 0 ? Math.ceil(notesTotal * FOLDER_MOVE_MIN_RATIO) : Infinity;
+        // cannot reach the ratio: no hashing at all
+        const known = matched.size + matchedFiles.size;
+        if (matched.size + present.length < needNotes && known + present.length + filesPresent.length < need) continue;
         for (const n of present) {
           const a = await docSha(n.docId, n.relPath);
-          if (!scope.isCurrent()) return out;
+          if (!scope.isCurrent()) return false;
           const b = await fileSha(c + n.relPath.slice(g.length));
-          if (!scope.isCurrent()) return out;
+          if (!scope.isCurrent()) return false;
           if (a != null && a === b) matched.add(n.docId);
         }
-        const files = filesPresent.filter((f) => shas!.get(c + f.relPath.slice(g.length)) === f.base).length;
-        const score = matched.size + files;
+        for (const f of filesPresent) if (shas!.get(c + f.relPath.slice(g.length)) === f.base) matchedFiles.add(f.relPath);
+        const score = matched.size + matchedFiles.size;
         if ((matched.size >= needNotes || score >= need) && (!best || score > best.score)) {
-          best = { to: c, matched, files, score };
+          best = { g, to: c, under, matched, matchedFiles, files: matchedFiles.size, filesTotal: filesUnder.length, score };
         }
       }
-      if (!best) {
-        // Below the ratio: the notes under G go through the per-note pairing
-        // and then the delete drain, with every gate `queueDiskDelete` applies.
-        if (this.liveSince == null) continue;
-        for (const n of under) {
-          if (!this.registry.isPushed(n.docId)) continue;
+      if (best) {
+        usedCands.add(best.to);
+        plans.push(best);
+      }
+      return true;
+    };
+    for (const g of gone) if (!(await planFor(g))) return out;
+
+    // A ROTATION (`mv B C && mv A B`: "rename Plan to Plan 2025, then Draft to
+    // Plan"). A vanished, but its items sit in B, a folder still on disk and
+    // registered, so no NEW folder matched. By name alone B's notes went over
+    // one by one into C and A's into B: B's sharing reached A's notes (a leak),
+    // B's own notes left it, and A's were deleted and made again (2026-11-28
+    // five-app test). A registered folder is A's target only when A's items
+    // match there AND its own items no longer match at their own paths but do
+    // match under a new folder (or under the next folder of such a chain); it
+    // moves first, then A takes its path. Never a target at or around its own
+    // source, so `mkdir C; mv B/* C/` and `mv B/*.md B/Old/` stay as before.
+    // A straight swap of two folders that both stay has no vanished side and
+    // is not covered.
+    const regDirs = [...dirs].filter((d) => !unregistered(d));
+    const notesOf = (g: string) => mapped.filter((n) => isUnder(n.relPath, g));
+    const filesOf = (g: string) => mappedFiles.filter((f) => isUnder(f.relPath, g));
+    const crdtShas = new Map<string, string | null>();
+    /** The CRDT's own text, read without a bridge: a bridge on a path that now
+     *  holds another folder's file would ingest that file into this note. */
+    const crdtSha = async (docId: string): Promise<string | null> => {
+      if (crdtShas.has(docId)) return crdtShas.get(docId) ?? null;
+      let sha: string | null = null;
+      try {
+        const text = await this.localText(docId);
+        sha = text == null ? null : await sha256Hex(text);
+      } catch {
+        sha = null;
+      }
+      crdtShas.set(docId, sha);
+      return sha;
+    };
+    const scoreAt = async (g: string, c: string) => {
+      const notes = notesOf(g);
+      const files = filesOf(g);
+      const total = notes.length + files.length;
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      const shas = files.length > 0 ? await localBinaryShas() : null;
+      const matched = new Set<string>();
+      const matchedFiles = new Set<string>();
+      const present = notes.filter((n) => notesOnDisk.has(c + n.relPath.slice(g.length)));
+      const filesPresent = shas ? files.filter((f) => shas.has(c + f.relPath.slice(g.length))) : [];
+      if (total === 0 || present.length + filesPresent.length < need) return null;
+      for (const n of present) {
+        const a = await crdtSha(n.docId);
+        const b = await fileSha(c + n.relPath.slice(g.length));
+        if (a != null && a === b) matched.add(n.docId);
+      }
+      for (const f of filesPresent) if (shas!.get(c + f.relPath.slice(g.length)) === f.base) matchedFiles.add(f.relPath);
+      const score = matched.size + matchedFiles.size;
+      return score >= need ? { notes, files, matched, matchedFiles, score } : null;
+    };
+    /** Its own items no longer at home: missing, or holding other bytes. */
+    const vacated = async (r: string): Promise<boolean> => {
+      const notes = notesOf(r);
+      const files = filesOf(r);
+      const total = notes.length + files.length;
+      if (total === 0) return false;
+      const shas = files.length > 0 ? await localBinaryShas() : null;
+      let home = 0;
+      for (const n of notes) {
+        if (!notesOnDisk.has(n.relPath)) continue;
+        const a = await crdtSha(n.docId);
+        if (a != null && a === (await fileSha(n.relPath))) home++;
+      }
+      for (const f of files) if (shas?.get(f.relPath) === f.base) home++;
+      return total - home >= Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+    };
+    const claimed = (p: string) => plans.some((pl) => isUnder(p, pl.g) || isUnder(pl.g, p) || isUnder(p, pl.to) || isUnder(pl.to, p));
+    const rotateFrom = async (src: string, chain: ReadonlySet<string>): Promise<Plan[] | null> => {
+      for (const r of regDirs) {
+        if (chain.has(r) || isUnder(r, src) || isUnder(src, r) || claimed(r)) continue;
+        const here = await scoreAt(src, r);
+        if (!scope.isCurrent()) return null;
+        if (!here || !(await vacated(r))) continue;
+        let next: Plan[] | null = null;
+        let best: { c: string; s: NonNullable<Awaited<ReturnType<typeof scoreAt>>> } | null = null;
+        for (const c of cands) {
+          if (usedCands.has(c) || isUnder(c, r)) continue;
+          const s = await scoreAt(r, c);
+          if (s && (!best || s.score > best.s.score)) best = { c, s };
+        }
+        if (best) {
+          next = [{ g: r, to: best.c, under: best.s.notes, matched: best.s.matched, matchedFiles: best.s.matchedFiles, files: best.s.matchedFiles.size, filesTotal: best.s.files.length }];
+        } else {
+          next = await rotateFrom(r, new Set([...chain, r]));
+        }
+        if (!next) continue;
+        if (best) usedCands.add(best.c);
+        return [
+          ...next,
+          { g: src, to: r, under: here.notes, matched: here.matched, matchedFiles: here.matchedFiles, files: here.matchedFiles.size, filesTotal: here.files.length },
+        ];
+      }
+      return null;
+    };
+    for (const g of gone) {
+      if (plans.some((p) => isUnder(p.g, g))) continue;
+      const chain = await rotateFrom(g, new Set([g]));
+      if (!scope.isCurrent()) return out;
+      if (chain) {
+        console.info(`[sync] folder rotation: ${chain.map((p) => `${p.g} → ${p.to}`).join(", ")}`);
+        plans.push(...chain);
+      }
+    }
+
+    // Below the ratio: the notes no plan carries go through the per-note
+    // pairing and then the delete drain, with every gate `queueDiskDelete`
+    // applies. Decided once the plan is whole: a sub-folder's notes are never
+    // sent to the delete drain while a plan above or below still carries them.
+    if (this.liveSince != null) {
+      for (const g of gone) {
+        for (const n of mapped) {
+          if (!isUnder(n.relPath, g)) continue;
+          if (plans.some((p) => isUnder(n.relPath, p.g))) continue;
+          if (!(this.registry.serverHoldsContent?.(n.docId) ?? this.registry.isPushed(n.docId))) continue;
           out.fallbackDeletes.push({ docId: n.docId, relPath: n.relPath });
         }
-        continue;
       }
-      usedCands.add(best.to);
-      console.info(
-        `[sync] ${g} → ${best.to}: ${best.files}/${filesUnder.length} binaries matched their agreed bytes`,
-      );
-      if (await this.applyFolderMove(g, best.to, under, best.matched, notesOnDisk, scope)) {
-        out.movedFrom.push(g);
-        out.movedTo.push(best.to);
+    }
+
+    // MOVE parents first; a child moves from where its moved parent put it, and
+    // not at all when that is already where it belongs. A parent that failed
+    // or was put back leaves its children for the next pass, as before.
+    const done: Plan[] = [];
+    const failed: Plan[] = [];
+    // Parents before children, and a folder whose path another plan takes over
+    // before that plan (a rotation); a cycle leaves the rest for the next pass.
+    const order: Plan[] = [];
+    const waiting = [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length);
+    const blocks = (q: Plan, p: Plan) => q !== p && (isUnder(p.g, q.g) || isUnder(p.to, q.g));
+    while (waiting.length > 0) {
+      const i = waiting.findIndex((p) => !waiting.some((q) => blocks(q, p)));
+      if (i < 0) break;
+      order.push(waiting.splice(i, 1)[0]);
+    }
+    const deferIndex: Array<() => Promise<void>> = [];
+    for (const p of order) {
+      if (failed.some((f) => isUnder(p.g, f.g) || isUnder(p.to, f.g))) continue;
+      let anc: Plan | undefined;
+      for (const d of done) if (d.g !== p.g && isUnder(p.g, d.g) && (!anc || d.g.length > anc.g.length)) anc = d;
+      const at = (q: string) => (anc ? anc.to + q.slice(anc.g.length) : q);
+      const from = at(p.g);
+      if (from !== p.to) console.info(`[sync] ${p.g} → ${p.to}: ${p.files}/${p.filesTotal} binaries matched their agreed bytes`);
+      const res =
+        from === p.to
+          ? true
+          : await this.applyFolderMove(
+              from,
+              p.to,
+              p.under.map((n) => ({ docId: n.docId, relPath: at(n.relPath) })),
+              p.matched,
+              notesOnDisk,
+              scope,
+              deferIndex,
+            );
+      if (res) {
+        out.movedFrom.push(p.g);
+        out.movedTo.push(p.to);
       }
+      if (res === true) done.push(p);
+      else failed.push(p);
       if (!scope.isCurrent() || this.rootMissing) return out;
+    }
+    for (const reindex of deferIndex.reverse()) {
+      await reindex();
+      if (!scope.isCurrent()) return out;
     }
     // What appeared and was not a move target: its notes may still be renames.
     if (out.fallbackDeletes.length > 0) {
-      for (const c of cands) {
-        if (usedCands.has(c)) continue;
+      const used = [...usedCands];
+      const seen = new Set<string>();
+      for (const c of tops) {
         for (const p of notesOnDisk) {
-          if (isUnder(p, c) && !this.registry.getMapping(p)) out.fallbackCandidates.push(p);
+          if (seen.has(p) || !isUnder(p, c) || used.some((u) => isUnder(p, u))) continue;
+          seen.add(p);
+          if (!this.registry.getMapping(p)) out.fallbackCandidates.push(p);
         }
       }
     }
@@ -3371,7 +3969,8 @@ export class SyncManager implements InboundHost {
     matched: ReadonlySet<string>,
     notesOnDisk: ReadonlySet<string>,
     scope: VaultScope,
-  ): Promise<boolean> {
+    deferIndex?: Array<() => Promise<void>>,
+  ): Promise<boolean | "reverted"> {
     console.info(
       `[sync] ${from} → ${to} (folder moved on disk; ${matched.size}/${under.length} notes matched, keeping every doc id)`,
     );
@@ -3385,34 +3984,73 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return false;
     let moved = false;
     try {
-      moved = (await this.registry.renamePath(from, to)) !== false;
+      const res = await this.registry.moveOnServer(from, to);
+      moved = res.ok;
+      if (!res.ok && res.refused && scope.isCurrent()) {
+        // Refused (view-only folder, a lock, …): move it back on disk and call
+        // the move handled, so nothing after this pairs, deletes or registers it.
+        if (await this.registry.revertRefusedMove(from, to)) {
+          // Re-index the notes back under their KEPT ids at the old paths.
+          const back = under.filter((n) => notesOnDisk.has(to + n.relPath.slice(from.length)));
+          if (back.length > 0) {
+            try {
+              await ipc.materializeNotesBatch(
+                back.map((n) => ({ relPath: n.relPath, docId: n.docId })),
+                scope.vaultEpoch,
+                { indexOnly: true },
+              );
+            } catch (e) {
+              if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${from}`, e);
+            }
+          }
+          toast(renameRefusedMessage(from, true, res.code, res.status), "error");
+          this.note("warn", "rename-refused", `${to} was renamed back to ${from}: the server refused the move`, { path: from });
+          // Same as a refused note rename: edits made inside the moved folder
+          // came back with it and still have to go.
+          if (back.length > 0 && scope.isCurrent()) {
+            for (const n of back) this.localChanges.set(n.docId, n.relPath);
+            this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+          }
+          return "reverted";
+        }
+      }
     } catch (e) {
       console.warn(`[sync] couldn't move the folder ${from} → ${to}`, e);
       return false;
     }
     if (!moved || !scope.isCurrent()) return false;
     // The watcher pruned the old prefix from the index and never saw the new
-    // files. Index them under their KEPT ids in one create-only batch (a path
-    // that is not on disk is left out: this call would create it empty).
+    // files. Index them under their KEPT ids in one batch that never creates a
+    // file: the listing above is seconds old by now, and a note deleted inside
+    // the moved folder meanwhile was written back empty, which lost the delete
+    // (`removedWhilePairing` judges those once this returns).
     const items = under
       .map((n) => ({ relPath: to + n.relPath.slice(from.length), docId: n.docId }))
       .filter((i) => notesOnDisk.has(i.relPath));
-    if (items.length > 0) {
-      try {
-        await ipc.materializeNotesBatch(items, scope.vaultEpoch);
-      } catch (e) {
-        if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${to}`, e);
+    const reindex = async () => {
+      if (items.length > 0) {
+        try {
+          await ipc.materializeNotesBatch(items, scope.vaultEpoch, { indexOnly: true });
+        } catch (e) {
+          if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${to}`, e);
+        }
       }
-    }
+      if (!scope.isCurrent()) return;
+      // Edited in the same breath as the move: the new bytes still have to go.
+      let edited = 0;
+      for (const i of items) {
+        if (matched.has(i.docId)) continue;
+        this.localChanges.set(i.docId, i.relPath);
+        edited++;
+      }
+      if (edited > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+    };
+    // A batch of moves re-keys the index in REVERSE once every server move is
+    // made: in a rotation (`mv B C && mv A B`) a path of B's still carries B's
+    // note id until A's note takes it, and an id is never given to two rows.
+    if (deferIndex) deferIndex.push(reindex);
+    else await reindex();
     if (!scope.isCurrent()) return false;
-    // Edited in the same breath as the move: the new bytes still have to go.
-    let edited = 0;
-    for (const i of items) {
-      if (matched.has(i.docId)) continue;
-      this.localChanges.set(i.docId, i.relPath);
-      edited++;
-    }
-    if (edited > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
     this.note("info", "folder-moved", `${from} was moved to ${to} on this device, kept as a move for everyone`, {
       path: to,
     });
@@ -3661,7 +4299,11 @@ export class SyncManager implements InboundHost {
 
   /** `InboundHost.heldDocIds`: the docs of a held bulk delete, until it is released. */
   heldDocIds(): ReadonlySet<string> {
-    return this.deleteDecisionIds;
+    // Disk deletes still being decided too: a pull already asked for (it joins
+    // the running one, past the hold in `handleRegistryChanged`) wrote them
+    // back as placeholders and the delete was lost.
+    if (this.pendingDiskDeletes.size === 0 && this.drainingDocs.size === 0) return this.deleteDecisionIds;
+    return new Set([...this.deleteDecisionIds, ...this.pendingDiskDeletes.keys(), ...this.drainingDocs]);
   }
 
   /**
@@ -3676,6 +4318,10 @@ export class SyncManager implements InboundHost {
     cap: number,
     scope: VaultScope,
   ): Promise<void> {
+    this.heldDeleteDirs = {
+      dirs: [...new Set(items.map((d) => parentDirOf(d.relPath) ?? ""))],
+      at: Date.now(),
+    };
     const rootPresent = await this.checkVaultRoot(scope);
     if (!scope.isCurrent()) return;
     if (!rootPresent || !this.isLive()) {
@@ -3695,6 +4341,34 @@ export class SyncManager implements InboundHost {
       `${this.deleteDecision.length} notes were removed from this folder at once. They stay for the team and will be restored here`,
     );
     this.emitStructureNotice();
+  }
+
+  /**
+   * `BinaryDeleteDeps.noteDeleteVerdict`: may a vanished binary be deleted on
+   * the server right now? A folder deleted on disk removes notes and files in
+   * one go, and the two queues decide apart. Over the notes' cap the folder
+   * comes back, so its files must not be deleted for everyone meanwhile.
+   *  - `wait`: a note delete window is still open or being decided;
+   *  - `held`: an over-cap note batch in the last {@link HELD_BINARY_REFUSE_MS}
+   *    sat in this file's folder, above it or below it.
+   */
+  private binaryBesideNoteDeletes(relPath: string): "wait" | "held" | null {
+    const dir = parentDirOf(relPath) ?? "";
+    const within = (p: string, f: string) => f === "" || isUnder(p, f);
+    const held = this.heldDeleteDirs;
+    if (held && Date.now() - held.at < HELD_BINARY_REFUSE_MS) {
+      if (held.dirs.some((d) => within(d, dir) || within(dir, d))) return "held";
+    }
+    // A vanished folder that is only waiting for its contents' deletes (its
+    // notes already went: `goneFolderAttempts`) decides no note delete, so it
+    // must not hold its own files back: it waited for them while they waited
+    // for it, and a 120 MB video's delete went only once the folder gave up.
+    const undecidedFolder = [...this.goneFolders.keys()].some((f) => !this.goneFolderAttempts.has(f));
+    const deciding = this.pendingDiskDeletes.size > 0 || undecidedFolder;
+    if (deciding || (this.diskDeleteDrainsInFlight > 0 && this.drainDecidesNotes)) {
+      return "wait";
+    }
+    return null;
   }
 
   /** A held note's file is back on disk: it is no longer part of the question. */
@@ -3823,7 +4497,20 @@ export class SyncManager implements InboundHost {
       }
       return;
     }
-    const notes = [...this.localChanges].map(([docId, relPath]) => ({ docId, relPath }));
+    // Offline (the channel was up and dropped): pushing now fails every note,
+    // and nothing used to try again, so a file edited while offline (by an
+    // editor, a script, an AI agent) reached nobody until the next launch.
+    // Keep the queue; the channel's next `synced` drains it.
+    if (this.channelDown) {
+      if (this.localChanges.size > 0) this.localChangesAwaitChannel = true;
+      return;
+    }
+    // The CURRENT path: a teammate may have moved the note (or its folder)
+    // while this entry waited.
+    const notes = [...this.localChanges].map(([docId, relPath]) => ({
+      docId,
+      relPath: this.registry.pathForDocId(docId) ?? relPath,
+    }));
     this.localChanges.clear();
     if (notes.length === 0) return;
 
@@ -3931,6 +4618,7 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        diskBase: (docId) => ipc.getDiskBase(docId, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
@@ -3963,6 +4651,29 @@ export class SyncManager implements InboundHost {
     const result = await uploader.run();
     if (!scope.isCurrent() || this.uploader !== uploader) return requeue(pending);
     this.recordPermanentFailures(uploader);
+    // Retryable failures go back on the queue (bounded); the bulk path above
+    // already does this, the per-note path used to only log them.
+    {
+      // A shrink-brake hold is lifted by its own path (#274), not by retrying.
+      const failed = uploader.failedDocs().filter((f) => !f.permanent && f.kind !== "shrink-held");
+      const failedIds = new Set(failed.map((f) => f.docId));
+      for (const n of pending) if (!failedIds.has(n.docId)) this.localChangeAttempts.delete(n.docId);
+      let again = 0;
+      for (const f of failed) {
+        const tries = (this.localChangeAttempts.get(f.docId) ?? 0) + 1;
+        if (tries > LOCAL_CHANGE_MAX_RETRIES) {
+          this.localChangeAttempts.delete(f.docId);
+          continue;
+        }
+        this.localChangeAttempts.set(f.docId, tries);
+        if (!this.localChanges.has(f.docId)) this.localChanges.set(f.docId, f.relPath);
+        again++;
+      }
+      if (again > 0) {
+        if (this.channelDown) this.localChangesAwaitChannel = true;
+        else this.armLocalChangeDrain(scope, LOCAL_CHANGE_FAILURE_RETRY_MS);
+      }
+    }
     await this.registry.flushCheckpoint();
     if (!scope.isCurrent() || this.uploader !== uploader) return requeue(pending);
     if (result.cancelled) return requeue(pending);
@@ -3995,6 +4706,373 @@ export class SyncManager implements InboundHost {
 
   notePathChanged(docId: string, from: string, to: string): void {
     this.onNotePathChanged?.(docId, from, to);
+  }
+
+  // ---- Sync rules (#401) --------------------------------------------------
+
+  /** Hidden paths the watcher saw exist lately (path → when): the possible new
+   *  half of a move into a folder that doesn't sync. */
+  private recentIgnored = new Map<string, number>();
+  private static readonly HIDDEN_ARRIVAL_MS = 30_000;
+
+  /** The watcher's `ignored` list (App routes it here). */
+  noteIgnoredPaths(paths: readonly string[]): void {
+    if (paths.length === 0) return;
+    const now = Date.now();
+    for (const p of paths) this.recentIgnored.set(p, now);
+    for (const [p, at] of this.recentIgnored) {
+      if (now - at > SyncManager.HIDDEN_ARRIVAL_MS) this.recentIgnored.delete(p);
+    }
+  }
+
+  /** sha256 → hidden paths (oldest first), for the files that appeared in
+   *  hidden folders lately. Each pairing consumes one path. */
+  private async hiddenArrivals(scope: VaultScope): Promise<Map<string, string[]>> {
+    const now = Date.now();
+    for (const [p, at] of this.recentIgnored) {
+      if (now - at > SyncManager.HIDDEN_ARRIVAL_MS) this.recentIgnored.delete(p);
+    }
+    const out = new Map<string, string[]>();
+    if (this.recentIgnored.size === 0) return out;
+    try {
+      const rows = await ipc.excludedHashes([...this.recentIgnored.keys()], scope.vaultEpoch);
+      for (const r of rows) {
+        const list = out.get(r.sha256);
+        if (list) list.push(r.path);
+        else out.set(r.sha256, [r.path]);
+      }
+    } catch (e) {
+      console.warn("[sync-rules] could not read the hidden folder for a move", e);
+    }
+    return out;
+  }
+
+  /** The binary delete queue's question: did this file move into a hidden
+   *  folder? Parks it (no server call) when it did. */
+  private async binaryMovedToHidden(scope: VaultScope, relPath: string, sha256: string): Promise<boolean> {
+    if (this.recentIgnored.size === 0 || !sha256) return false;
+    const hidden = await this.hiddenArrivals(scope);
+    const to = hidden.get(sha256)?.[0];
+    if (!to || !scope.isCurrent()) return false;
+    if (!this.registry.parkMovedFile(relPath, to)) return false;
+    this.attachments?.forgetFile(relPath);
+    this.tellMovedToHidden(relPath);
+    return true;
+  }
+
+  private tellMovedToHidden(relPath: string): void {
+    const name = relPath.split("/").pop() ?? relPath;
+    toast(`${name} moved to a folder that doesn't sync. Your teammates keep their copy.`, "neutral");
+  }
+
+  private onNoteParked?: (docId: string, relPath: string) => void;
+  private onSyncRulesApplied?: () => void;
+
+  /** Registry host hook: the rules now hide this note. Its bridge is already
+   *  released; the UI closes the tab (the file stays on disk). */
+  noteParked(docId: string, relPath: string): void {
+    this.onNoteParked?.(docId, relPath);
+  }
+
+  /** Registry host hook: a hidden note came back. Whatever was typed into the
+   *  file meanwhile goes up through the external-edit route, and the forced
+   *  connect also pulls what teammates wrote while it was hidden (those live
+   *  updates were dropped here, never written into the old CRDT). */
+  parkedReturned(docId: string, relPath: string): void {
+    this.divergedDocs.add(docId);
+    this.handleLocalFileChanged(relPath, "modified");
+  }
+
+  /** The UI: refresh the sidebar (and close what is now hidden) after rules change. */
+  setSyncRulesListeners(listeners: {
+    onApplied?: () => void;
+    onNoteParked?: (docId: string, relPath: string) => void;
+  }): void {
+    this.onSyncRulesApplied = listeners.onApplied;
+    this.onNoteParked = listeners.onNoteParked;
+  }
+
+  /** The rules this session applies (what Rust walks with). */
+  syncRulesSource(): string {
+    return this.registry.syncRules().source;
+  }
+
+  /**
+   * The vault's rules as this device last applied them, as `.baaldaignore`
+   * text, and the server revision they came from. A `.baaldaignore` that
+   * says something else was edited on this computer.
+   */
+  private appliedRules: { text: string; revision: number | null } | null = null;
+  /** One rules reconcile at a time: a file save and a frame can race. */
+  private rulesChain: Promise<void> = Promise.resolve();
+  private rulesFileTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Editors save in bursts (write, rename, touch); read the file once they settle. */
+  private static readonly RULES_FILE_SETTLE_MS = 700;
+
+  /** Launch: what Rust already walks with, before anything else reads the tree. */
+  private async loadLocalSyncRules(scope: VaultScope): Promise<void> {
+    try {
+      const doc = await ipc.getSyncRules(scope.vaultEpoch);
+      if (scope.isCurrent()) {
+        this.registry.setSyncRules(
+          new SyncRuleSet(doc?.patterns ?? "", normalizeTypes(doc?.types), normalizeFolders(doc?.folders)),
+        );
+        this.appliedRules = doc
+          ? { text: rulesTextOf(doc), revision: typeof doc.revision === "number" ? doc.revision : null }
+          : null;
+      }
+    } catch (e) {
+      console.warn("[sync-rules] could not read this vault's saved rules", e);
+    }
+  }
+
+  /** The watcher saw the vault root's `.baaldaignore` change (App routes it here). */
+  rulesFileChanged(): void {
+    if (this.rulesFileTimer) clearTimeout(this.rulesFileTimer);
+    this.rulesFileTimer = setTimeout(() => {
+      this.rulesFileTimer = null;
+      const scope = this.scope;
+      if (scope?.isCurrent() && scope.orgId && this.enabled) void this.refreshSyncRules(scope, scope.orgId);
+      else void this.applyLocalRulesFile();
+    }, SyncManager.RULES_FILE_SETTLE_MS);
+  }
+
+  /**
+   * Fetch the vault's rules, send this computer's `.baaldaignore` edit when
+   * there is one, apply the result and write it back to the file. Never
+   * throws. A server without the feature (404), or no answer, keeps what this
+   * device already has and leaves the file alone: a rule never deletes, so the
+   * only cost of a stale set is a file shown or hidden a little longer.
+   */
+  refreshSyncRules(scope: VaultScope, orgId: string, opts: { pull?: boolean } = {}): Promise<void> {
+    const run = this.rulesChain.then(() => this.refreshSyncRulesNow(scope, orgId, opts));
+    this.rulesChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async refreshSyncRulesNow(scope: VaultScope, orgId: string, opts: { pull?: boolean }): Promise<void> {
+    if (!scope.isCurrent()) return;
+    let res: Awaited<ReturnType<typeof api.getSyncRules>>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      res = await Promise.race([
+        api.getSyncRules(orgId),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timed out")), 8000);
+        }),
+      ]);
+    } catch (e) {
+      if ((e as { status?: number } | null)?.status !== 404) {
+        console.warn("[sync-rules] could not fetch the vault's rules; keeping this device's", e);
+      }
+      return;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (!scope.isCurrent()) return;
+    const features = await this.serverFeatures().catch(() => new Set<string>());
+    if (!scope.isCurrent()) return;
+    let text = rulesTextOf(res.rules);
+    let revision = res.revision;
+    let keepFile = false;
+    const local = await this.localRulesEdit(scope, res);
+    if (!scope.isCurrent()) return;
+    if (local === "unreadable") {
+      keepFile = true;
+    } else if (local !== null) {
+      const sent = await this.sendRulesEdit(orgId, local, res, features);
+      if (!scope.isCurrent()) return;
+      if (sent.kind === "kept") keepFile = true;
+      else if (sent.kind === "saved") {
+        text = sent.text;
+        revision = sent.revision;
+      }
+    }
+    const doc = rulesDocFor(text, revision, features.has(MORE_FILE_TYPES_FEATURE));
+    const previous = this.appliedRules;
+    const applied = await this.applySyncRules(scope, doc, opts);
+    if (!scope.isCurrent()) return;
+    // Same rules, newer revision: remember it, or a later edit made here reads
+    // as based on an old revision and is replaced.
+    if (!applied && previous?.revision !== revision) {
+      await ipc.setSyncRules(doc, scope.vaultEpoch).catch(() => undefined);
+    }
+    this.appliedRules = { text, revision };
+    if (!keepFile) await this.writeRulesFile(scope, text);
+  }
+
+  /**
+   * The edit this computer's `.baaldaignore` holds, if any: it says something
+   * real, other than the vault's rules and other than what this device last
+   * applied (equal to that, the vault simply moved on and the file is stale).
+   * A folder that had its own rules before the file existed (a local vault
+   * turning sync on) offers those while the vault has none.
+   */
+  private async localRulesEdit(
+    scope: VaultScope,
+    res: { rules: { version: number; patterns: string }; revision: number },
+  ): Promise<{ text: string; base: number | null } | null | "unreadable"> {
+    let file: string | null;
+    try {
+      file = await ipc.readRulesFile(scope.vaultEpoch);
+    } catch (e) {
+      console.warn("[sync-rules] could not read .baaldaignore", e);
+      toast(".baaldaignore couldn't be read, so this computer keeps the vault's current rules.", "neutral");
+      return "unreadable";
+    }
+    const server = rulesTextOf(res.rules);
+    const applied = this.appliedRules;
+    if (isUsableRulesFile(file)) {
+      if (sameRulesText(file, server)) return null;
+      if (applied && sameRulesText(file, applied.text)) return null;
+      return { text: file, base: applied?.revision ?? null };
+    }
+    if (res.revision === 0 && applied && !sameRulesText(applied.text, server)) {
+      return { text: applied.text, base: null };
+    }
+    return null;
+  }
+
+  /** Send a `.baaldaignore` edit as the vault's rules. */
+  private async sendRulesEdit(
+    orgId: string,
+    edit: { text: string; base: number | null },
+    res: { revision: number },
+    features: ReadonlySet<string>,
+  ): Promise<{ kind: "saved"; text: string; revision: number } | { kind: "refused" } | { kind: "kept" }> {
+    const problem = patternsProblem(edit.text);
+    if (problem) {
+      toast(`.baaldaignore wasn't applied. ${problem}`, "error");
+      return { kind: "kept" };
+    }
+    if (!features.has(BAALDAIGNORE_FEATURE)) {
+      console.warn("[sync-rules] this server can't store .baaldaignore yet; kept the file as it is");
+      return { kind: "kept" };
+    }
+    if (edit.base !== null && edit.base !== res.revision) {
+      toast(
+        "Someone changed what syncs in this vault meanwhile, so your edit to .baaldaignore was replaced with theirs.",
+        "neutral",
+      );
+      return { kind: "refused" };
+    }
+    try {
+      const put = await api.putSyncRulesFile(orgId, edit.text, res.revision);
+      console.info(`[sync-rules] .baaldaignore is now the vault's rules (revision ${put.revision})`);
+      toast("Saved .baaldaignore. Everyone in this vault follows it now.", "success");
+      return { kind: "saved", text: rulesTextOf(put.rules), revision: put.revision };
+    } catch (e) {
+      const status = (e as { status?: number } | null)?.status;
+      if (status === 403) {
+        toast("Only owners and admins can change what syncs, so your edit to .baaldaignore was undone.", "neutral");
+        return { kind: "refused" };
+      }
+      if (status === 409) {
+        toast(
+          "Someone changed what syncs in this vault meanwhile, so your edit to .baaldaignore was replaced with theirs.",
+          "neutral",
+        );
+        return { kind: "refused" };
+      }
+      if (status === 400) {
+        const body = (e as { body?: { message?: unknown } }).body;
+        const why = typeof body?.message === "string" ? ` ${body.message}` : "";
+        toast(`.baaldaignore wasn't applied.${why}`, "error");
+        return { kind: "kept" };
+      }
+      console.warn("[sync-rules] could not save .baaldaignore; will try again", e);
+      return { kind: "kept" };
+    }
+  }
+
+  private async writeRulesFile(scope: VaultScope, text: string): Promise<void> {
+    try {
+      await ipc.writeRulesFile(text, scope.vaultEpoch);
+    } catch (e) {
+      console.warn("[sync-rules] could not write .baaldaignore", e);
+    }
+  }
+
+  /**
+   * A vault that doesn't sync: its `.baaldaignore` is the whole story. A
+   * missing or empty file is written from the rules in force (the defaults
+   * when there are none). A stamped vault is left to the sync session, which
+   * asks the server first; signed out, its file waits until then.
+   */
+  applyLocalRulesFile(): Promise<void> {
+    const run = this.rulesChain.then(() => this.applyLocalRulesFileNow());
+    this.rulesChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyLocalRulesFileNow(): Promise<void> {
+    if (this.enabled) return;
+    try {
+      const cfg = await ipc.getVaultConfig().catch(() => null);
+      if (cfg && /"serverVaultId"\s*:\s*"[^"]+"/.test(cfg)) return;
+      const cached = await ipc.getSyncRules();
+      let text: string | null;
+      try {
+        text = await ipc.readRulesFile();
+      } catch (e) {
+        console.warn("[sync-rules] could not read .baaldaignore", e);
+        return;
+      }
+      if (this.enabled) return;
+      if (!isUsableRulesFile(text)) {
+        text = cached ? rulesTextOf(cached) : DEFAULT_BAALDAIGNORE;
+        await ipc.writeRulesFile(text).catch((e) => console.warn("[sync-rules] could not write .baaldaignore", e));
+      }
+      const problem = patternsProblem(text);
+      if (problem) {
+        toast(`.baaldaignore wasn't applied. ${problem}`, "error");
+        return;
+      }
+      const doc = rulesDocFor(text, null, true);
+      const now = new SyncRuleSet(doc.patterns, normalizeTypes(doc.types), normalizeFolders(doc.folders));
+      if (cached?.version === 2 && now.sameAs(cached) && this.registry.syncRules().sameAs(cached)) return;
+      await ipc.setSyncRules(doc);
+      if (this.enabled) return;
+      this.registry.setSyncRules(now);
+      console.info("[sync-rules] applied this local vault's .baaldaignore");
+      this.onSyncRulesApplied?.();
+    } catch (e) {
+      console.warn("[sync-rules] could not apply this vault's .baaldaignore", e);
+    }
+  }
+
+  /**
+   * Apply one rules document, in the only safe order: the registry parks what
+   * the new rules hide, THEN Rust starts hiding it, THEN one pull returns what
+   * they stopped hiding (`registry.changeRules` serializes this on the pull
+   * chain). Nothing here deletes, uploads or downloads by itself.
+   */
+  private async applySyncRules(
+    scope: VaultScope,
+    doc: ipc.SyncRulesDoc,
+    opts: { pull?: boolean },
+  ): Promise<boolean> {
+    if (!scope.isCurrent()) return false;
+    if (this.registry.syncRules().sameAs(doc)) return false;
+    try {
+      await this.registry.changeRules(new SyncRuleSet(doc.patterns, normalizeTypes(doc.types), normalizeFolders(doc.folders)), async () => {
+        await ipc.setSyncRules(doc, scope.vaultEpoch);
+      });
+    } catch (e) {
+      console.warn("[sync-rules] could not apply the vault's rules", e);
+      return false;
+    }
+    if (!scope.isCurrent()) return true;
+    const parked = this.registry.parkedCount();
+    console.info(
+      `[sync-rules] applied (${parked.notes} notes, ${parked.files} files set aside on this computer)`,
+    );
+    this.onSyncRulesApplied?.();
+    if (opts.pull !== false && this.enabled) {
+      this.handleRegistryChanged("rules");
+      this.attachments?.scheduleReconcile();
+    }
+    return true;
   }
 
   /**
@@ -4133,6 +5211,54 @@ export class SyncManager implements InboundHost {
     } finally {
       await store.demote(docId);
     }
+  }
+
+  /** {@link InboundHost.claimsReleased}: one more pass registers those files. */
+  claimsReleased(): void {
+    if (this.scope?.isCurrent()) this.handleRegistryChanged("claims-released");
+  }
+
+  /** {@link InboundHost.foldersRegistered}. */
+  foldersRegistered(paths: readonly string[]): void {
+    const scope = this.scope;
+    if (!scope?.isCurrent() || this.liveSince == null) return;
+    const root = scope.vaultPath.replace(/[\\/]+$/, "");
+    void (async () => {
+      const gone: string[] = [];
+      for (const p of paths) {
+        let exists = true;
+        try {
+          exists = await ipc.folderExists(`${root}/${p}`);
+        } catch {
+          exists = true; // couldn't ask ⇒ never assume a delete
+        }
+        if (!exists) gone.push(p);
+      }
+      if (gone.length === 0 || !scope.isCurrent()) return;
+      // Marked first: an inbound pass must not re-create it meanwhile.
+      this.registry.markOwnDeletes?.(gone);
+      // Only the topmost: the drain removes the ones beneath it, deepest first.
+      const tops = gone.filter((p) => !gone.some((q) => q !== p && isUnder(p, q)));
+      for (const t of tops) this.goneFolders.set(t, Date.now());
+      this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+    })().catch((e) => console.warn("[sync] checking registered folders failed", e));
+  }
+
+  private ownDeletePullTimer: ReturnType<typeof setTimeout> | null = null;
+  private ownDeletePullAt = 0;
+
+  /** {@link InboundHost.pullAfter}: one pull once the latest such mark ends. */
+  pullAfter(delayMs: number): void {
+    const scope = this.scope;
+    if (!scope?.isCurrent()) return;
+    const at = Date.now() + Math.max(0, delayMs);
+    if (this.ownDeletePullTimer && at <= this.ownDeletePullAt) return;
+    if (this.ownDeletePullTimer) clearTimeout(this.ownDeletePullTimer);
+    this.ownDeletePullAt = at;
+    this.ownDeletePullTimer = setTimeout(() => {
+      this.ownDeletePullTimer = null;
+      if (scope.isCurrent()) this.handleRegistryChanged("own-delete-expired");
+    }, at - Date.now());
   }
 
   noteRemoved(
@@ -4529,11 +5655,63 @@ export class SyncManager implements InboundHost {
       if (!ready()) return;
       this.lastCrdtSweepAt = Date.now();
       console.info("[crdt-gc] idle sweep");
+      void this.healForks(scope);
       void collectCrdtGarbage(
-        { registryDocIds: () => this.registry.allDocIds() },
-        { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
+        { registryDocIds: () => this.registry.crdtKeepIds() },
+        {
+          epoch: scope.vaultEpoch ?? undefined,
+          pinned: this.crdtSweepPinned(),
+          onPruned: (live) => {
+            if (scope.isCurrent()) this.docStore?.forgetExcept?.(live);
+          },
+        },
       );
     }, delay);
+  }
+
+  /**
+   * One note, one id (`forkHeal.ts`): re-key index rows whose id is not the
+   * registry's, folding a fork's local history in when it is provably the same
+   * note's. Runs beside each CRDT sweep: the sweep keeps every id the index
+   * still holds, and the heal clears a fork's log itself once folded. Never
+   * throws.
+   */
+  private async healForks(scope: VaultScope): Promise<void> {
+    if (!scope.isCurrent() || !this.syncable()) return;
+    const epoch = scope.vaultEpoch ?? undefined;
+    const vaultId = this.registry.vaultId;
+    try {
+      const { folded } = await healForkedIds({
+        titles: () => ipc.listNoteTitles(epoch),
+        registeredId: (path) => {
+          const m = this.registry.getMappingCi(path);
+          return m && m.vaultId === vaultId ? m.docId : null;
+        },
+        busy: (docId) =>
+          !scope.isCurrent() ||
+          bridgeManager.currentBridge()?.docId === docId ||
+          this.docStore?.suppressedDoc() === docId ||
+          this.docStore?.peekResident(docId) != null,
+        load: (docId) => ipc.loadYjsState(docId, epoch),
+        acked: (docId) => this.registry.ackedSvOf?.(docId) ?? null,
+        append: (docId, update) => ipc.appendYjsUpdate(docId, update, epoch),
+        heal: (path, docId) => ipc.healNoteId(path, docId, epoch),
+        clear: (docId) => ipc.clearYjsDoc(docId, epoch),
+        stateVector: (docId, sv) => this.docStore?.noteLocalState?.(docId, sv),
+        log: (line) => console.info(line),
+      });
+      // History folded in that the server may lack: push it the way a
+      // `ready.behind` doc is pushed.
+      if (folded.length > 0 && scope.isCurrent()) {
+        for (const id of folded) {
+          this.serverBehind.add(id);
+          this.divergedDocs.add(id);
+        }
+        this.startContentRunIfNeeded(scope);
+      }
+    } catch (e) {
+      console.warn("[sync] fork heal failed", e);
+    }
   }
 
   /** True while an idle CRDT sweep is armed (tests / teardown assertions). */
@@ -4698,6 +5876,9 @@ export class SyncManager implements InboundHost {
     const store = this.docStore;
     if (!scope?.isCurrent()) return;
     const openByEditor = !!store && store.suppressedDoc() === docId;
+    /** The file still held the seed's exact bytes and the local doc now holds
+     *  the seed: record them as this note's disk base (below). */
+    let agreedAt: string | null = null;
     if (seed.fresh && store && !openByEditor) {
       const relPath = this.registry.pathForDocId(docId);
       if (relPath) {
@@ -4707,8 +5888,22 @@ export class SyncManager implements InboundHost {
         // for a registry pull, and nothing would ever read the new bytes.
         // Settling here would mark the note synced while the server holds the
         // OLD text (often nothing) for every other device. Merge instead.
-        const fileMoved = (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true;
+        const differs = await this.fileDiffersFrom(relPath, seed.textSha256, scope);
         if (!scope.isCurrent()) return;
+        if (differs === null && !(await ipc.noteExists(relPath, scope.vaultEpoch).catch(() => true))) {
+          // The file was deleted while its create was being answered. The
+          // server holds this state; loading it into a bridge here would egest
+          // the file straight back and cancel the user's delete. Settle only.
+          this.registry.markPushed(docId);
+          const gone = sv ?? (() => { try { return Y.encodeStateVectorFromUpdate(seed.state); } catch { return null; } })();
+          if (gone) this.registry.recordAck?.(docId, gone);
+          // Its watcher removal arrived before the note was mapped and was
+          // dropped ("the server has no note to delete"), so this is the delete
+          // now. Left alone, the next pull wrote the file back for everyone.
+          this.queueDiskDelete(scope, relPath);
+          return;
+        }
+        const fileMoved = differs === true;
         const unclaim = attributeRecoveryCopies(relPath, { kind: "conflictKeptServer", docId });
         let raced = fileMoved;
         try {
@@ -4735,6 +5930,7 @@ export class SyncManager implements InboundHost {
         } finally {
           unclaim();
         }
+        if (!raced && differs === false) agreedAt = relPath;
         if (raced) {
           // Something seeded this doc between build and answer. Its ops are
           // NOT the server's; merging them would double the text. Drop the
@@ -4770,7 +5966,9 @@ export class SyncManager implements InboundHost {
     // would have queued (#406). The open note's editor ingests its own file.
     if (!seed.fresh && !openByEditor) {
       const relPath = this.registry.pathForDocId(docId);
-      if (relPath && (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true) {
+      const differs = relPath ? await this.fileDiffersFrom(relPath, seed.textSha256, scope) : null;
+      if (differs === false) agreedAt = relPath;
+      if (relPath && differs === true) {
         if (!scope.isCurrent()) return;
         this.localChanges.set(docId, relPath);
         this.note("info", "push-queued", "Changed while it was being registered. Sending the newer text", {
@@ -4779,6 +5977,15 @@ export class SyncManager implements InboundHost {
         });
         this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
       }
+    }
+    // The disk base: the bytes this device and the CRDT last agreed on. A note
+    // created on this disk (an agent's or a script's file) never passed through
+    // a bridge read or write, so it had none, and the closed-app pass skips a
+    // note with no base: an edit made to it while the app was shut never went
+    // up (2026-11-28). The file still hashes to the seed and the doc holds it.
+    // A file that moved on is left unrecorded: its own push records it.
+    if (agreedAt && scope.isCurrent()) {
+      await ipc.setDiskBase(docId, seed.textSha256, scope.vaultEpoch).catch(() => {});
     }
   }
 
@@ -5011,6 +6218,8 @@ export class SyncManager implements InboundHost {
    */
   private handleServerBehind(docIds: string[], scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    // Hidden by the vault's sync rules (#401): never pushed from here.
+    docIds = docIds.filter((id) => !this.registry.isParked(id));
     if (docIds.length > 0) {
       this.note(
         "info",
@@ -5033,6 +6242,7 @@ export class SyncManager implements InboundHost {
    */
   private handleServerEmpty(docIds: string[], truncated: boolean, scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    docIds = docIds.filter((id) => !this.registry.isParked(id));
     this.clearChannelWatchdog(); // `ready` arrived — the channel is alive
     if (docIds.length > 0) {
       this.note(
@@ -5318,6 +6528,7 @@ export class SyncManager implements InboundHost {
       onDocState: (patch) => { if (scope.isCurrent()) this.onDocState?.(patch); },
     });
     this.progress = progress;
+    progress.setCarry(() => this.binaryDownloads);
     // The registry writes into the SHARED reporter, but its COUNTERS are muted
     // while a content run or the download phase owns the pill: a pull that lands
     // mid-run re-stamps `registering` with its own (tiny) total while the
@@ -5369,6 +6580,11 @@ export class SyncManager implements InboundHost {
     // it seeds (spec 03 §5) instead of taking the local-only branch and forking
     // the doc. Best-effort: a folder with no (or a foreign) stamp doesn't prime,
     // and a broken config must not fail the enable.
+    // The vault's saved sync rules (#401), read alongside the prime: the prime
+    // only adopts the saved map (parked ids included), and Rust already walks
+    // with these rules, so the registry needs them before the first PULL, not
+    // before this read. Never throws.
+    const localRulesLoaded = this.loadLocalSyncRules(scope);
     try {
       if (await registry.primeLocal(vault.orgId)) {
         if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
@@ -5413,6 +6629,13 @@ export class SyncManager implements InboundHost {
     // the verified key held): a primed vault the early check held back opens its
     // channel here, still beside the reconcile. Idempotent if it already opened.
     if (this.primed) this.startVaultEngine(scope);
+    // The vault's CURRENT sync rules, before the first pass decides anything:
+    // a device that saw them change while closed parks or returns items now,
+    // rather than one pass late. No answer keeps the saved ones.
+    await localRulesLoaded;
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
+    await this.refreshSyncRules(scope, vault.orgId, { pull: false });
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
     // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
@@ -5463,9 +6686,17 @@ export class SyncManager implements InboundHost {
       // must still open. See `crdtGc.ts` for why the allow-list is built from
       // two id spaces.
       this.lastCrdtSweepAt = Date.now();
+      void this.healForks(scope);
       void collectCrdtGarbage(
-        { registryDocIds: () => registry.allDocIds() },
-        { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
+        { registryDocIds: () => registry.crdtKeepIds() },
+        {
+          epoch: scope.vaultEpoch ?? undefined,
+          pinned: this.crdtSweepPinned(),
+          // The store hydrated its manifest from these rows before the sweep.
+          onPruned: (live) => {
+            if (scope.isCurrent()) this.docStore?.forgetExcept?.(live);
+          },
+        },
       );
       this.setupAttachments(scope);
       // Initial attachment reconcile (fire-and-forget; errors are logged rather
@@ -5547,7 +6778,7 @@ export class SyncManager implements InboundHost {
     }
     // Use the normal single-writer queue, including pull-before-seed and echo
     // guards. Do not open a second provider or change permissions over a push.
-    this.registry.unmarkPushed(docId);
+    this.registry.unmarkPushed(docId, { keepAck: true });
     this.divergedDocs.add(docId);
     this.emptyEverywhere.delete(docId);
     this.localChanges.set(docId, relPath);
@@ -5665,7 +6896,7 @@ export class SyncManager implements InboundHost {
     this.permanentFailures.delete(docId);
     this.bulkFailures.delete(docId);
     this.invalidatedFailures.add(docId);
-    this.registry.unmarkPushed(docId);
+    this.registry.unmarkPushed(docId, { keepAck: true });
     this.divergedDocs.add(docId);
     // A `ready.empty` verdict for this doc would otherwise short-circuit the
     // push before it opens a socket; the user just told us to try again.
@@ -5742,7 +6973,7 @@ export class SyncManager implements InboundHost {
       this.permanentFailures.delete(docId);
       this.bulkFailures.delete(docId);
       this.invalidatedFailures.add(docId);
-      this.registry.unmarkPushed(docId);
+      this.registry.unmarkPushed(docId, { keepAck: true });
       this.divergedDocs.add(docId);
       released++;
     }
@@ -5908,6 +7139,7 @@ export class SyncManager implements InboundHost {
           this.serverEmpty.delete(docId);
           this.serverBehind.delete(docId);
         },
+        markAcked: (docId, sv) => registry.recordAck?.(docId, sv),
         markMaterialized: (relPath) => registry.markMaterialized(relPath),
         loadResume: () => registry.bootstrapResume(),
         saveResume: (state) => registry.setBootstrapResume(state),
@@ -6108,6 +7340,7 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        diskBase: (docId) => ipc.getDiskBase(docId, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // Everything here is work by construction — the batch already decided it
@@ -6279,6 +7512,7 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        diskBase: (docId) => ipc.getDiskBase(docId, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // The server's word beats our checkpoint: a doc it holds no content for is
@@ -6683,6 +7917,10 @@ export class SyncManager implements InboundHost {
       this.presenceRepushTimer = null;
     }
     this.vaultStatus = "idle";
+    this.channelDown = false;
+    this.deletesAwaitChannel = false;
+    this.localChangesAwaitChannel = false;
+    this.localChangeAttempts.clear();
     this.onVaultStatus?.("idle");
     // A pause is about our writes in the vault we are leaving.
     this.syncPause.reset();
@@ -6738,6 +7976,9 @@ export class SyncManager implements InboundHost {
     // closed-app notice is evaluated afresh.
     this.goneFolders.clear();
     this.folderCandidates.clear();
+    this.removedWhilePairing.clear();
+    for (const t of this.emptyRefills.values()) clearTimeout(t);
+    this.emptyRefills.clear();
     this.rootMissing = false;
     // A failing pull describes the vault we are leaving.
     this.pullFailures = null;
@@ -7065,6 +8306,20 @@ export class SyncManager implements InboundHost {
         const p = this.registry.pathForDocId(docId);
         return p && this.registry.unmaterializable.skip(p) ? null : p;
       },
+      holdUpdates: (docId) => {
+        if (this.pendingDiskDeletes.has(docId) || this.drainingDocs.has(docId)) return true;
+        // A registered folder around it vanished and the drain has not judged
+        // it yet (a folder rename or delete): same hold as a note's own delete.
+        if (this.goneFolders.size === 0) return false;
+        const p = this.registry.pathForDocId(docId);
+        return !!p && [...this.goneFolders.keys()].some((f) => isUnder(p, f));
+      },
+      fileMissing: async (path) => !(await ipc.noteExists(path, scope.vaultEpoch)),
+      // Ops the server just sent are ops it holds: the update's own state
+      // vector, never the local doc's (`VaultDocStoreOptions.onServerOps`).
+      onServerOps: (docId, sv) => {
+        if (scope.isCurrent()) this.registry.recordAck?.(docId, sv);
+      },
       // The background feed writes .md files for docs nobody has open. Pin its
       // IO to this vault's epoch so a cold apply that lands after a vault switch
       // is refused by Rust instead of overwriting the new vault's file at the
@@ -7171,6 +8426,25 @@ export class SyncManager implements InboundHost {
       console.info(`[sync] ${path} is read-only for you; the file's differing text is replaced`);
       return true;
     });
+    // A note's file left EXACTLY empty while its doc holds text: the bridge
+    // refuses to clear the doc, and without this the file stayed empty on this
+    // disk for good (an AI or a search read nothing there). Once it has stayed
+    // empty for EMPTY_FILE_REFILL_MS, the doc's text is written back.
+    setEmptyFileRefiller((docId, path) => {
+      if (!scope.isCurrent() || this.emptyRefills.has(docId)) return;
+      const timer = setTimeout(() => {
+        this.emptyRefills.delete(docId);
+        void (async () => {
+          if (!scope.isCurrent()) return;
+          if (this.registry.getMapping(path)?.docId !== docId) return;
+          const text = await ipc.readNote(path, scope.vaultEpoch).catch(() => null);
+          if (text !== "" || !scope.isCurrent()) return;
+          const wrote = await this.materializeContent(docId, path).catch(() => false);
+          if (wrote) console.info(`[sync] ${path} was empty on disk; its text was written back`);
+        })();
+      }, EMPTY_FILE_REFILL_MS);
+      this.emptyRefills.set(docId, timer);
+    });
     this.vaultEngine = new VaultSyncEngine({
       api,
       vaultId,
@@ -7188,7 +8462,25 @@ export class SyncManager implements InboundHost {
         if (s !== "synced") this.clearVaultPresence();
         // Nothing more is coming over a dropped channel: deferred small
         // arrivals get their placeholders now.
-        if (s !== "synced" && this.vaultStatus === "synced") this.deferredArrivalFlush.flushNow();
+        if (s !== "synced" && this.vaultStatus === "synced") {
+          this.deferredArrivalFlush.flushNow();
+          this.channelDown = true;
+        }
+        // `no-access` is terminal (the channel stops retrying): nothing would
+        // ever release a hold, so whatever waited runs now and meets the
+        // server's answer like any other delete.
+        if (s === "no-access" && this.channelDown) {
+          this.channelDown = false;
+          if (this.deletesAwaitChannel) {
+            this.deletesAwaitChannel = false;
+            this.armDiskDeleteDrain(scope, 0);
+          }
+          this.binaryDeletes?.resume();
+          if (this.localChangesAwaitChannel) {
+            this.localChangesAwaitChannel = false;
+            this.armLocalChangeDrain(scope, 0);
+          }
+        }
         this.vaultStatus = s;
         this.emitStatus();
         this.onVaultStatus?.(s);
@@ -7202,6 +8494,19 @@ export class SyncManager implements InboundHost {
         if (s === "synced") {
           this.channelSynced = true;
           this.markLive();
+          if (this.channelDown) {
+            this.channelDown = false;
+            // Deletes made while offline go first; the pull below waits for them.
+            if (this.deletesAwaitChannel) {
+              this.deletesAwaitChannel = false;
+              this.armDiskDeleteDrain(scope, 0);
+            }
+            this.binaryDeletes?.resume();
+            if (this.localChangesAwaitChannel) {
+              this.localChangesAwaitChannel = false;
+              this.armLocalChangeDrain(scope, 0);
+            }
+          }
           this.handleRegistryChanged("channel-synced");
         }
       },
@@ -7244,6 +8549,12 @@ export class SyncManager implements InboundHost {
       onAppearanceChanged: (change) => this.onAppearanceChanged?.(change),
       // Team skills changed — the skills sync refetches its manifest.
       onSkillsChanged: (orgId) => this.onSkillsChanged?.(orgId),
+      // The vault's sync rules changed (#401): refetch and apply them here.
+      onSyncRulesChanged: (orgId) => {
+        if (scope.isCurrent() && (!scope.orgId || scope.orgId === orgId)) {
+          void this.refreshSyncRules(scope, orgId);
+        }
+      },
       // A teammate's viewing state changed — update the sidebar presence roster.
       onPresence: (peer) => this.handleVaultPresence(peer),
       // A teammate is talking. Play it as it lands; nothing is kept.
@@ -7375,12 +8686,14 @@ export class SyncManager implements InboundHost {
     if (count <= 0 || !scope.isCurrent()) return;
     const progress = this.progress;
     if (!progress) return;
-    this.binaryDownloads += count;
     if (this.downloadPhase || this.contentRunInFlight() || this.binaryDownloadPhase) {
+      this.binaryDownloads += count;
       progress.addTotal(count);
     } else {
       this.binaryDownloadPhase = true;
+      // Counted before the add: the phase adds the downloads still in flight.
       progress.phase("downloading", count);
+      this.binaryDownloads += count;
     }
     progress.flush();
   }
@@ -7440,15 +8753,22 @@ export class SyncManager implements InboundHost {
       // The same liveness the note queue uses: the vault channel is synced and
       // one pull has completed, so a missing file is a decision, not a startup.
       isLive: () => this.isLive(),
+      isOffline: () => this.channelDown,
       // `false` only for a definite not-found; every other failure — a vault
       // switch, an IPC hiccup under load — rejects, and the drain reads a
       // rejection as "couldn't ask" rather than "gone". This used to be a
       // `file_stat` whose EVERY error meant "deleted", which propagated deletes
       // for binaries that never left the disk.
       exists: (relPath) => ipc.binaryExists(relPath, epoch),
+      noteDeleteVerdict: (relPath) => this.binaryBesideNoteDeletes(relPath),
       listLocal: () => ipc.listBinaries(epoch),
-      listServer: () => api.listVaultBlobs(vaultId),
+      // What the vault's sync rules hide is never deleted from here (#401).
+      listServer: () => api.listVaultBlobs(vaultId).then((b) => registry.filterBlobListing(b)),
+      movedIntoHidden: (relPath, sha) => this.binaryMovedToHidden(scope, relPath, sha),
       fileId: (relPath) => registry.getFileId(relPath),
+      isOwnRemoval: (relPath) => registry.isOwnRemoval(relPath),
+      isOwnMoveSource: (relPath) => registry.isOwnMoveSource(relPath),
+      forgetStalePath: (relPath) => registry.forgetStaleFilePath(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
       // registry. Forgetting only the registry's copy left the dead id live for
       // the rest of the session: a file that came back uploaded under a row
@@ -7458,6 +8778,7 @@ export class SyncManager implements InboundHost {
         this.attachments?.forgetFile(relPath);
       },
       moveFileId: (from, to) => registry.moveFileId(from, to),
+      revertMove: (from, to) => registry.revertRefusedMove(from, to),
       deleteFile: (id) => api.deleteFile(id),
       // Never forced: a 409 means a note still embeds those bytes, and that
       // refusal is the whole reason the flag exists.
@@ -7472,6 +8793,7 @@ export class SyncManager implements InboundHost {
         this.attachments?.scheduleReconcile();
         this.embedArrivals?.nudge();
       },
+      onDrained: () => this.attachments?.deleteWindowClosed(),
       // Reported like a refused note delete: once per file per session.
       onNotCreator: (relPath, fileId) => {
         const key = `not-creator-file:${fileId ?? relPath}`;
@@ -7499,7 +8821,27 @@ export class SyncManager implements InboundHost {
     // An image that could not load asks for its file, whatever the fetcher's
     // own scan decided earlier (scrolled back into view, note reopened).
     this.embedWantOff = onAttachmentWanted((relPath) => void embeds.request([relPath]));
+    // A lock view read for another vault says nothing about this one.
+    this.readOnlyForText = null;
     this.attachments = new AttachmentSync({
+      isRevokedFile: (fileId) => this.authoritativeRevoked()?.has(fileId) ?? false,
+      noAccessFileIds: (fileIds) => this.registry.noAccessIds(fileIds),
+      isOwnRemoval: (relPath) => this.registry.isOwnRemoval?.(relPath) === true,
+      readOnlyPaths: () => {
+        const check = this.readOnlyPathCheck;
+        if (!check) return Promise.reject(new Error("no lock view"));
+        // One lock read per few seconds, not one per text batch: a big download
+        // indexes in many batches. An access change is at most this stale, and
+        // stale only means one refused (403) send or one skipped one.
+        const cached = this.readOnlyForText;
+        if (cached && Date.now() - cached.at < READ_ONLY_TEXT_TTL_MS) return cached.check;
+        const next = check();
+        this.readOnlyForText = { at: Date.now(), check: next };
+        next.catch(() => {
+          if (this.readOnlyForText?.check === next) this.readOnlyForText = null;
+        });
+        return next;
+      },
       // A vanished vault root (#221) stops the binary mirror too: a download
       // would re-create the old folder, a missing file would read as a delete.
       isCurrent: () => scope.isCurrent() && !this.rootMissing,
@@ -7507,7 +8849,10 @@ export class SyncManager implements InboundHost {
       refusals: scopedRefusalStore(defaultRefusalStore(), `${refusalServerScope()}|${vaultId}`),
       // The WHOLE vault, not just `attachments/`: a `.docx` in `Team/` is a
       // blob like any other since it got its own `files` row (PR3 Stage A).
-      listLocal: () => ipc.listBinaries(epoch),
+      // Minus the copies kept here unsynced after a teammate moved them into a
+      // folder the sync rules hide (#401): uploading those would undo the move.
+      listLocal: () =>
+        ipc.listBinaries(epoch).then((l) => l.filter((a) => !registry.isFrozenPath(a.relPath))),
       readLocal: (relPath) => ipc.readBinaryFile(relPath, epoch),
       writeLocal: (relPath, bytes) => ipc.writeBinaryFile(relPath, bytes, epoch),
       // A tree binary materializes through its OWN guard; the `attachments/`
@@ -7524,7 +8869,9 @@ export class SyncManager implements InboundHost {
       // folder a teammate deleted, waits with the folder like the notes in it:
       // each ask would be `path_folder_mismatch`.
       isHeldCreate: (relPath) => registry.isHeldRefusal(relPath) || registry.isInsideDeadFolder(relPath),
-      listServer: () => api.listVaultBlobs(vaultId),
+      // Minus what the vault's sync rules hide (#401): never downloaded,
+      // uploaded or followed from here.
+      listServer: () => api.listVaultBlobs(vaultId).then((b) => registry.filterBlobListing(b)),
       // The legacy pair: still the whole flow for a server that predates the
       // intent route, and the fallback the client drops to on its 404.
       uploadServer: (relPath, bytes, mime, docId, baseSha) =>
@@ -7551,6 +8898,7 @@ export class SyncManager implements InboundHost {
         api.completeBlob(completeUrl, body).then((r) => ({ file: r?.file })),
       // One-step file upload (`files-with-bytes`), from the cached `/health`.
       filesWithBytes: async () => (await this.serverFeatures()).has(FILES_WITH_BYTES),
+      emptyFiles: async () => (await this.serverFeatures()).has(EMPTY_FILES),
       requestParts: (partsUrl, partNumbers) => api.requestBlobParts(partsUrl, partNumbers),
       putFile: (input) =>
         ipc.uploadAttachment(
@@ -7618,6 +8966,7 @@ export class SyncManager implements InboundHost {
       // instead of being uploaded back (#215).
       listFileTombstones: () => api.listFileTombstones(vaultId),
       removeLocal: (relPath) => ipc.deleteFile(relPath, epoch).then(() => undefined),
+      deletedFilesRemoved: () => this.handleRegistryChanged("deleted-files-removed"),
       // #408: `attachments/` drops only now-hidden notes embed leave this disk,
       // under the same live + fresh-ACL-signal authority as a revoked note.
       attachmentBase: (relPath) => registry.getAttachmentBase(relPath),
@@ -7639,7 +8988,7 @@ export class SyncManager implements InboundHost {
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
       forgetFileId: (relPath) => registry.forgetFileId(relPath),
-      // Only ever used to drop a row THIS device minted for bytes the server
+      followFileMove: (from, to) => registry.followFileMove(from, to),      // Only ever used to drop a row THIS device minted for bytes the server
       // already holds under another id (`reconcileDedupedRow`).
       deleteFile: (id) => api.deleteFile(id),
       // A rename the delete queue could not settle (the server was unreachable
@@ -7688,6 +9037,11 @@ export class SyncManager implements InboundHost {
       onDownloadsQueued: (count) => this.handleBinaryDownloads(count, scope),
       onDownloadSettled: (outcome) => this.handleBinaryDownloadSettled(outcome, scope),
     });
+    // The registry follows teammates' moves; the mirror caches ids by path and
+    // must not keep the old name (a file made there later would upload under the
+    // moved file's id and pull it back).
+    const mirror = this.attachments;
+    registry.setFileMovedListener?.((from, to, id) => mirror.noteFileMoved(from, to, id));
   }
 
   /**

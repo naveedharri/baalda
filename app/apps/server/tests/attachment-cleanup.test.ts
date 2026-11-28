@@ -3,8 +3,8 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { seedBlob, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
-import { replaceBlobRefs } from "../src/blobs/refs.js";
-import { processAttachmentCleanup } from "../src/blobs/attachment-cleanup.js";
+import { flushBlobRefsAnnouncements, replaceBlobRefs, setBlobRefsNotifier } from "../src/blobs/refs.js";
+import { BLOB_REFS_VERSION, processAttachmentCleanup } from "../src/blobs/attachment-cleanup.js";
 import { purgeExpiredTrash } from "../src/trash/service.js";
 import { purgeNoteIndex } from "../src/index/indexer.js";
 
@@ -46,7 +46,7 @@ describe("attachments of a purged note", () => {
     await resetDb();
     orgId = await seedOrg("Cleanup Co", `cleanup-${randomUUID().slice(0, 8)}`);
     vaultId = await seedVault(orgId);
-    await pool.query("UPDATE vaults SET blob_refs_version = 2 WHERE id = $1", [vaultId]);
+    await pool.query("UPDATE vaults SET blob_refs_version = $2 WHERE id = $1", [vaultId, BLOB_REFS_VERSION]);
   });
 
   it("removes the ones only it used and keeps the ones another note still uses", async () => {
@@ -99,6 +99,65 @@ describe("attachments of a purged note", () => {
     await replaceBlobRefs(b, vaultId, "![x](/attachments/moved.png)");
     expect(await processAttachmentCleanup()).toBe(0);
     expect(await blobAt("attachments/moved.png")).toBe(1);
+  });
+
+  it("keeps a picture another note embeds in any form a note can show it", async () => {
+    // Each kept picture is embedded by A the plain way and by B in a form the
+    // extractor once missed; deleting A took it from B for everyone.
+    const forms: Array<[string, string]> = [
+      ["attachments/My Pic.png", "![](<attachments/My Pic.png>)"],
+      ["attachments/Titled Pic.png", '![a](<attachments/Titled Pic.png> "title")'],
+      ["attachments/dot.png", "![](./attachments/dot.png)"],
+      ["attachments/pic(1).png", "![](attachments/pic(1).png)"],
+      ["attachments/ref.png", "![a][r]\n\n[r]: attachments/ref.png"],
+      ["attachments/ref angle.png", "![a][r]\n\n[r]: <attachments/ref angle.png>"],
+      ["attachments/html space.png", '<img src="attachments/html space.png">'],
+    ];
+    for (const [rel] of forms) await seedBlob(vaultId, orgId, rel);
+    await seedBlob(vaultId, orgId, "attachments/only-a.png");
+    const a = await noteWith(
+      "A.md",
+      forms.map(([rel]) => `![](${rel.replace(/ /g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29")})`).join("\n") + "\n![](attachments/only-a.png)",
+    );
+    await noteWith("B.md", forms.map(([, md]) => md).join("\n\n"));
+
+    await deleteAndPurge(a);
+    expect(await processAttachmentCleanup()).toBe(1);
+    expect(await blobAt("attachments/only-a.png")).toBe(0);
+    for (const [rel] of forms) expect([rel, await blobAt(rel)]).toEqual([rel, 1]);
+  });
+
+  it("tells the vault once when a note starts embedding a drop the server already holds", async () => {
+    const heard: string[] = [];
+    setBlobRefsNotifier((v) => heard.push(v));
+    try {
+      await seedBlob(vaultId, orgId, "attachments/there.png");
+      const id = await seedNote(vaultId, null, "Shared.md");
+      // An edit that embeds nothing held, then the same embed again: silent.
+      await replaceBlobRefs(id, vaultId, "![](attachments/not-uploaded.png)", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([]);
+      // Now it embeds the held drop: one frame, however many edits follow.
+      await replaceBlobRefs(id, vaultId, "![](attachments/not-uploaded.png) ![](attachments/there.png)", pool, { announce: true });
+      await replaceBlobRefs(id, vaultId, "![](attachments/there.png) more text", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId]);
+      // Same references, new text: nothing new to say.
+      await replaceBlobRefs(id, vaultId, "![](attachments/there.png) and more text", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId]);
+      // The embed taken out: members who saw it through this note must hear.
+      await replaceBlobRefs(id, vaultId, "no pictures now", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId, vaultId]);
+      // A wiki embed by bare name of a mixed-case drop counts the same.
+      await seedBlob(vaultId, orgId, "attachments/Mixed Case.PNG");
+      await replaceBlobRefs(id, vaultId, "![[Mixed Case.PNG]]", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId, vaultId, vaultId]);
+    } finally {
+      setBlobRefsNotifier(null);
+    }
   });
 
   it("rebuilds an unkeyed vault's references from the index before trusting them", async () => {

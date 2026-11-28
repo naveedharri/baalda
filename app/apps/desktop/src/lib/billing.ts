@@ -769,21 +769,24 @@ export function invitePrewarning(
   account: SeatAccountLike,
   ownerName: string | null,
   viewerIsOwner: boolean,
-): { text: string; action: "add-seats" | "upgrade" | null } | null {
+): { title: string; text: string; action: "add-seats" | "upgrade" | null } | null {
   if (account.plan === "team" && account.seats.purchased != null) {
     const b = seatBreakdown(account.seats);
     if (b.available > 0) return null;
-    const full = seatsFullCopy(b.purchased);
-    const tail = b.reserved > 0 ? ` ${b.reserved} reserved by pending invitations.` : "";
+    const title = seatsFullCopy(b.purchased).replace(/\.$/, "");
+    const held =
+      b.reserved > 0 ? ` ${b.reserved} ${b.reserved === 1 ? "is" : "are"} held for pending invitations.` : "";
+    const already = "Anyone already on your account joins without one.";
     return viewerIsOwner
-      ? { text: `${full}${tail} New people need a seat; people already on your account don't.`, action: "add-seats" }
-      : { text: `${full}${tail} ${askOwnerTo(ownerName, "add seats")}`, action: null };
+      ? { title, text: `Someone new needs another seat.${held} ${already}`, action: "add-seats" }
+      : { title, text: `Someone new needs another seat.${held} ${askOwnerTo(ownerName, "add one")} ${already}`, action: null };
   }
   const cap = freeLimitOf(account);
   if (account.plan === "free" && account.seats.used + account.seats.reserved >= cap) {
+    const title = freePeopleIncluded(cap).replace(/\.$/, "");
     return viewerIsOwner
-      ? { text: freePeopleCopy(cap), action: "upgrade" }
-      : { text: `${freePeopleIncluded(cap)} ${askOwnerTo(ownerName, "upgrade to Team")}`, action: null };
+      ? { title, text: "Upgrade to Team to invite more people.", action: "upgrade" }
+      : { title, text: askOwnerTo(ownerName, "upgrade to Team"), action: null };
   }
   return null;
 }

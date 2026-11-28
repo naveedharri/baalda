@@ -1,4 +1,4 @@
-import { setAuditActor, withAuditActor } from "../../audit/access.js";
+import { withAuditActor } from "../../audit/access.js";
 import { randomUUID } from "node:crypto";
 import { isAccountReadOnly } from "../../billing/lapse.js";
 import { Hono } from "hono";
@@ -12,21 +12,28 @@ import {
 } from "../../permissions/lookup.js";
 import {
   buildAccessContext,
+  buildAccessContextFromIndex,
   createResolverCache,
   loadAccessIndex,
   resolveAccessForUser,
   type AccessIndex,
+  memberGroupIds,
   personalVaultLevel,
+  raiseMarksFor,
+  vaultBaseline,
 } from "../../permissions/resolver.js";
 import {
   indexHoldsResource,
+  permissionMode,
   summarizeAccess,
   type SummaryResource,
 } from "../../permissions/access-summary.js";
 import { getSession } from "../session.js";
 import {
+  clearRaiseMarks,
   AccessManagementError,
   applyBulkAccess,
+  DEFAULT_ACCESS_FIXED_MESSAGE,
   canManageMemberAccess,
   getJoinDefault,
   nextAccessRevision,
@@ -47,36 +54,6 @@ type Queryable = Pick<pg.Pool, "query">;
 
 /** The three postures the vault-level control offers. */
 type TeamAccessMode = "open" | "readonly" | "private";
-
-/**
- * The `shares.permission` a mode writes on the vault row.
- *
- * Private writes `denied` — a real row — rather than deleting the grant and
- * leaving none. Absence already meant something else: a vault that was never
- * shared, where people keep the notes they wrote (`created_by`,
- * private-by-default). Those two want opposite answers about authorship, so
- * they cannot be the same state. `denied` is the one the resolver reads as
- * `sealed`: nobody reaches anything, the owner who pressed it included, until
- * something is shared by name.
- */
-const MODE_PERMISSION: Record<TeamAccessMode, "edit" | "view" | "denied"> = {
-  open: "edit",
-  readonly: "view",
-  private: "denied",
-};
-
-/**
- * How much access a grant confers, so a change can be judged as widening or
- * NARROWING. `locked` and `denied` rank 0 alongside "no row": neither grants
- * anything, they only cap or block what another row granted.
- *
- * Only a narrowing needs a socket kick — the client reconnects and re-mints a
- * token, so a widening arrives on its own. This is the rule `POST /shares`
- * already follows when it kicks on view/locked/denied and never on edit.
- */
-function grantRank(permission: string | null | undefined): number {
-  return permission === "edit" ? 2 : permission === "view" || permission === "readonly" ? 1 : 0;
-}
 
 /**
  * Both `denied` (sealed) and no row at all report **Private**: the panel offers
@@ -158,41 +135,6 @@ async function teamOverrides(
 }
 
 /**
- * Org rows stranded on SOFT-DELETED notes — the ones `teamOverrides` refuses to
- * report because the user cannot see the note they sit on.
- *
- * PUT clears them anyway, silently and uncounted: left behind, a restored note
- * would come back carrying the very override the whole-vault setting was
- * applied to remove. They are absent from the reported `cleared` count because
- * the user never saw them, and absent from the socket kick because a deleted
- * doc has no live editors for the row to have been protecting.
- *
- * Soft-deleted NOTES only. `shares.resource_id` has no foreign key, so a row on
- * a hard-deleted folder or file outlives its resource; those are inert garbage
- * that no resolver can reach, they predate this endpoint, and cleaning them up
- * is not this control's job.
- */
-async function deadNoteOverrideIds(
-  db: Queryable,
-  orgId: string,
-  vaultIds: string[],
-): Promise<string[]> {
-  if (vaultIds.length === 0) return [];
-  const { rows } = await db.query<{ id: string }>(
-    `SELECT s.id
-       FROM shares s
-       JOIN notes n ON n.id = s.resource_id
-      WHERE s.principal_type = 'org'
-        AND s.principal_id = $2
-        AND s.resource_type = 'file'
-        AND n.deleted_at IS NOT NULL
-        AND n.vault_id = ANY($1::text[])`,
-    [vaultIds, orgId],
-  );
-  return rows.map((r) => r.id);
-}
-
-/**
  * The org's own posture row on the vault resource. At most one: the unique key
  * is (resource_type, resource_id, principal_type, principal_id), so it is the
  * `principal_id = orgId` filter — not the key alone — that makes this single.
@@ -233,7 +175,7 @@ export interface ShareDeps {
 export function createShareRoutes(deps: ShareDeps): Hono {
   const app = new Hono();
 
-  const accessError = (c: { json: (body: unknown, status: 400 | 403 | 404) => Response }, error: unknown) => {
+  const accessError = (c: { json: (body: unknown, status: 400 | 403 | 404 | 409) => Response }, error: unknown) => {
     if (error instanceof AccessManagementError) {
       return c.json({ error: error.code, message: error.message }, error.status);
     }
@@ -329,7 +271,8 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           !resource.resourceId,
       ) ||
       (audience.type !== "org" &&
-        (audience.type !== "users" || !Array.isArray(audience.userIds)))
+        (audience.type !== "users" || !Array.isArray(audience.userIds)) &&
+        (audience.type !== "group" || typeof audience.groupId !== "string" || !audience.groupId))
     ) {
       return c.json({ error: "invalid_request", message: "Invalid resources or audience" }, 400);
     }
@@ -518,6 +461,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     //     `personalVaultLevel`). `denied` here is "No access" for them: it
     //     replaces the posture and withdraws authorship, owners and admins
     //     included; management stays role-based, so it can always be undone.
+    //
+    // The org row on the vault resource (default access) is fixed: refused here,
+    // whatever its permission (`DEFAULT_ACCESS_FIXED_MESSAGE`).
+    if (resourceType === "vault" && principalType === "org") {
+      return c.json({ error: DEFAULT_ACCESS_FIXED_MESSAGE, code: "default_access_fixed" }, 409);
+    }
 
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
@@ -593,6 +542,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           accessRevision,
         ],
       );
+
+      // A level just for this person is the newest word on this place: an older
+      // "group may raise them" mark here or inside must not outvote it.
+      if (principalType === "user" && permission !== "locked") {
+        await clearRaiseMarks(client, gate.organizationId!, { resourceType, resourceId } as AccessResource, [principalId]);
+      }
 
       // An Everyone/org lock subsumes any per-user locks on the same resource —
       // drop them so a single Unlock actually unlocks. (Those users stay locked by
@@ -740,7 +695,34 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     // Read-only one (reported as a lift below), and a personal `denied` needs
     // nothing here — their readable set is already empty.
     const personal = await personalVaultLevel(pool, org, session.userId);
-    const postureLocked = posture?.permission === "view" || personal === "view";
+    // The caller's access groups lift like their own grants do (resolver
+    // `rowsGroupGrant`), unless they have a vault level of their own, which
+    // ignores groups. A group's whole-vault `edit` lifts the Read-only seed
+    // entirely, so no vault padlock is reported for them.
+    // A personal Can view combines with groups (resolver); a personal No
+    // access ignores them.
+    // Since 2026-11-27 a setting just for a person decides over their groups:
+    // with a vault level of their own, only groups MARKED as allowed to raise
+    // them count (access_group_raises), and only through the marked places.
+    const allGroupIds = personal !== "denied" ? await memberGroupIds(pool, org, session.userId) : [];
+    const allMarks = await raiseMarksFor(pool, org, session.userId);
+    const marks = personal ? allMarks : [];
+    const vaultMarked = new Set(marks.filter((m) => m.resourceType === "vault").map((m) => m.groupId));
+    const groupIds = personal ? allGroupIds.filter((g) => vaultMarked.has(g)) : allGroupIds;
+    const groupVaultEdit =
+      groupIds.length > 0 &&
+      ((
+        await pool.query(
+          `SELECT 1 FROM shares
+            WHERE resource_type = 'vault' AND resource_id = $1 AND permission = 'edit'
+              AND principal_type = 'group' AND principal_id = ANY($2::text[])
+            LIMIT 1`,
+          [org, groupIds],
+        )
+      ).rowCount ?? 0) > 0;
+    // A personal Can edit still gets the posture seed, with its own row as
+    // the lift (the client's contract): only a group's vault edit drops it.
+    const postureLocked = (posture?.permission === "view" || personal === "view") && !groupVaultEdit;
     if (postureLocked) {
       rows.push({
         // NOT `posture.id` (nor the caller's personal row id). That is the live vault GRANT row, and
@@ -774,6 +756,9 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           AND (
             ($4::boolean AND s.principal_type = 'org' AND s.principal_id = $2)
             OR (s.principal_type = 'user' AND s.principal_id = $3)
+            -- The caller's group edit rows lift only the posture seed: a
+            -- person's own Can view / No access is never lifted by a group.
+            OR ($4::boolean AND s.principal_type = 'group' AND s.principal_id = ANY($5::text[]))
           )
           AND (
             (s.resource_type = 'folder' AND s.resource_id IN
@@ -786,9 +771,36 @@ export function createShareRoutes(deps: ShareDeps): Hono {
             OR ($4::boolean AND s.resource_type = 'vault' AND s.resource_id = $2
                 AND s.principal_type = 'user' AND s.principal_id = $3)
           )`,
-      [vaultId, org, session.userId, postureLocked],
+      [vaultId, org, session.userId, postureLocked, groupIds],
     );
     rows.push(...lifts);
+    // A group marked to raise them on one folder or note lifts exactly there:
+    // reported as a lift at the marked place when they can edit it now. In
+    // every posture: the mark sits under a setting just for them (Can view or
+    // No access on a folder above), which the client otherwise folds down.
+    if (allMarks.length > 0) {
+      const cache = createResolverCache();
+      for (const m of allMarks) {
+        if (m.resourceType === "vault" || !allGroupIds.includes(m.groupId)) continue;
+        const ctx = await buildAccessContext(m.resourceType === "file" ? "file" : "folder", m.resourceId, pool, cache);
+        if (!ctx || ctx.organizationId !== org) continue;
+        const now = await resolveAccessForUser(ctx, session.userId, role, pool, cache);
+        if (now.permission !== "edit") continue;
+        rows.push({
+          id: `raise:${m.groupId}:${m.resourceId}`,
+          resource_type: m.resourceType,
+          resource_id: m.resourceId,
+          principal_type: "user",
+          principal_id: session.userId,
+          permission: "edit",
+          created_by: null,
+          created_at: null,
+        });
+      }
+    }
+    if (!postureLocked && groupIds.length > 0) {
+      rows.push(...(await groupViewLocks(vaultId, org, session.userId, role, groupIds)));
+    }
     return c.json({ locks: rows });
   });
 
@@ -856,108 +868,18 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const gate = await canManage(session.userId, "vault", orgId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
 
-    const vaultIds = gate.vaultIds ?? [];
-    const permission = MODE_PERMISSION[mode];
-
-    // What has to be force-disconnected. NOT "everything that was deleted": a
-    // client reconnects and re-mints its own token, so a change that gives
-    // people MORE access arrives by itself and a kick would only cost a
-    // reconnect. Only a narrowing has to reach open editors immediately, which
-    // is the same rule `POST /shares` applies per resource.
-    //
-    //   item row   kicked iff grantRank(row) > grantRank(target)
-    //   posture    kicked iff grantRank(old) > grantRank(new)
-    //
-    // So Read-only→Shared kicks nobody, Shared→Read-only kicks every doc, and a
-    // cleared `locked`/`denied` row (rank 0) never kicks anyone at all.
-    let itemKick: Array<{ resourceType: "folder" | "file"; resourceId: string }> = [];
-    let vaultKick = false;
-    // Reported separately, because the desktop says "N folder and note settings
-    // cleared": `cleared` counts ITEM rows only — the ones GET would have
-    // listed — and the posture is a yes/no of its own.
-    let cleared = 0;
-    let postureChanged = false;
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      await setAuditActor(client, session.userId);
-      const accessRevision = await nextAccessRevision(client, orgId);
-
-      const overrides = await teamOverrides(client, orgId, vaultIds);
-      const dead = await deadNoteOverrideIds(client, orgId, vaultIds);
-      const posture = await vaultPostureRow(client, orgId);
-      // Compared as RAW permissions, not as modes. Sealing a vault that was
-      // merely never shared is a change even though both read as Private — it
-      // is the change that stops authorship keeping a note — and reporting it
-      // as a no-op would skip the `onAclChanged` fan-out and leave every open
-      // client on its old readable set.
-      postureChanged = (posture?.permission ?? null) !== permission;
-      cleared = overrides.length;
-
-      // Nothing deletes the posture row any more: all three modes upsert it in
-      // place (Private writes `denied`), which keeps `grantId` stable for the
-      // client and leaves no instant inside the transaction where the vault has
-      // no row at all — an instant that used to read as "never shared", the one
-      // state whose meaning is different.
-      const ids = [...overrides.map((o) => o.id), ...dead];
-      itemKick = overrides
-        .filter((o) => grantRank(o.permission) > grantRank(permission))
-        .map((o) => ({ resourceType: o.resourceType, resourceId: o.resourceId }));
-      // Sealing narrows even from no row at all: `denied` and absence both rank
-      // 0, but absence lets people read what they wrote and `denied` does not,
-      // so an author with the note open has to be disconnected.
-      vaultKick =
-        grantRank(posture?.permission) > grantRank(permission) ||
-        (permission === "denied" && posture?.permission !== "denied");
-      if (ids.length > 0) {
-        await client.query("DELETE FROM shares WHERE id = ANY($1::text[])", [ids]);
-      }
-
-      await client.query(
-        `INSERT INTO shares
-           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
-         VALUES ($1, $2, 'vault', $3, 'org', $4, $5, $6, $7)
-         ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-         DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision`,
-        [randomUUID(), orgId, orgId, orgId, permission, session.userId, accessRevision],
-      );
-
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
+    // Default access is fixed to Only what's shared (2026-11-25): access comes
+    // from groups and personal levels. Older desktops still offer the control,
+    // so a change is refused in plain words, and re-applying Only what's shared
+    // to a vault that already is changes nothing (it would otherwise clear the
+    // folder settings the conversion kept).
+    // A vault that was never shared is refused too: sealing it would take every
+    // member's own notes off their disk.
+    const sealedNow = (await vaultBaseline(pool, orgId)) === "sealed";
+    if (mode !== "private" || !sealedNow) {
+      return c.json({ error: DEFAULT_ACCESS_FIXED_MESSAGE, code: "default_access_fixed" }, 409);
     }
-
-    // After the commit. A narrowed vault posture already reaches every doc in
-    // every collection of the org, so the per-item walks underneath it are
-    // pure duplication — resolve the one query and skip them. Otherwise the
-    // items go in a single batch rather than one recursive walk apiece.
-    // (The subtree walks still work: only `shares` rows were deleted.)
-    const affected = vaultKick
-      ? await docsForResource("vault", orgId)
-      : await docsForResources(itemKick);
-
-    // Best-effort, one doc at a time. The write is already committed, so a
-    // transport that throws on one socket must not cost the caller a 500 and
-    // must not strand the docs behind it on their old permission.
-    let disconnected = 0;
-    for (const d of affected) {
-      try {
-        deps.disconnectDoc(d.vaultId, d.docId);
-        disconnected += 1;
-      } catch {
-        // The doc keeps its socket until the token expires; nothing else to do.
-      }
-    }
-    // Only on a real change: an idempotent PUT would otherwise make every
-    // vault-channel subscriber in every collection recompute its readable set
-    // for nothing.
-    if (cleared > 0 || postureChanged) for (const v of vaultIds) deps.onAclChanged?.(v);
-
-    return c.json({ mode, cleared, postureChanged, disconnectedDocs: disconnected });
+    return c.json({ mode: "private", cleared: 0, postureChanged: false, disconnectedDocs: 0 });
   });
 
   // List shares for a resource.
@@ -975,10 +897,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const gate = await canManage(session.userId, resourceType, resourceId);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
 
+    // Group rows (migration 097) only with `includeGroups=1`: an older desktop
+    // reads every row here as a person or the team.
+    const includeGroups = c.req.query("includeGroups") === "1";
     const { rows } = await pool.query(
       `SELECT id, resource_type, resource_id, principal_type, principal_id, permission, created_by, created_at
-         FROM shares WHERE resource_type = $1 AND resource_id = $2`,
-      [resourceType, resourceId],
+         FROM shares WHERE resource_type = $1 AND resource_id = $2
+          AND ($3::boolean OR principal_type <> 'group')`,
+      [resourceType, resourceId, includeGroups],
     );
     return c.json({ shares: rows });
   });
@@ -1039,9 +965,14 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const { rows } = await pool.query<{
       resource_type: "folder" | "file" | "vault";
       resource_id: string;
-    }>("SELECT resource_type, resource_id FROM shares WHERE id = $1", [shareId]);
+      principal_type: string;
+    }>("SELECT resource_type, resource_id, principal_type FROM shares WHERE id = $1", [shareId]);
     const share = rows[0];
     if (!share) return c.json({ error: "Share not found" }, 404);
+    // Removing the default-access row is a change of default access, too.
+    if (share.resource_type === "vault" && share.principal_type === "org") {
+      return c.json({ error: DEFAULT_ACCESS_FIXED_MESSAGE, code: "default_access_fixed" }, 409);
+    }
 
     const gate = await canManage(session.userId, share.resource_type, share.resource_id);
     if (!gate.ok) return c.json({ error: gate.error }, (gate.status ?? 403) as 403 | 404);
@@ -1060,4 +991,133 @@ export function createShareRoutes(deps: ShareDeps): Hono {
   });
 
   return app;
+}
+
+/**
+ * A group's Can view is a pure grant (`view`, never a cap), so `/locks` used to
+ * say nothing about it and a member who could only VIEW a folder through a group
+ * (in a vault whose Everyone level gives them less) saw it unlocked: rename, new
+ * note and drag-in were offered and then refused by the server. Report it the way
+ * the client already understands a view-only item — the caller's own `readonly`
+ * row — but only where the caller's EFFECTIVE access is view, resolved by the same
+ * resolver the Access board uses, and only at the top of each view-only subtree:
+ * a folder is reported when it is not editable itself and nothing the caller can
+ * SEE under it is editable (a deeper edit from another grant must stay editable,
+ * and an item padlock is a cap the client does not lift; a hidden No access note
+ * inside does not count, since the caller never sees it). Runs only for callers
+ * with a group `view` row in this vault.
+ */
+async function groupViewLocks(
+  vaultId: string,
+  org: string,
+  userId: string,
+  role: string,
+  groupIds: string[],
+): Promise<Array<Record<string, unknown>>> {
+  const { rows: viewRows } = await pool.query<{ resource_type: string; resource_id: string }>(
+    `SELECT s.resource_type, s.resource_id FROM shares s
+      WHERE s.principal_type = 'group' AND s.principal_id = ANY($3::text[]) AND s.permission = 'view'
+        AND ((s.resource_type = 'vault' AND s.resource_id = $2)
+          OR (s.resource_type = 'folder' AND s.resource_id IN (SELECT id FROM folders WHERE vault_id = $1))
+          OR (s.resource_type = 'file' AND s.resource_id IN
+               (SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
+                UNION SELECT id FROM files WHERE vault_id = $1)))`,
+    [vaultId, org, groupIds],
+  );
+  if (viewRows.length === 0) return [];
+  // The access index already holds this collection's folders and live notes/files.
+  const index = await loadAccessIndex(pool, org);
+  const pick = (m: Map<string, { vaultId: string; folderId: string | null }>) => ({
+    rows: [...m].filter(([, d]) => d.vaultId === vaultId).map(([id, d]) => ({ id, folder_id: d.folderId })),
+  });
+  const allFolders = {
+    rows: [...index.folders].filter(([, f]) => f.vaultId === vaultId).map(([id, f]) => ({ id, parent_id: f.parentId })),
+  };
+  const allNotes = pick(index.notes);
+  const allFiles = pick(index.files);
+  // Only what lies under a group's Can view can be view-only BECAUSE of a group,
+  // so only those subtrees are resolved (a whole-vault Can view takes them all).
+  const wholeVault = viewRows.some((r) => r.resource_type === "vault");
+  const inScope = new Set<string>();
+  if (!wholeVault) {
+    const children = new Map<string, string[]>();
+    for (const f of allFolders.rows) {
+      if (f.parent_id === null) continue;
+      const list = children.get(f.parent_id) ?? [];
+      list.push(f.id);
+      children.set(f.parent_id, list);
+    }
+    const stack = viewRows.filter((r) => r.resource_type === "folder").map((r) => r.resource_id);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (inScope.has(id)) continue;
+      inScope.add(id);
+      stack.push(...(children.get(id) ?? []));
+    }
+  }
+  const viewDocs = new Set(viewRows.filter((r) => r.resource_type === "file").map((r) => r.resource_id));
+  const docInScope = (d: { id: string; folder_id: string | null }) =>
+    wholeVault || viewDocs.has(d.id) || (d.folder_id !== null && inScope.has(d.folder_id));
+  const folders = { rows: wholeVault ? allFolders.rows : allFolders.rows.filter((f) => inScope.has(f.id)) };
+  const notes = { rows: allNotes.rows.filter(docInScope) };
+  const files = { rows: allFiles.rows.filter(docInScope) };
+  // The same resolution the Access board makes for one item (`boardModes`), for
+  // just these items: that board folds the whole vault, which on a large one is
+  // most of the cost and buys nothing here.
+  const cache = createResolverCache();
+  const own = async (type: "folder" | "file", id: string) => {
+    const ctx = await buildAccessContextFromIndex(index, type, id, pool, cache);
+    return ctx ? permissionMode((await resolveAccessForUser(ctx, userId, role, pool, cache, index)).permission) : "private";
+  };
+  const modes = { ownFolders: new Map<string, string>(), docs: new Map<string, string>() };
+  for (const f of folders.rows) modes.ownFolders.set(f.id, await own("folder", f.id));
+  for (const d of [...notes.rows, ...files.rows]) modes.docs.set(d.id, await own("file", d.id));
+  // A NOTE's own mode decides the editor; a FOLDER's decides create/rename/drag-in.
+  // Fold each folder's own mode with every VISIBLE descendant: "open" anywhere
+  // keeps it unpadlocked; No access items are skipped (not drawn at all).
+  const editableBelow = new Set<string>();
+  const parentOf = new Map(folders.rows.map((f) => [f.id, f.parent_id]));
+  const markUp = (folderId: string | null) => {
+    for (let cur = folderId, guard = 0; cur !== null && guard < 10_000; cur = parentOf.get(cur) ?? null, guard++) {
+      if (editableBelow.has(cur)) return;
+      editableBelow.add(cur);
+    }
+  };
+  for (const f of folders.rows) if (modes.ownFolders.get(f.id) === "open") markUp(f.id);
+  for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) === "open") markUp(d.folder_id);
+  // Only folders the caller can see (readable itself, or a path to something
+  // readable): never hand out the ids of folders hidden from them.
+  const visible = new Set<string>();
+  const markVisible = (folderId: string | null) => {
+    for (let cur = folderId, guard = 0; cur !== null && guard < 10_000; cur = parentOf.get(cur) ?? null, guard++) {
+      if (visible.has(cur)) return;
+      visible.add(cur);
+    }
+  };
+  for (const f of folders.rows) if (modes.ownFolders.get(f.id) !== "private") markVisible(f.id);
+  for (const d of [...notes.rows, ...files.rows]) if (modes.docs.get(d.id) !== "private") markVisible(d.folder_id);
+  // Only folders inside a group's Can view can carry (or absorb) the padlock. An
+  // ancestor outside it is visible as a path, but nothing here reports it, so
+  // counting it as view-only left the subtree's own top folder unreported: a
+  // subfolder viewable through a group showed no padlock at all.
+  const inRows = new Set(folders.rows.map((f) => f.id));
+  const viewFolder = (id: string | null) =>
+    id !== null && inRows.has(id) && visible.has(id) && !editableBelow.has(id);
+  const lock = (resourceType: "folder" | "file", resourceId: string) => ({
+    id: `group-view:${resourceId}`,
+    resource_type: resourceType,
+    resource_id: resourceId,
+    principal_type: "user",
+    principal_id: userId,
+    permission: "readonly",
+    reason: "group_view",
+    created_by: null,
+    created_at: null,
+  });
+  const out: Array<Record<string, unknown>> = [];
+  for (const f of folders.rows) if (viewFolder(f.id) && !viewFolder(f.parent_id)) out.push(lock("folder", f.id));
+  for (const d of [...notes.rows, ...files.rows]) {
+    if (modes.docs.get(d.id) === "readonly" && !viewFolder(d.folder_id)) out.push(lock("file", d.id));
+  }
+  return out;
 }

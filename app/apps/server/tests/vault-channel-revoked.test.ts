@@ -9,7 +9,7 @@ import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { recordingAppDeps } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedFolder, seedMember, seedNote, seedShare, seedVault, seedVaultGrant } from "./helpers/seed.js";
+import { seedFolder, seedMember, seedNote, seedShare, seedVault, seedVaultGrant, sealVault } from "./helpers/seed.js";
 
 /**
  * `ready.revoked` — the server STATING which docs a client holds that it may no
@@ -135,9 +135,7 @@ describe("vault channel — ready.revoked", () => {
   });
 
   it("names exactly the docs the member holds but may no longer read", async () => {
-    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
-      200,
-    );
+    await sealVault(orgId);
 
     const ready = await readyFor(member.userId, vault, [rootNote, folderNote, ownNote]);
     // Every doc they hold, their OWN note included: pressing Private seals the
@@ -149,9 +147,7 @@ describe("vault channel — ready.revoked", () => {
   });
 
   it("is bounded by the manifest — a doc the client does not hold is never named", async () => {
-    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
-      200,
-    );
+    await sealVault(orgId);
 
     // The client holds only ONE of the two revoked notes. The other is just as
     // unreadable, and just as absent from the frame: the list describes this
@@ -161,9 +157,7 @@ describe("vault channel — ready.revoked", () => {
   });
 
   it("names the owner's losses too — Private is not a setting they sit above", async () => {
-    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
-      200,
-    );
+    await sealVault(orgId);
 
     // All three, the two the owner wrote included. The list is NAMED rather
     // than left to the client's "absent from both listings" guess, because
@@ -181,9 +175,7 @@ describe("vault channel — ready.revoked", () => {
     // is named on a later connect; the client keeps what it was given as its
     // allow-list rather than treating truncation as licence to remove
     // everything, which would leave the largest revocations the least guarded.
-    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
-      200,
-    );
+    await sealVault(orgId);
     // Ids the client CLAIMS to hold. They need no rows: unreadable is unreadable,
     // and this is the client's own manifest being differenced against its
     // readable set.
@@ -195,9 +187,7 @@ describe("vault channel — ready.revoked", () => {
   });
 
   it("names nothing a surviving folder share still covers", async () => {
-    expect((await put(owner, `/api/orgs/${orgId}/team-access`, { mode: "private" })).status).toBe(
-      200,
-    );
+    await sealVault(orgId);
     // Per-USER rows survive the vault-level control, so the member keeps this
     // folder — and with it every note inside.
     await seedShare(orgId, "folder", folder, member.userId, "view");

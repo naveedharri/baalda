@@ -37,7 +37,8 @@ Sealed with AES-256-GCM under the vault key. Each value is bound to its table, c
 ciphertext cannot be moved to another row.
 
 - Note content: the CRDT update log and snapshots (`doc_updates.update_enc`, `doc_snapshots.snapshot_enc`).
-- The search index: note text, vectors and token sets (`note_index.search_enc`), and text extracted from files
+- The search index: note text, vectors and token sets (`note_index.search_enc`; the ranking half again in
+  `search_score_enc`, the attachment reference excerpt in `ref_enc`), and text extracted from files
   (`blob_text.search_enc`).
 - Version history and checkpoint text (`note_texts.content_enc`).
 - Public link tokens: only a hash and a sealed copy are stored (`public_links.token_hash`, `token_enc`), plus

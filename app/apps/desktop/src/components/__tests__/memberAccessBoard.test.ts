@@ -146,7 +146,12 @@ describe("Member access board", () => {
   it("says so, in error style, when the server's re-read disagrees with the move", async () => {
     await render();
     // The write is accepted but the server still resolves Welcome as view only.
-    api.setBulkAccess.mockResolvedValue({ mode: "open", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    // Held until the optimistic state is checked: a write that answers at once
+    // lets the re-read land inside the click's act() on a busy machine.
+    let answer!: () => void;
+    api.setBulkAccess.mockImplementation(() => new Promise((resolve) => {
+      answer = () => resolve({ mode: "open", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    }));
     await act(async () => button("Move Welcome left").click());
     expect(api.setBulkAccess.mock.calls[0][1]).toEqual({
       resources: [{ resourceType: "file", resourceId: "n2" }],
@@ -155,6 +160,7 @@ describe("Member access board", () => {
     });
     // Optimistic first...
     expect(names("open")).toContain("Welcome");
+    await act(async () => answer());
     await settle();
     // ...then the truth.
     expect(names("readonly")).toContain("Welcome");
@@ -482,7 +488,7 @@ describe("Member access board", () => {
     expect(api.setBulkAccess).not.toHaveBeenCalled();
   });
 
-  it("Reset to vault default confirms, then makes one request and reloads", async () => {
+  it("Reset to vault default (older Default access) confirms, then makes one request and reloads", async () => {
     api.resetMemberAccess.mockResolvedValue({ removed: 2, disconnectedDocs: 0 });
     await render({ personVaultMode: "readonly", everyoneMode: "open" });
     await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
@@ -496,6 +502,66 @@ describe("Member access board", () => {
     expect(api.resetMemberAccess).toHaveBeenCalledWith("org-1", "u2");
     expect(api.setBulkAccess).not.toHaveBeenCalled();
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+  it("Reset to groups only confirms, then makes one request and reloads", async () => {
+    api.resetMemberAccess.mockResolvedValue({ removed: 2, disconnectedDocs: 0 });
+    await render({ personVaultMode: "readonly", everyoneMode: "private" });
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
+    const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((li) => li.textContent?.startsWith("Reset to groups only"))!;
+    await act(async () => option.click());
+    expect(dialog()?.textContent).toContain("Reset Sara's access to groups only?");
+    expect(api.resetMemberAccess).not.toHaveBeenCalled();
+    await act(async () => dialogButton("Reset").click());
+    expect(api.resetMemberAccess).toHaveBeenCalledTimes(1);
+    expect(api.resetMemberAccess).toHaveBeenCalledWith("org-1", "u2");
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+  it("Group Access: the third column is No access (there is no Not shared), and no Reset until a setting is just for them", async () => {
+    modes = { f1: "private", n1: "private", n2: "private", n3: "private" };
+    await render({ accessSource: "group", everyoneMode: "private", personVaultMode: "private" });
+    expect(column("private").textContent).toContain("No access");
+    expect(column("private").textContent).not.toContain("Not shared");
+    const reset = () => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Reset to Group Access");
+    expect(reset()).toBeUndefined();
+    expect([...host.querySelectorAll("button")].some((b) => /Personal Access/.test(b.textContent ?? ""))).toBe(false);
+  });
+  it("on Personal Access, a column's Add all sets the whole level, including what's added later", async () => {
+    await render({ accessSource: "personal", everyoneMode: "private", personVaultMode: "open" });
+    await act(async () => button("Can view actions").click());
+    const add = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Add all"))!;
+    expect(add.textContent).toContain("including what's added later");
+    await act(async () => add.click());
+    if (dialog()) { const bs = [...dialog()!.querySelectorAll("button")]; await act(async () => bs[bs.length - 1].click()); }
+    await settle();
+    const calls = api.setBulkAccess.mock.calls;
+    const last = calls[calls.length - 1][1] as { resources: Array<{ resourceType: string }>; mode: string };
+    expect(last.resources.map((r) => r.resourceType)).toEqual(["vault"]);
+    expect(last.mode).toBe("readonly");
+  });
+  it("Reset to Group Access shows once a setting is just for them, says what can leave their computer, then removes their settings", async () => {
+    await render({ accessSource: "personal", hasPersonal: true, everyoneMode: "private", personVaultMode: "open" });
+    expect(column("private").textContent).toContain("No access");
+    expect(host.querySelector('button[aria-label="Set everything to"]')).toBeNull();
+    const reset = [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Reset to Group Access")!;
+    await act(async () => reset.click());
+    expect(dialog()?.textContent).toContain("Reset Sara to Group Access?");
+    expect(dialog()?.textContent).toContain("What their groups don't give leaves their computer.");
+    await act(async () => dialogButton("Reset").click());
+    await settle();
+    expect(api.resetMemberAccess).toHaveBeenCalledTimes(1);
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Reset to Group Access")).toBe(false);
+  });
+  it("Reset to groups only says what the person keeps", async () => {
+    await render({ personVaultMode: "readonly", everyoneMode: "private" });
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Set everything to"]')!.click());
+    const option = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((li) => li.textContent?.startsWith("Reset to groups only"))!;
+    expect(option.textContent).toContain("Remove settings just for them");
+    await act(async () => option.click());
+    expect(dialog()?.textContent).toContain("They keep what their groups give.");
   });
   describe("collapsed folders", () => {
     const nested = () => {

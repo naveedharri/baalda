@@ -2,8 +2,9 @@ import type { UpdateState } from "./updater";
 
 /**
  * One reading of the updater's state for every surface that shows it: the
- * About card, the sidebar line above the account row, and the account menu's
- * update row. They differ in size, never in what they say.
+ * About card and the account menu's update row. Nothing about updates shows
+ * in the sidebar (owner decision 2026-11-25): Account Settings → About says it.
+ * They differ in size, never in what they say.
  */
 export interface UpdateView {
   /** `ok` up to date, `busy` working, `ready` restart pending, `wait` on its way, `error`. */
@@ -44,12 +45,13 @@ export function updateView(state: UpdateState, current: string | null): UpdateVi
     case "pending":
       return { tone: "wait", title: "An update is on its way", sub: "Baalda checks again on its own", percent: null, action: null };
     case "error":
-      return { tone: "error", title: `Baalda ${here}`, sub: `Couldn't check for updates: ${state.message}`, percent: null, action: "retry" };
+      return { tone: "error", title: `Baalda ${here}`, sub: "Couldn't check for updates. Try again later.", percent: null, action: "retry" };
     case "failed":
       return {
         tone: "error",
         title: `Couldn't install ${state.version}`,
-        sub: state.message || "The download was interrupted",
+        // Never the raw error text (it goes to the log, lib/updater.ts).
+        sub: "The download was interrupted. Try again later.",
         percent: null,
         action: "retry",
       };
@@ -58,7 +60,12 @@ export function updateView(state: UpdateState, current: string | null): UpdateVi
   }
 }
 
-/** The sidebar line shows only while something is happening or waiting on you. */
-export function showsSidebarUpdateLine(view: UpdateView): boolean {
-  return view.tone === "busy" || view.tone === "ready" || view.tone === "error" || view.tone === "wait";
+/**
+ * The account menu's update row under the same rule: a failed check or install
+ * reads as the plain "Check for updates" row with the version, never a red card
+ * in the menu. About says what went wrong. Clicking still checks (and its toast
+ * answers that click).
+ */
+export function menuUpdateView(view: UpdateView): UpdateView {
+  return view.tone === "error" ? { ...view, tone: "idle", sub: "", percent: null, action: "check" } : view;
 }

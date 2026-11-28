@@ -12,12 +12,17 @@
 
 export type MembershipLossReason = "removed" | "left";
 
-/** The ONE notice line shown after the folder is gone. */
-export function membershipLostNotice(vaultName: string, reason: MembershipLossReason): string {
+/** The ONE notice line shown after the folder is gone. `keptIn` is the
+ *  folder when files the vault never synced were left in it (#401). */
+export function membershipLostNotice(
+  vaultName: string,
+  reason: MembershipLossReason,
+  keptIn: string | null = null,
+): string {
   const name = vaultName.trim() || "this vault";
-  return reason === "left"
-    ? `You left ${name}. Its files were removed from this device.`
-    : `You were removed from ${name}. Its files were removed from this device.`;
+  const head = reason === "left" ? `You left ${name}.` : `You were removed from ${name}.`;
+  if (!keptIn) return `${head} Its files were removed from this device.`;
+  return `${head} Its synced files were removed from this device. Files that never synced are still in ${keptIn}.`;
 }
 
 /** Should a `member-removed` frame be acted on? Only for the signed-in user. */

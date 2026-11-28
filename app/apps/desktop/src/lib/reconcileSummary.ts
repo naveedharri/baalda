@@ -8,9 +8,11 @@
 import type { ReconcileItem, ReconcileKind } from "./sync/reconcileReport";
 import { READ_ONLY_DETAIL } from "./sync/readOnlyRejections";
 import { isNoteExt } from "./formats";
-import { NOT_CREATOR_DETAIL } from "./sync/deletePolicy";
+import { NOT_CREATOR_DETAIL, VIEW_ONLY_DELETE_DETAIL } from "./sync/deletePolicy";
+import { SELF_REVOKED_DETAIL } from "./sync/reconcileReport";
 
 export const RECONCILE_KIND_ORDER: readonly ReconcileKind[] = [
+  "unsentRemoved",
   "deletedByTeammate",
   "keptLocally",
   "externalEditSaved",
@@ -31,6 +33,7 @@ export const RECONCILE_KIND_LABEL: Record<ReconcileKind, string> = {
   folderKept: "Folder kept",
   externalEditSaved: "Replaced",
   conflictKeptServer: "Teammate's version kept",
+  unsentRemoved: "Unsent changes removed",
 };
 
 export interface ReconcileLine {
@@ -84,7 +87,7 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
   const items = group.every((it) => isNoteExt(it.path)) ? notes(n) : `${n.toLocaleString()} ${one ? "file" : "files"}`;
   switch (kind) {
     case "deletedByTeammate":
-      return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your ${one ? "version is" : "versions are"} in Trash.`;
+      return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your unsent changes went with ${one ? "it" : "them"}.`;
     case "restoredFromServer": {
       // A delete refused because a member may delete only what they created.
       const notMine = group.filter((it) => it.detail === NOT_CREATOR_DETAIL);
@@ -92,6 +95,12 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
         return one
           ? `${base(group[0].path)} was put back: only the person who created it, or an admin, can delete it.`
           : `${notes(n)} were put back: only the person who created them, or an admin, can delete them.`;
+      }
+      // A delete refused because this person can only view the note.
+      if (group.every((it) => it.detail === VIEW_ONLY_DELETE_DETAIL)) {
+        return one
+          ? `${base(group[0].path)} was put back: you can only view it, so it can't be deleted.`
+          : `${notes(n)} were put back: you can only view them, so they can't be deleted.`;
       }
       // Binaries are restored too (#215); call them files when any are.
       const what = group.every((it) => isNoteExt(it.path))
@@ -123,6 +132,13 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
         );
       }
       return parts.join(" ");
+    }
+    case "unsentRemoved": {
+      const what = one ? base(group[0].path) : items;
+      if (group.every((it) => it.detail === SELF_REVOKED_DETAIL)) {
+        return `Your unsent changes to ${what} were removed: you removed your own access before they reached the team.`;
+      }
+      return `Your unsent changes to ${what} were removed: your access to ${one ? "it" : "them"} was removed before they reached the team.`;
     }
     case "selfRevoked":
       return `You removed your own access to ${items}; ${one ? "its copy stays" : "their copies stay"} on this device.`;

@@ -104,6 +104,31 @@ describe("binaryDeleteCap", () => {
 });
 
 describe("BinaryDeleteQueue", () => {
+  it("tells the mirror each closed window, and re-arms for a path noted while it drained", async () => {
+    let release!: () => void;
+    const h = harness({ server: [blob("b1", "Team/gone.pdf")], onDisk: [], fileIds: { "Team/gone.pdf": "file-1" } });
+    const drained = vi.fn();
+    const armed = vi.fn(() => 0 as unknown as ReturnType<typeof setTimeout>);
+    h.deps.onDrained = drained;
+    h.deps.setTimeoutImpl = armed;
+    h.deps.listServer = () => new Promise((res) => { release = () => res([blob("b1", "Team/gone.pdf")]); });
+    h.queue.noteChanged("Team/gone.pdf");
+    const run = h.queue.drain();
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    // A move's arrival lands while the drain is still listing.
+    h.queue.noteChanged("Team/arrived.pdf");
+    const armsBefore = armed.mock.calls.length;
+    release();
+    await run;
+
+    expect(drained).toHaveBeenCalledTimes(1);
+    expect(h.queue.isPending("Team/gone.pdf")).toBe(false);
+    // Still pending, so its window must still be on a timer.
+    expect(h.queue.isPending("Team/arrived.pdf")).toBe(true);
+    expect(armed.mock.calls.length).toBeGreaterThan(armsBefore);
+  });
+
   it("deletes a tree file through its files row", async () => {
     const h = harness({
       local: [{ relPath: "Team/keep.docx", sha256: "sha-keep" }],
@@ -272,6 +297,47 @@ describe("BinaryDeleteQueue", () => {
     expect(h.blobsDeleted).toEqual([]);
   });
 
+  it("keeps a file the notes beside it were held for, and waits while they are decided", async () => {
+    // A folder deleted in Finder: its notes went over the cap and come back, so
+    // its one file must not be deleted for everyone in the same breath.
+    const h = harness({
+      server: [blob("b1", "Docs/names.yml"), blob("b2", "Other/x.pdf")],
+      onDisk: [],
+      fileIds: { "Docs/names.yml": "file-1", "Other/x.pdf": "file-2" },
+    });
+    let verdict: "wait" | "held" | null = "wait";
+    h.deps.noteDeleteVerdict = (p) => (p.startsWith("Docs/") ? verdict : null);
+    h.queue.noteChanged("Docs/names.yml");
+    h.queue.noteChanged("Other/x.pdf");
+    await h.queue.drain();
+    // Undecided: nothing sent, and both stay pending (never downloaded back yet).
+    expect(h.deleted).toEqual([]);
+    expect(h.queue.isPending("Docs/names.yml")).toBe(true);
+    expect(h.queue.isPending("Other/x.pdf")).toBe(true);
+
+    verdict = "held";
+    await h.queue.drain();
+    // Held beside the notes: left on the server; the unrelated file goes.
+    expect(h.deleted).toEqual(["file-2"]);
+    expect(h.queue.isPending("Docs/names.yml")).toBe(false);
+  });
+
+  it("deletes a file once the notes beside it were decided below the cap", async () => {
+    const h = harness({
+      server: [blob("b1", "Docs/names.yml")],
+      onDisk: [],
+      fileIds: { "Docs/names.yml": "file-1" },
+    });
+    let verdict: "wait" | "held" | null = "wait";
+    h.deps.noteDeleteVerdict = () => verdict;
+    h.queue.noteChanged("Docs/names.yml");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    verdict = null;
+    await h.queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
   it("refuses the whole batch when too much vanished at once", async () => {
     const gone = Array.from({ length: 6 }, (_, i) => `Team/f${i}.pdf`);
     const h = harness({
@@ -401,6 +467,25 @@ describe("BinaryDeleteQueue", () => {
     expect(h.deleted).toEqual([]);
   });
 
+  it("holds a delete made offline, uncounted, and sends it once the server is back", async () => {
+    // Three failed listings while offline used to give up, and the deleted file
+    // was downloaded back on reconnect.
+    const h = harness({ server: [blob("b1", "Team/guide.pdf")], onDisk: [], fileIds: { "Team/guide.pdf": "file-1" } });
+    let offline = true;
+    h.deps.isOffline = () => offline;
+    const queue = new BinaryDeleteQueue(h.deps);
+    queue.noteChanged("Team/guide.pdf");
+    for (let i = 0; i < 5; i++) await queue.drain();
+    expect(queue.isPending("Team/guide.pdf")).toBe(true);
+    expect(h.deleted).toEqual([]);
+
+    offline = false;
+    queue.resume();
+    await queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+    expect(queue.isPending("Team/guide.pdf")).toBe(false);
+  });
+
   it("keeps the candidate when the server refuses the rename's move", async () => {
     // Same fork, one step later: the pairing was right and the move failed. The
     // new path is unregistered either way, so the candidate waits.
@@ -461,6 +546,123 @@ describe("suppressNext — the revocation's claim on its own echo", () => {
     await h.queue.drain();
 
     expect(h.deleted).toEqual(["file-1"]);
+  });
+
+  it("a second report of a removal the app made itself is not a delete either (#420)", async () => {
+    // The claim above is spent by the FIRST event for the path. A watcher that
+    // reports the same removal twice used to turn the second report into
+    // `DELETE /api/files/:id`. The registry's own-removal mark is not spent.
+    const owned = new Set(["Examples/Trekking Routes.pdf"]);
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Examples/Trekking Routes.pdf")],
+      onDisk: [],
+      fileIds: { "Examples/Trekking Routes.pdf": "file-1" },
+    });
+    h.deps.isOwnRemoval = (relPath) => owned.has(relPath);
+    h.queue.suppressNext("Examples/Trekking Routes.pdf");
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+
+    // A window opened BEFORE the mark is judged at the drain too.
+    owned.clear();
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    owned.add("Examples/Trekking Routes.pdf");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+
+    // Once the file is the user's again, their delete goes through.
+    owned.clear();
+    h.queue.noteChanged("Examples/Trekking Routes.pdf");
+    await h.queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
+  it("the old name of a file the app moved itself is never a delete", async () => {
+    // A teammate moved a folder; this device followed the move. A blob pass
+    // whose listings were read mid-move mapped the old name to the file's id
+    // again, so the old name vanishing looked like this user deleting it, and
+    // `DELETE /api/files/:id` removed the moved file for everyone.
+    const moved = new Set(["Old/small-12.csv"]);
+    const h = harness({
+      local: [],
+      server: [blob("b1", "Old/small-12.csv")],
+      onDisk: [],
+      fileIds: { "Old/small-12.csv": "file-1" },
+    });
+    h.deps.isOwnMoveSource = (relPath) => moved.has(relPath);
+    h.queue.noteChanged("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+
+    // A window opened before the mark is judged at the drain too.
+    moved.clear();
+    h.queue.noteChanged("Old/small-12.csv");
+    moved.add("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+
+    // Once the mark has aged out, deleting a file there is a real delete.
+    moved.clear();
+    h.queue.noteChanged("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual(["file-1"]);
+  });
+
+  it("a file moved straight back onto the name a teammate's move took it from is a rename, never a delete", async () => {
+    // A teammate renamed a.png → b.png and this device followed (a.png is the
+    // own move's source). The person renames it straight back.
+    const h = harness({
+      local: [{ relPath: "F/a.png", sha256: "sha-b1" }],
+      server: [{ ...blob("b1", "F/b.png"), docId: "file-1" }],
+      onDisk: ["F/a.png"],
+      fileIds: { "F/b.png": "file-1" },
+    });
+    h.deps.isOwnMoveSource = (relPath) => relPath === "F/a.png";
+    h.queue.noteChanged("F/a.png");
+    h.queue.noteChanged("F/b.png");
+    await h.queue.drain();
+    expect(h.moved).toEqual([{ id: "file-1", relPath: "F/a.png" }]);
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+  });
+
+  it("a name whose id the server holds at another path is a stale mapping, not a delete", async () => {
+    // The own-move mark can be gone (aged out, another device's pass). The
+    // server listing is the evidence that does not age: the id moved.
+    const stale: string[] = [];
+    const h = harness({
+      local: [],
+      server: [{ ...blob("b1", "New/small-12.csv"), docId: "file-1" }],
+      onDisk: [],
+      fileIds: { "Old/small-12.csv": "file-1", "New/small-12.csv": "file-1" },
+    });
+    h.deps.forgetStalePath = (relPath) => stale.push(relPath);
+    let passes = 0;
+    h.deps.onServerChanged = () => void passes++;
+    h.queue.noteChanged("Old/small-12.csv");
+    await h.queue.drain();
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+    expect(stale).toEqual(["Old/small-12.csv"]);
+    // …and the mirror is asked for a pass: a copy this device renamed as the
+    // move landed pairs with the moved row only there (2026-11-28).
+    expect(passes).toBe(1);
+
+    // The same id at THIS path on the server is an ordinary delete.
+    const h2 = harness({
+      local: [],
+      server: [{ ...blob("b1", "Old/small-12.csv"), docId: "file-1" }],
+      onDisk: [],
+      fileIds: { "Old/small-12.csv": "file-1" },
+    });
+    h2.queue.noteChanged("Old/small-12.csv");
+    await h2.queue.drain();
+    expect(h2.deleted).toEqual(["file-1"]);
   });
 
   it("closes a window already open for the path", async () => {

@@ -13,10 +13,12 @@ import {
   isDenied,
   isLocked,
   memberAccessSnapshot,
+  memberGroupIds,
   resolveAccessForUser,
   vaultBaseline,
   personalVaultLevel,
   type ResolverCache,
+  raiseMarksFor,
 } from "./resolver.js";
 import { listReadableDocsInVault, readsWholeVault, vaultAccess } from "./vault-docs.js";
 import { isAccountReadOnly } from "../billing/lapse.js";
@@ -152,7 +154,9 @@ export async function canEditFolder(
     pre
       ? Promise.resolve(indexedIsDenied(pre.index, principalType, principalId, null, chain))
       : isDenied(db, principalType, principalId, null, chain);
-  if (await denied("user", userId)) return false;
+  // A "may raise" mark under their own No access is the resolver's to judge.
+  const userDenied = await denied("user", userId);
+  if (userDenied && (await raiseMarksFor(db, row.organization_id, userId, cache)).length === 0) return false;
   if (pre ? indexedIsLocked(pre.index, userId, null, chain) : await isLocked(db, userId, null, chain)) return false;
   const itemPrivate = await denied("org", row.organization_id);
   const baseline = cache
@@ -181,7 +185,7 @@ export async function canEditFolder(
     pre
       ? buildAccessContextFromIndex(pre.index, "folder", folderId, db, cache)
       : buildAccessContext("folder", folderId, db, cache);
-  if (personal !== null || itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
+  if (userDenied || personal !== null || itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
     const ctx = await accessContext();
     if (!ctx) return false;
     return (await resolveAccessForUser(ctx, userId, role, db, cache, pre?.index)).permission === "edit";
@@ -724,18 +728,44 @@ export async function vaultRootWritable(
   const personal = cache
     ? await cache.personal(db, organizationId, userId)
     : await personalVaultLevel(db, organizationId, userId);
-  if (personal !== null) return personal === "edit";
-  const posture = cache
-    ? await cache.baseline(db, organizationId)
-    : await vaultBaseline(db, organizationId);
-  if (posture !== "view" && posture !== "sealed") return true;
+  // A setting just for the person decides over their groups (resolver): Can
+  // edit opens the root, Can view / No access close it unless a "may raise"
+  // mark on the whole vault names a group that edits the whole vault.
+  if (personal === "edit") return true;
+  if (personal !== null) {
+    const marks = (await raiseMarksFor(db, organizationId, userId, cache)).filter(
+      (m) => m.resourceType === "vault" && m.resourceId === organizationId,
+    );
+    if (marks.length === 0) return false;
+    const { rows } = await db.query<{ ok: number }>(
+      `SELECT 1 AS ok FROM shares s
+         JOIN access_group_members gm ON gm.group_id = s.principal_id AND gm.user_id = $2
+        WHERE s.resource_type = 'vault' AND s.resource_id = $1 AND s.permission = 'edit'
+          AND s.principal_type = 'group' AND s.principal_id = ANY($3::text[])
+        LIMIT 1`,
+      [organizationId, userId, marks.map((m) => m.groupId)],
+    );
+    return rows.length > 0;
+  }
+  {
+    const posture = cache
+      ? await cache.baseline(db, organizationId)
+      : await vaultBaseline(db, organizationId);
+    if (posture !== "view" && posture !== "sealed") return true;
+  }
+  // A per-user OR a group whole-vault `edit` grant lifts the root, exactly as
+  // either lifts every doc in the resolver.
+  const groupIds = cache
+    ? await cache.groups(db, organizationId, userId)
+    : await memberGroupIds(db, organizationId, userId);
   const { rows } = await db.query<{ ok: number }>(
     `SELECT 1 AS ok FROM shares
       WHERE resource_type = 'vault' AND resource_id = $1
-        AND principal_type = 'user' AND principal_id = $2
         AND permission = 'edit'
+        AND ((principal_type = 'user' AND principal_id = $2)
+          OR (principal_type = 'group' AND principal_id = ANY($3::text[])))
       LIMIT 1`,
-    [organizationId, userId],
+    [organizationId, userId, groupIds],
   );
   return rows.length > 0;
 }
@@ -800,7 +830,10 @@ async function editsSomethingInVault(
         AND s.permission = 'edit'
         AND s.resource_type IN ('folder', 'file')
         AND ((s.principal_type = 'user' AND s.principal_id = $2)
-             OR (s.principal_type = 'org' AND s.principal_id = $1))
+             OR (s.principal_type = 'org' AND s.principal_id = $1)
+             OR (s.principal_type = 'group' AND s.principal_id IN (
+                   SELECT group_id FROM access_group_members
+                    WHERE organization_id = $1 AND user_id = $2)))
         AND (
           (s.resource_type = 'folder'
              AND EXISTS (SELECT 1 FROM folders f WHERE f.id = s.resource_id AND f.vault_id = $3))
@@ -898,6 +931,31 @@ function isManagerRole(role: string | null | undefined): boolean {
  * Checkpoint revert and trash purge are server-internal and never ask.
  * `orgRole` may be passed when the caller already knows it; otherwise it is read.
  */
+/**
+ * Rename/move follows the SAME authorship rule as delete (decided 2026-11-20):
+ * owners and admins rename or move anything; a plain member only what they
+ * created (a folder: the folder and everything in it). Edit access is still
+ * required on top, by the caller's own gate. Codes: `rename_not_creator`, or
+ * `account_read_only` when the billing account lapsed.
+ */
+export async function canRenameItem(
+  db: Queryable,
+  input: {
+    orgId: string;
+    userId: string;
+    orgRole?: string | null;
+    kind: "note" | "file" | "folder";
+    id: string;
+  },
+): Promise<{ ok: true } | { ok: false; code: "rename_not_creator" | "account_read_only" }> {
+  const gate = await canDeleteItem(db, input);
+  if (gate.ok) return gate;
+  return { ok: false, code: gate.code === "account_read_only" ? "account_read_only" : "rename_not_creator" };
+}
+
+export const RENAME_NOT_CREATOR_MESSAGE =
+  "Only the person who created this, or an owner or admin, can rename or move it.";
+
 export async function canDeleteItem(
   db: Queryable,
   input: {

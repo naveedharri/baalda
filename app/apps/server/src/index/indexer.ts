@@ -9,6 +9,7 @@ import {
   openSearchRow,
   sealScoreRow,
   sealSearchRow,
+  sealRefText,
   type SealedScoreRow,
 } from "./sealed-index.js";
 import { KeyRequiredError, loadVkCheck } from "../crypto/transport.js";
@@ -253,19 +254,19 @@ async function indexNoteRow(
     // (and vector + tokens again into `search_score_enc`, what ranking opens).
     // The plaintext columns are not written, and never nulled here: an old row
     // keeps its stale plaintext until the separate null-out step (W3 rule).
-    // `ref_text` is not written either: the attachment rule decides a sealed
-    // row from its decrypted body in memory (`permissions/sealed-refs.ts`),
-    // which is the same answer the excerpt gives.
+    // The reference excerpt goes sealed into `ref_enc` (never `ref_text`): the
+    // attachment rule opens it instead of the body (`permissions/sealed-refs.ts`).
     await db.query(
-      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc, search_score_enc)
-       VALUES ($1, $2, $3, now(), $4::text[], $5, $6)
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc, search_score_enc, ref_enc)
+       VALUES ($1, $2, $3, now(), $4::text[], $5, $6, $7)
        ON CONFLICT (doc_id) DO UPDATE
          SET vault_id = EXCLUDED.vault_id,
              title = EXCLUDED.title,
              updated_at = now(),
              ref_heads = EXCLUDED.ref_heads,
              search_enc = EXCLUDED.search_enc,
-             search_score_enc = EXCLUDED.search_score_enc`,
+             search_score_enc = EXCLUDED.search_score_enc,
+             ref_enc = EXCLUDED.ref_enc`,
       [
         docId,
         note.vault_id,
@@ -273,6 +274,7 @@ async function indexNoteRow(
         heads,
         sealSearchRow(crypto, docId, { body: content, vector, tokens }),
         sealScoreRow(crypto, docId, { vector, tokens }),
+        sealRefText(crypto, docId, refText(content, heads)),
       ],
     );
   } else await db.query(
@@ -304,7 +306,9 @@ async function indexNoteRow(
   // SAME text `note_index.content` was just written from, so the two can never
   // disagree about what the note says, and written here because this is the one
   // place that sees a note's markdown after every edit.
-  await replaceBlobRefs(docId, note.vault_id, content, db);
+  // `announce`: a newly embedded drop the server already holds is news for
+  // members who see it only through this note (see `announceGainedRefs`).
+  await replaceBlobRefs(docId, note.vault_id, content, db, { announce: true });
 
   // Replace this doc's link edges wholesale (cheap; a doc has few links).
   await db.query("DELETE FROM note_links WHERE from_doc = $1", [docId]);
@@ -526,11 +530,13 @@ function extOf(relPath: string): string {
  * notes the caller may not read are never scored (they'd be a content oracle).
  * The same rule governs the FILE pass — see `searchBlobText`.
  *
- * Note on `lower()`: query tokens are ASCII by construction (`tokenize` yields
- * `[a-z0-9_]+`), and Postgres `lower()` matches JS `toLowerCase()` on ASCII, so
- * substring matching is equivalent for every realistic input. Exotic Unicode
- * that case-folds INTO ASCII (e.g. U+212A KELVIN SIGN) is the only place the two
- * could disagree, and only in the small keyword-boost term.
+ * Note on `lower()`: query tokens are Unicode letter/number/underscore runs
+ * (`tokenize` yields NFC `[\p{L}\p{M}\p{N}_]+`). Postgres `lower()` matches JS
+ * `toLowerCase()` on ASCII and on uncased scripts (Hangul, CJK), so substring
+ * matching is equivalent there. Cased non-ASCII letters follow the database
+ * collation in the SQL fallback, and exotic Unicode that case-folds INTO ASCII
+ * (e.g. U+212A KELVIN SIGN) can disagree; both affect only the small
+ * keyword-boost term.
  */
 export async function searchNoteIndex(opts: {
   vaultId: string;
@@ -567,6 +573,10 @@ export async function searchNoteIndex(opts: {
    */
   crypto?: DocCrypto;
   db?: Queryable;
+  /** Filled with where the pass spent its time (ids and counts only), for the
+   *  slow-search log line. Best effort: a pass shared with another caller
+   *  fills the first caller's. */
+  stats?: SearchStats;
 }): Promise<NoteSearchHit[]> {
   if (opts.k <= 0) return [];
   const docIds = Array.from(opts.readableDocIds);
@@ -588,12 +598,31 @@ export async function searchNoteIndex(opts: {
     vaultWideReader: opts.vaultWideReader === true,
     legacySql: opts.keywordMode === "sql",
     crypto: opts.crypto,
+    stats: opts.stats,
   };
   // A keyed vault's search decrypts every candidate row, so concurrent ones
   // share a pass (see `joinPass`). A plaintext vault scores in SQL and the
   // database, not this process, carries the load.
   if (!opts.crypto || opts.db) return (await searchPass(scope, [query]))[0];
   return joinPass(scope, query);
+}
+
+/** Where one search pass spent its time; counts and milliseconds only. */
+export interface SearchStats {
+  candidates: number;
+  /** Notes scored from a search page (no row read). */
+  fromPages: number;
+  /** Notes scored from their own row (stale, unpaged or plaintext). */
+  fromRows: number;
+  /** Sealed rows whose whole body had to be fetched, one query each. */
+  bodyFetches: number;
+  pagesMs: number;
+  notesMs: number;
+  filesMs: number;
+}
+
+export function newSearchStats(): SearchStats {
+  return { candidates: 0, fromPages: 0, fromRows: 0, bodyFetches: 0, pagesMs: 0, notesMs: 0, filesMs: 0 };
 }
 
 /** One query inside a search pass. */
@@ -613,6 +642,7 @@ interface PassScope {
   vaultWideReader: boolean;
   legacySql: boolean;
   crypto?: DocCrypto;
+  stats?: SearchStats;
 }
 
 interface PassWaiter {
@@ -806,6 +836,7 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
           if (needBody.length === 0) continue;
           // Unopenable, or a row that needs its body: the full row, as before.
           rest = needBody;
+          if (scope.stats) scope.stats.bodyFetches++;
           searchEnc = await fullSealedRow(db, r.doc_id);
         }
         if (searchEnc) {
@@ -840,9 +871,15 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
   // Keyed: rows on a fresh search page are scored from the page; the rest
   // (edited since the page was built, never paged, a page that did not open)
   // from their own rows, exactly as without pages.
+  const st = scope.stats;
+  if (st) st.candidates = docIds.length;
+  let t0 = Date.now();
   const pages = crypto && !legacySql && docIds.length > 0 ? await loadPages(db, "note", crypto) : null;
+  if (st) st.pagesMs = Date.now() - t0;
+  t0 = Date.now();
   if (!pages || pages.rows.size === 0) {
     await scoreRows(docIds, (qi, docId, score) => scored[qi].push({ docId, score }));
+    if (st) st.fromRows = docIds.length;
   } else {
     const { rows: live } = await db.query<{ doc_id: string; stamp: string }>(
       `SELECT ni.doc_id, ni.updated_at::text AS stamp
@@ -853,6 +890,10 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
       [scope.vaultId, docIds],
     );
     const stale = live.filter((r) => pages.rows.get(r.doc_id)?.stamp !== r.stamp).map((r) => r.doc_id);
+    if (st) {
+      st.fromRows = stale.length;
+      st.fromPages = live.length - stale.length;
+    }
     const fromRows = new Map<string, number[]>();
     await scoreRows(stale, (qi, docId, score) => {
       let s = fromRows.get(docId);
@@ -881,9 +922,12 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
     }
   }
 
+  if (st) st.notesMs = Date.now() - t0;
+  t0 = Date.now();
   const fileHits = scope.includeFiles
     ? await searchBlobText(scope, queries, flatTokens, flatQuery)
     : queries.map(() => [] as NoteSearchHit[]);
+  if (st) st.filesMs = Date.now() - t0;
 
   // Stable sort over doc_id-ordered input, so equal scores keep a deterministic
   // order (the previous version left ties at the database's arbitrary order).

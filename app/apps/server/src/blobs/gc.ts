@@ -43,6 +43,7 @@ import {
   BLOB_PENDING_TTL_MINUTES,
 } from "./config.js";
 import { rebuildBlobRefs } from "./refs.js";
+import { refsAreCurrent } from "./attachment-cleanup.js";
 import { BlobStoreError, resolveStoreForRow, storageKeyForRow, type StorageRow } from "./store.js";
 
 /**
@@ -418,6 +419,13 @@ export async function sweepOrphansOnce(
         console.warn(
           `[blob-gc] vault ${vaultId} has no indexed notes; skipping its attachments rather than calling them orphans.`,
         );
+        continue;
+      }
+      // The same bar the purge cleanup sets (`refsAreCurrent`): references cut
+      // by an older extractor, a re-index still queued or an edit not yet
+      // indexed may miss an embed, and this deletes on their word.
+      if (!(await refsAreCurrent(vaultId, client))) {
+        console.warn(`[blob-gc] vault ${vaultId} references are not current yet; skipping its attachments this run.`);
         continue;
       }
       if (refs === 0) {

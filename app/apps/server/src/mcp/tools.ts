@@ -1,5 +1,6 @@
 import { listAccessAudit } from "../audit/access.js";
 import { getSkillTool, listSkillsTool, readSkillFileTool } from "./skills.js";
+import { listGroupsTool, manageGroupTool } from "./groups.js";
 import {
   McpToolError,
   appendNote,
@@ -100,6 +101,31 @@ function reqStr(args: Args, key: string): string {
   return v;
 }
 
+/**
+ * A move that names nothing to change. Answered with the item unchanged, it
+ * read as success: an assistant that wrote `newPath` (or any key the tool does
+ * not take) believed the note had moved (2026-11-28). Unknown keys are named,
+ * so the caller can see which word it got wrong.
+ */
+function requireOneChange(
+  args: Args,
+  tool: string,
+  changes: string[],
+  others: string[],
+  /** The one key whose `null` means something ("to the vault root"); any
+   *  other key's `null` is dropped by `optStr` and changes nothing. */
+  nullable: string,
+): void {
+  if (changes.some((k) => args[k] !== undefined && (args[k] !== null || k === nullable))) return;
+  const known = new Set([...changes, ...others, "vaultId"]);
+  const unknown = Object.keys(args).filter((k) => !known.has(k));
+  throw new McpToolError(
+    `${tool} changes nothing without one of: ${changes.join(", ")}` +
+      (unknown.length > 0 ? ` (not recognised: ${unknown.join(", ")})` : ""),
+    "invalid_argument",
+  );
+}
+
 function optStr(args: Args, key: string): string | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
@@ -174,6 +200,7 @@ function accessAudience(raw: unknown): AccessAudience {
   const row = raw as Args;
   const type = reqStr(row, "type");
   if (type === "org") return { type };
+  if (type === "group") return { type, groupId: reqStr(row, "groupId") };
   if (type !== "users" || !Array.isArray(row.userIds)) {
     throw new McpToolError("audience must be org or users with userIds", "invalid_argument");
   }
@@ -253,7 +280,7 @@ export const TOOLS: McpTool[] = [
     name: "get_access_default",
     annotations: { title: "Get access default for new members", ...READ },
     description:
-      "Get what future members initially see when they join this vault (the New members row): open (Can edit) / readonly (Can view) / private (No access). Owner/admin only.",
+      "Get what future members initially see when they join this vault. Since 2026-11-25 this is always private (Only what's shared): new members get what is shared with them and what their access groups open. Owner/admin only.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: (ctx) => getAccessDefaultTool(ctx),
   },
@@ -261,7 +288,7 @@ export const TOOLS: McpTool[] = [
     name: "set_access_default",
     annotations: { title: "Set access default for new members", ...ACCESS },
     description:
-      "Set future members' initial access to content that already exists when they join (the New members row): open (Can edit) / readonly (Can view) / private (No access). Existing members are unchanged. Owner/admin only.",
+      "Kept for older clients: new members always start on Only what's shared, so only private is accepted (anything else is refused with join_default_fixed). To give new members access, use an access group that takes new members automatically. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -298,7 +325,7 @@ export const TOOLS: McpTool[] = [
     name: "manage_access",
     annotations: { title: "Change access", ...ACCESS },
     description:
-      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users. A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
+      "Replace access on one or more selected folders/files, or the whole vault. Modes: open (Can edit) / readonly (Can view) / private (No access). Everyone clears all custom member overrides in selected subtrees; selected users changes only those users; a group changes only that group's grants (open/readonly grant Can edit/Can view to its members; private takes away what the group gives there, also inside a folder or vault the group can reach, because a group's deepest row decides; a group never takes away anyone's own access or another group's). A users-audience mode on the vault resource is that person's absolute vault level (Can edit everything / Can view everything / No access): it replaces Everyone access, the owner/admin shortcut and authorship for them, and only their own folder/file grants lift a No access. Owner/admin only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -319,8 +346,9 @@ export const TOOLS: McpTool[] = [
         audience: {
           type: "object",
           properties: {
-            type: { type: "string", enum: ["org", "users"] },
+            type: { type: "string", enum: ["org", "users", "group"] },
             userIds: { type: "array", items: { type: "string" } },
+            groupId: S("Group id (audience type group), from list_groups"),
           },
           required: ["type"],
           additionalProperties: false,
@@ -337,6 +365,33 @@ export const TOOLS: McpTool[] = [
         accessAudience(args.audience),
         accessMode(args),
       ),
+  },
+  {
+    name: "list_groups",
+    annotations: { title: "List access groups", ...READ },
+    description:
+      "List the vault's access groups with their members (user ids) and, for owners/admins, each group's grants: the folders/files it can view or edit, and 'denied' rows where it gives No access below a folder (or the whole vault) it otherwise reaches. A member gets the higher of their own access and any group's; a group's denied row only limits that group.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: (ctx) => listGroupsTool(ctx),
+  },
+  {
+    name: "manage_group",
+    annotations: { title: "Manage an access group", ...ACCESS },
+    description:
+      "Create, rename or delete an access group, or add/remove members. action: create {name, userIds?} | rename {groupId, name} | delete {groupId} | add_members {groupId, userIds} | remove_member {groupId, userId}. Set a group's access with manage_access (audience type group). Owner/admin only; an admin cannot change the owner's groups.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "rename", "delete", "add_members", "remove_member"] },
+        groupId: S("Group id, from list_groups"),
+        name: S("Group name (1-60 characters)"),
+        userIds: { type: "array", items: { type: "string" } },
+        userId: S("One member's user id"),
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    handler: (ctx, args) => manageGroupTool(ctx, args),
   },
   {
     name: "list_folders",
@@ -718,13 +773,15 @@ export const TOOLS: McpTool[] = [
       required: ["docId"],
       additionalProperties: false,
     },
-    handler: (ctx, a) =>
-      moveNoteTool(ctx, {
+    handler: (ctx, a) => {
+      requireOneChange(a, "move_note", ["relPath", "folderId", "title"], ["docId"], "folderId");
+      return moveNoteTool(ctx, {
         docId: reqStr(a, "docId"),
         relPath: optStr(a, "relPath"),
         title: optStr(a, "title"),
         folderId: optStrOrNull(a, "folderId"),
-      }),
+      });
+    },
   },
   {
     name: "move_folder",
@@ -746,13 +803,15 @@ export const TOOLS: McpTool[] = [
       required: ["folderId"],
       additionalProperties: false,
     },
-    handler: (ctx, a) =>
-      moveFolderTool(ctx, {
+    handler: (ctx, a) => {
+      requireOneChange(a, "move_folder", ["path", "name", "parentId"], ["folderId"], "parentId");
+      return moveFolderTool(ctx, {
         folderId: reqStr(a, "folderId"),
         path: optStr(a, "path"),
         name: optStr(a, "name"),
         parentId: optStrOrNull(a, "parentId"),
-      }),
+      });
+    },
   },
   {
     name: "list_skills",

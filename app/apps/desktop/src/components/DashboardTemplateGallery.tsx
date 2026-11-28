@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useRef, useState } from "react";
-import { DASHBOARD_TEMPLATES, type DashboardTemplate } from "../lib/dashboard/templates";
+import { DASHBOARD_TEMPLATES, mixedTemplateOrder, templateCategories, type DashboardTemplate } from "../lib/dashboard/templates";
 import "./DashboardTemplateGallery.css";
 import { VaultDashboardPreview } from "./VaultDashboardPreview";
+import { CheckIcon } from "./CheckIcon";
 
 export async function templateHtml(template: DashboardTemplate): Promise<string> {
   return template.html ?? await template.loadHtml!();
@@ -55,8 +56,11 @@ export function DashboardTemplateGallery({ selectedId, onUse, disabled = false, 
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All styles");
   const [preview, setPreview] = useState<DashboardTemplate | null>(null);
-  const categories = ["All styles", ...new Set(DASHBOARD_TEMPLATES.map((t) => t.category).filter(Boolean))];
-  const templates = DASHBOARD_TEMPLATES.filter((t) => (category === "All styles" || t.category === category) && `${t.name} ${t.author ?? ""} ${t.description}`.toLowerCase().includes(query.toLowerCase()));
+  const [searchOpen, setSearchOpen] = useState(false);
+  const categories = ["All styles", ...templateCategories(DASHBOARD_TEMPLATES)];
+  const pool = category === "All styles" ? mixedTemplateOrder(DASHBOARD_TEMPLATES) : DASHBOARD_TEMPLATES.filter((t) => t.category === category);
+  const templates = pool.filter((t) => `${t.name} ${t.author ?? ""} ${t.description}`.toLowerCase().includes(query.toLowerCase()));
+  const showSearch = searchOpen || query !== "";
   if (preview) return <div className="dashboard-gallery-expanded">
     <div className="dashboard-gallery-toolbar">
       <button type="button" className="secondary" onClick={() => setPreview(null)}>← All templates</button>
@@ -71,7 +75,17 @@ export function DashboardTemplateGallery({ selectedId, onUse, disabled = false, 
     {saved[preview.id] ? <VaultDashboardPreview path={saved[preview.id]} /> : <DashboardTemplatePreview template={preview} expanded />}
   </div>;
   return <div className="dashboard-gallery">
-    <div className="dashboard-gallery-toolbar"><div className="dashboard-gallery-filters" aria-label="Template styles">{categories.map((c) => <button key={c} type="button" aria-pressed={category === c} onClick={() => setCategory(c)}>{c}</button>)}</div><input aria-label="Search dashboard templates" placeholder="Search templates or designers…" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
+    <div className="dashboard-gallery-toolbar"><div className="dashboard-gallery-filters" aria-label="Template styles">{categories.map((c) => <button key={c} type="button" aria-pressed={category === c} onClick={() => setCategory(c)}>{c}</button>)}</div><div className={`dashboard-gallery-search${showSearch ? " open" : ""}`}>
+      {showSearch && <input aria-label="Search dashboard templates" placeholder="Search templates or designers…" value={query} autoFocus
+        onChange={(e) => setQuery(e.target.value)}
+        onBlur={() => { if (!query) setSearchOpen(false); }}
+        onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setQuery(""); setSearchOpen(false); } }} />}
+      <button type="button" className="dashboard-gallery-search-btn" aria-label="Search templates" title="Search templates"
+        onMouseDown={(e) => { if (showSearch) e.preventDefault(); }}
+        onClick={() => { if (showSearch && !query) setSearchOpen(false); else setSearchOpen(true); }}>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+      </button>
+    </div></div>
     <div className="dashboard-gallery-grid" role="group" aria-label="Dashboard template">
       {templates.map((template) => <article key={template.id} className={`dashboard-gallery-card${selectedId === template.id || currentId === template.id ? " selected" : ""}`}>
         <div className="dashboard-gallery-picture">
@@ -80,7 +94,7 @@ export function DashboardTemplateGallery({ selectedId, onUse, disabled = false, 
         <h3 className="dashboard-gallery-card-name">{template.name}{currentId === template.id && <span className="dashboard-current-badge">Current Home</span>}</h3>
         <div className="dashboard-gallery-card-actions">
           <button type="button" className="secondary" aria-label={`Show preview of ${template.name}`} onClick={() => setPreview(template)}>Show preview</button>
-          {currentId !== template.id && <button type="button" className="primary" disabled={disabled} aria-pressed={selectedId === template.id} aria-label={`Use ${template.name}`} onClick={() => onUse(template)}>{selectedId === template.id ? "Selected ✓" : "Use template"}</button>}
+          {currentId !== template.id && <button type="button" className="primary" disabled={disabled} aria-pressed={selectedId === template.id} aria-label={`Use ${template.name}`} onClick={() => onUse(template)}>{selectedId === template.id ? <>Selected <CheckIcon size={12} className="check-inline" /></> : "Use template"}</button>}
         </div>
       </article>)}
       {templates.length === 0 && <p className="dashboard-gallery-empty">No templates match. Try another style or search.</p>}

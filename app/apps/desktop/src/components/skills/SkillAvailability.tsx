@@ -112,7 +112,19 @@ export function InstallControl({
   const here = useSkillHere(orgId, skill);
   const scan = useDeviceScan();
   const [removing, setRemoving] = useState(false);
+  const [fixing, setFixing] = useState(false);
   const name = skillDisplayName(skill.name);
+  /** Every AI tool folder in this state: one click fixes them all. */
+  const allIn = (s: TargetState) => (Object.keys(here.states) as SkillTarget[]).filter((t) => here.states[t] === s);
+  /** Run a fix with the button showing a spinner until it lands. */
+  const fixWith = (fn: () => void | Promise<void>) => async () => {
+    setFixing(true);
+    try {
+      await fn();
+    } finally {
+      setFixing(false);
+    }
+  };
 
   /** Turn it on here and wait for the run to place it (or give up after a cap). */
   const install = async () => {
@@ -134,24 +146,34 @@ export function InstallControl({
   };
 
   if (here.notMine) return <span className="skills-not-yours">Not shared with you</span>;
-  if (here.optedIn && (here.edited || here.conflict || here.failed)) {
+  if (here.optedIn && (here.edited || here.conflict || here.failed || fixing)) {
+    if (fixing) {
+      return (
+        <button type="button" className="secondary skills-hdr-btn skills-ctl skills-fix-btn" disabled aria-busy="true">
+          <span className="btn-spinner spinner-neutral" aria-hidden="true" />
+          Replacing…
+        </button>
+      );
+    }
+    const edited = allIn("edited");
+    const replaceable = allIn("conflict").filter((t) => !isLinkedFolder(scan, t, skill.name));
     const actions = here.edited
       ? [
-          { key: "keep", label: "Keep mine", hint: "Leave your edited copy as it is", onSelect: () => keepMySkill(orgId, skill.id, here.edited!) },
-          { key: "team", label: "Use team version", hint: "Your copy is backed up first", onSelect: () => applyTeamSkillVersion(orgId, skill.id, here.edited!) },
+          { key: "keep", label: "Keep mine", hint: "Leave your edited copy as it is", onSelect: () => edited.forEach((t) => keepMySkill(orgId, skill.id, t)) },
+          { key: "team", label: "Use team version", hint: "Replaces your edited copy", onSelect: fixWith(() => applyTeamSkillVersion(orgId, skill.id, edited)) },
         ]
       : here.conflict
         ? [
-            // The folder holding the name is backed up and replaced: the
+            // The folder holding the name is replaced: the
             // person's own, or another vault's, server's or account's copy.
             // Never a symlink (Rust refuses one either way).
             ...(here.conflictKind !== "unmanaged"
-              ? [{ key: "team", label: "Use team version", hint: "The other copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
+              ? [{ key: "team", label: "Use team version", hint: "Replaces the other copy", onSelect: fixWith(() => replaceNameTakenSkill(orgId, skill.id, replaceable)) }]
               : !isLinkedFolder(scan, here.conflict, skill.name)
-                ? [{ key: "team", label: "Use team version", hint: "Your copy is backed up first", onSelect: () => replaceNameTakenSkill(orgId, skill.id, here.conflict!) }]
+                ? [{ key: "team", label: "Use team version", hint: "Replaces your folder", onSelect: fixWith(() => replaceNameTakenSkill(orgId, skill.id, replaceable)) }]
                 : []),
             ...(here.conflictKind === "unmanaged"
-              ? [{ key: "keep", label: "Keep my own", hint: "Leave your folder as it is on this computer", onSelect: () => keepMySkill(orgId, skill.id, here.conflict!) }]
+              ? [{ key: "keep", label: "Keep my own", hint: "Leave your folder as it is on this computer", onSelect: () => allIn("conflict").forEach((t) => keepMySkill(orgId, skill.id, t)) }]
               : []),
             { key: "reveal", label: revealLabel(), onSelect: () => revealSkillFolder(here.conflict!, skill.name) },
           ]

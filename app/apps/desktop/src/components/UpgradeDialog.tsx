@@ -16,6 +16,7 @@ import {
   checkoutPollDelay,
   teamCheckoutPaid,
 } from "../lib/billing";
+import { CheckIcon } from "./CheckIcon";
 
 /** Poll budget while waiting for the checkout to be paid (cadence: `checkoutPollDelay`). */
 const POLL_BUDGET_MS = 10 * 60 * 1000;
@@ -557,7 +558,7 @@ export function UpgradeDialog({
         {phase === "success" && (
           <div className="upgrade-waiting">
             <div className="upgrade-success-mark" aria-hidden="true">
-              ✓
+              <CheckIcon size={22} />
             </div>
             <div className="subhead">{teamMode ? "You're on Team" : "You're on Pro"}</div>
             <div className="muted">

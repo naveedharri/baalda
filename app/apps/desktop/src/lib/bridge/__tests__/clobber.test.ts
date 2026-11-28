@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NoteBridge } from "../noteBridge";
 import { makeHarness } from "./helpers";
+import { setEmptyFileRefiller } from "../readOnlyDocs";
 
 const PATH = "note.md";
 const CONTENT = "# Real content\n\nthat must not be lost\n";
@@ -282,6 +283,29 @@ describe("empty-ingest truncation guard", () => {
 
       bridge.destroy();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands an EXACTLY empty file to the sync layer to write the text back, and nothing else", async () => {
+    vi.useFakeTimers();
+    const asked: Array<[string, string]> = [];
+    setEmptyFileRefiller((docId, path) => asked.push([docId, path]));
+    try {
+      const { io, fs } = makeHarness({ [PATH]: CONTENT });
+      const bridge = await NoteBridge.open(io, { docId: "doc-1", path: PATH });
+      fs.externalWrite(PATH, "\n");
+      await bridge.ingestNow();
+      expect(asked).toEqual([]);
+      fs.externalWrite(PATH, "# Real content\n\nthat must not be lost\nmore\n");
+      await bridge.ingestNow();
+      fs.externalWrite(PATH, "");
+      expect(await bridge.ingestNow()).toBe(false);
+      expect(asked).toEqual([["doc-1", PATH]]);
+      expect(bridge.serialize()).not.toBe("");
+      bridge.destroy();
+    } finally {
+      setEmptyFileRefiller(null);
       vi.useRealTimers();
     }
   });

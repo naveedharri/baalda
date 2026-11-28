@@ -1,1297 +1,291 @@
 # Baalda
 
-**Context** is the permanent internal codename; **Baalda** is the brand. A local-first desktop "second
-brain" where notes are plain `.md` files on disk that an AI can edit directly **and** that teammates
-edit together in real time. Every OSS competitor does one or the other; the whole product is the
-*bridge* between them.
+**Context** is the permanent internal codename; **Baalda** is the brand. A local-first desktop "second brain": notes are plain `.md` files on disk that an AI can edit directly **and** that teammates edit together in real time. The product is the *bridge* between the two.
 
-- All product docs live under `docs/` (only this `CLAUDE.md` stays at the repo root).
-- Docs index: `docs/Baalda.md` · live build status: `docs/STATUS.md` · branding policy: `docs/BRANDING.md`
-- Specs (source of truth for design): `docs/specs/00`–`04` + `docs/specs/REQUIREMENTS.md` (the 12-requirement yardstick)
+- All docs live under `docs/` (only this file stays at the root). Index `docs/Baalda.md` · status `docs/STATUS.md` · branding `docs/BRANDING.md` · specs `docs/specs/00`–`04` + `REQUIREMENTS.md` (the 12-requirement yardstick). Topic docs: `RELEASE.md`, `DEPLOY.md`, `VAULT_KEYS.md`, `SKILLS.md`, `DASHBOARDS.md`, `MESSAGES.md`.
 
-## System landscape (what lives where)
+## System landscape
 
-Three pieces; this open-source repo holds the first two.
+- **Desktop app** (`app/apps/desktop`). Released by a version bump merged to `main`: bump `tauri.conf.json` + the other three version files; `release.yml`'s `gate` job releases only when that version changed (a `v*` tag forces one). Builds macOS arm64+x64 (Developer ID signed, notarized, stapled), Linux x64 and Windows x64 (both unsigned: SmartScreen warns; the updater checks our minisign signature, not an OS cert) and publishes a GitHub Release with `latest.json`. **No draft gate:** a release reaches every app on its next updater poll (`releases/latest`).
+  - Updater (`lib/updater.ts`): the vault-channel `version-available` hint is the primary trigger, the 15-min poll the fallback. Platform jobs publish `latest.json` piecemeal, so "no update yet", a missing platform or a 404 bundle parks it in `pending` ("An update is on its way" in About), retrying 2/4/8 min (capped at the poll) for 60 min — never an error. A bad signature is a real error.
+  - Raise `MIN_CLIENT_VERSION` at least one release AFTER the build it needs; for `MIN_CLIENT_VERSION_GRACE_MINUTES` (60) after boot a raised floor only refuses builds below 0.1.49.
+  - Review happens before `main`: PRs target the long-lived **`staging`** branch; every push runs `staging-release.yml`, publishing the auto-updating **"Baalda Staging"** app (`com.baalda.context.staging`, version `<base>-staging.<run#>`, server from the `STAGING_SERVER_URL` Actions variable) as one rolling prerelease tagged `staging` (production's updater skips prereleases). Promotion = fast-forward `staging` → `main` + the four-file bump (`docs/RELEASE.md` → Staging).
+- **Backend server** (`app/apps/server`) — open source, self-hostable (Node + Postgres). The managed option at `https://api.baalda.com` runs this **same code**; users pick an instance via the server URL in Settings. Self-host guide: `docs/DEPLOY.md`.
+- **Website + managed service** — outside this repo; the README links [baalda.com](https://baalda.com), nothing more.
 
-- **Desktop app** (`app/apps/desktop`) — the product people install. Released by a
-  version bump: bump `tauri.conf.json` (+ the other three files) and merge to `main` —
-  `.github/workflows/release.yml`'s `gate` job releases only when that version changed
-  (a `v*` tag still forces one). It builds installers for **macOS (arm64 + x64),
-  Linux x64 and Windows x64**, and **publishes** a GitHub Release with `latest.json`.
-  Only macOS is OS-signed (Developer ID + notarized + stapled); Linux/Windows ship
-  unsigned, so fresh downloads warn (SmartScreen) — auto-update is unaffected everywhere
-  because the updater checks our minisign signature, not an OS certificate.
-  There is no draft/review gate — pushing a `v*` tag ships to every running app on its next
-  updater poll (Tauri updater polls `releases/latest`).
-  The server deploys in minutes but the release's four serial platform jobs publish `latest.json`
-  piecemeal, so a vault-channel `version-available` hint (the primary trigger; the 15-min poll is the
-  fallback) that finds no update, a `latest.json` missing this platform, or a 404 bundle parks the
-  updater in `pending` ("An update is on its way" in About) and retries at 2/4/8 min, capped at the poll,
-  for 60 min (`lib/updater.ts`) — never an error or the wall; a bad signature stays a real error. Raise
-  `MIN_CLIENT_VERSION` at least one release AFTER the build it needs; as a backstop, for
-  `MIN_CLIENT_VERSION_GRACE_MINUTES` (60) after boot a raised floor only refuses builds below 0.1.49.
-  Because of that, review happens *before* main: PRs target the long-lived **`staging`** branch,
-  and every push to it runs `.github/workflows/staging-release.yml`, which publishes a separate
-  auto-updating **"Baalda Staging"** app (`com.baalda.context.staging`, version
-  `<base>-staging.<run#>`, server from the `STAGING_SERVER_URL` Actions variable) into one rolling
-  GitHub *prerelease* tagged `staging` — invisible to production's updater, which resolves
-  `releases/latest` and so skips prereleases. Promotion is a fast-forward `staging` → `main` plus
-  the four-file version bump; see `docs/RELEASE.md` → Staging.
-- **Backend server** (`app/apps/server`) — open source and self-hostable (Node + Postgres).
-  The managed option runs this **same server code**, publicly reachable at
-  `https://api.baalda.com`; users choose an instance via the server URL in Settings. There is
-  no separate "managed edition" of the server. Self-host/deploy guide: `docs/DEPLOY.md`.
-- **Website + managed service** — lives outside this public repo. The README links
-  [baalda.com](https://baalda.com) as the managed option, and that is the only mention this
-  repo gets.
+**Boundary rule:** this repo is public. Never commit anything about how *our* managed instance is operated (hosting, deploy config for our instance, domains/DNS, dashboards, billing, secrets). Commercial-only features (if source-available) go under `ee/`.
 
-**Boundary rule:** this repo is public. Never commit anything about how *our* managed instance
-is operated — hosting/provider, deploy config for our instance, domains/DNS, dashboards,
-billing, or secrets. Managed-service work happens in private repos; commercial-only *features*
-(if source-available) go under `ee/`.
+## The one idea
 
-## The one idea to hold in your head
-
-`.md` files on disk are the **durable source of truth**. A per-note Yjs **`Y.Text` holding the raw
-markdown string** is the **live source of truth** while a note is open/syncing. A bidirectional bridge
-keeps them equal — both directions apply as CRDT *operations* (never whole-file overwrites), so a human
-typing and an AI rewriting a paragraph **merge** instead of clobbering.
-
-Two invariants everything depends on:
-- **Key by `doc_id`, never by path.** A note's identity is a stable UUID shared across the `.md` file,
-  the Yjs doc, the SQLite row, and the Postgres `notes`/`files` row. Renames/moves must never fork a note.
-- **The server stores binary Y.Doc only.** Markdown never travels the wire — only opaque binary Yjs
-  updates. Each client re-derives its own `.md` files and search index.
+`.md` files are the **durable source of truth**. A per-note Yjs **`Y.Text` holding the raw markdown** is the **live source of truth** while a note is open/syncing. A bidirectional bridge keeps them equal, both directions as CRDT *operations* (never whole-file overwrites), so a human and an AI editing at once **merge**.
+- **Key by `doc_id`, never by path.** One stable UUID across the `.md`, the Yjs doc, the SQLite row and the Postgres `notes`/`files` row. Renames/moves must never fork a note.
+- **The server stores binary Y.Doc only.** Markdown never travels the wire; each client re-derives its `.md` files and search index.
 
 ## Repo layout
 
-Monorepo at `app/` (pnpm workspaces + Turborepo; pnpm pinned via `packageManager`, activate with
-`corepack enable`); all docs and specs live under `docs/`.
+Monorepo `app/` (pnpm workspaces + Turborepo; pnpm pinned via `packageManager`, `corepack enable`). `apps/desktop/` = Tauri v2: Rust core (`src-tauri/`) + React/Vite/TS UI (`src/`). `apps/server/` = Hono HTTP + Hocuspocus WS + Postgres + Better Auth + MCP.
 
-```
-app/
-├── apps/desktop/   Tauri v2 app. Rust core (src-tauri/) + React/Vite/TS UI (src/)
-└── apps/server/    Node/TS: Hono HTTP + Hocuspocus WS + Postgres + Better Auth + MCP
-docs/               Baalda.md (index) · STATUS.md · specs/
-```
+**Division of labor:** Rust owns *all* disk I/O and a derived SQLite index. TS owns the note buffer (bridge) and all networked sync. The UI never touches the filesystem: typed Rust commands (`src/lib/ipc.ts`) and HTTP (`src/lib/api.ts`).
 
-**Division of labor:** Rust owns *all* disk I/O and a derived SQLite index. The React/TS layer owns the
-note buffer via the md↔CRDT bridge and all networked sync. The UI never touches the filesystem directly —
-it calls typed Rust commands (`src/lib/ipc.ts`) and hits the server over HTTP (`src/lib/api.ts`).
+**Window chrome.** Windows disables native decorations before reveal (`src-tauri/src/lib.rs`) and draws one chrome row (sidebar/search/graph left; actions + custom caption buttons right). `WindowsControls` mounts beside `App` so loading/welcome screens keep them; write permissions scoped in `capabilities/windows.json`. The Activity/Versions slide-out hides the caption controls while open. macOS keeps overlay traffic lights, Linux its native titlebar.
 
-Windows disables native window decorations before reveal (`src-tauri/src/lib.rs`)
-and renders one blended chrome row: sidebar/search/graph at the left, app actions
-and custom caption buttons at the right. `WindowsControls` mounts beside `App` so
-loading/welcome screens retain window controls; its write permissions are scoped
-to Windows in `capabilities/windows.json`. The Activity/Versions slide-out stays
-at the top edge and hides Windows caption controls while open, leaving its own
-close button; closing the panel restores the caption controls. macOS keeps its overlay traffic lights
-and Linux its native titlebar. Tauri drag regions retain drag and double-click
-maximize behavior.
-
-The main window sets `backgroundThrottling: "disabled"` (`tauri.conf.json`, pinned by
-`src/__tests__/backgroundThrottling.test.ts`): WKWebView otherwise suspends a background page after a
-few minutes, and since sync runs in that page, remote edits stopped reaching disk until focus (#405).
-macOS 14+ only; Windows/Linux ignore it.
+**Webview resilience.**
+- Main window `backgroundThrottling: "disabled"` (pinned by `backgroundThrottling.test.ts`): WKWebView otherwise suspends the page, and sync runs there (#405). macOS 14+ only.
+- `index.html` loads two classic ES5 scripts before the module: `public/legacy-polyfills.js` (`Object.hasOwn`, `.at`, `findLast`, `replaceAll`, `structuredClone` when missing; @noble's ed25519 needs `Object.hasOwn` at load, Safari < 15.4) and `public/boot-guard.js` (a plain message when the app never draws; `main.tsx` sets `__baaldaMounted`, logs `[boot] legacy support`). Pinned by `legacyWebview.test.ts`. `main.tsx` wraps `<App/>` in an `ErrorBoundary` (`AppCrashFallback`).
+- Windows `webview_recovery.rs` (WebView2 `ProcessFailed`): renderer exit reloads (≤3 per 10 min), browser exit restarts the app (after 60 s up), GPU exit and focus nudge the surface; logged `[webview]`.
 
 ## Build & run
 
-Prereqs: Node ≥ 22, Rust/cargo, Docker (for Postgres). Run `pnpm install` once from `app/`.
-
-**Server** (from `app/apps/server/`):
+Prereqs: Node ≥ 22, Rust, Docker. `pnpm install` once from `app/`.
 ```bash
-cp .env.example .env      # change JWT_SECRET for anything real
-pnpm run db:up            # Postgres 16 in Docker, host port 5439
-pnpm run migrate          # apply migrations/*.sql in order
-pnpm run dev              # tsx watch; HTTP :3010, Hocuspocus WS :3011, GET /health
+# server (app/apps/server/)
+cp .env.example .env      # change JWT_SECRET for anything real; every env var is documented there
+pnpm run db:up            # Postgres 16, host port 5439
+pnpm run migrate          # migrations/*.sql in order
+pnpm run dev              # HTTP :3010, Hocuspocus WS :3011, GET /health
+# desktop (app/)
+pnpm run dev:desktop      # = pnpm --filter desktop tauri dev --config src-tauri/tauri.dev.conf.json (Vite :1420)
+pnpm run build:desktop
 ```
-
-**Desktop** (from `app/`): `pnpm run dev:desktop` (= `pnpm --filter desktop tauri dev --config src-tauri/tauri.dev.conf.json`; Vite on :1420).
-The dev config registers the `baalda-dev://` scheme, so a dev build never claims production's `baalda://`; macOS cannot route deep links to `tauri dev`, so the checkout success page skips the hand-back for it.
-Build: `pnpm run build:desktop`.
+The dev config registers `baalda-dev://` so a dev build never claims production's `baalda://`; macOS can't route deep links to `tauri dev`, so the checkout success page skips the hand-back.
 
 ## Test
 
-- Everything: `pnpm test` from `app/` (= `turbo run test`, both workspaces; desktop's task is
-  content-hash cached, server's never is — `apps/server/turbo.json` sets `cache: false` because it
-  mutates the shared Postgres).
-- Server (`app/apps/server`): `pnpm test` (vitest). **Requires `db:up` + `migrate` first.** Runs serially
-  against a shared Postgres (`fileParallelism: false`).
-- Desktop TS (`app/apps/desktop`): `pnpm test` (vitest, node env). The bridge suites (`echo`, `concurrent`,
-  `rewrite`, `roundtrip`) are the crown jewels — they gate correctness of the whole product. The sync
-  `integration` test is env-gated (`CONTEXT_IT=1`, needs a live server).
-- Desktop Rust: `cargo test` in `src-tauri/` (unit tests inline per module + `tests/index_integration.rs`).
+- Everything: `pnpm test` from `app/` (turbo). Desktop task is content-hash cached; server's never (`apps/server/turbo.json` `cache: false`: it mutates shared Postgres).
+- Server: `pnpm test` (vitest), **needs `db:up` + `migrate`**, serial (`fileParallelism: false`). ⚠️ It **wipes the DB it points at** (users/orgs/vaults) — point `DATABASE_URL` at a scratch DB, never the dev DB.
+- Desktop TS: `pnpm test` (vitest, node). The bridge suites (`echo`, `concurrent`, `rewrite`, `roundtrip`) gate correctness of the whole product. Sync `integration` is env-gated (`CONTEXT_IT=1`, live server).
+- Desktop Rust: `cargo test` in `src-tauri/` (unit tests inline + `tests/index_integration.rs`).
 
-> ⚠️ Running `pnpm test` in `apps/server` wipes the dev DB (users/orgs/vaults). Re-seed afterward.
+## Desktop — Rust core (`src-tauri/src/`)
 
-## Architecture by layer
-
-### Desktop — Rust core (`app/apps/desktop/src-tauri/src/`)
-Commands registered in `lib.rs`; `AppState` (`state.rs`) is one `Mutex` over `{ vault, index, watcher }`.
-Errors: single `AppError(String)` (`error.rs`).
+Commands registered in `lib.rs`; `AppState` (`state.rs`) = one `Mutex` over `{ vault, index, watcher }`; one `AppError(String)` (`error.rs`). Tauri events to the UI: **`vault-opened`** and **`files-changed`** (the only two).
 - `vault.rs` — path safety (`resolve_in_vault` rejects `..`/absolute/escape); ignores `.context/`, `.git`, dotfiles.
-- `tree.rs` — recursive walk to nested `TreeNode`; surfaces exactly `vault.rs ALLOWED_EXTS` (notes,
-  images, pdf, office docs, audio/video, csv/json/code, archives zip/tar/tgz/gz/7z) and hides the root `attachments/` folder.
-  **`ALLOWED_EXTS` and `NOTE_EXTS` are ONE contract with the desktop's format registry**
-  (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
-  surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /
-  `sync/inbound.ts`; `formatsLockstep.test.ts` reads those source files and fails on any drift. Only
-  `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas, url, webloc) are CRDT notes and index rows; a viewer
-  choice is display-only and never promotes a file into the bridge. The webview CSP in
-  `tauri.conf.json` is pinned by `src/__tests__/csp.test.ts` — Tauri injects it only in packaged
-  builds, `frame-src`/`media-src` must allow `asset:`, `http://asset.localhost` (Windows) and
-  `https://asset.localhost`, and dev never exercises it.
-- `dashboard.rs` / `dashboard_query.rs` — HTML notes render through the separate `baalda-view`
-  protocol with guest CSP and an opaque-origin iframe. Epoch-pinned, per-view leases allow the
-  mounted HTML plus safe local presentation assets; private paths and symlink escapes are denied.
-  The optional SDK uses a bounded, source-checked host bridge for reads, theme, state and navigation;
-  synced reads require a fresh server-readable listing. **Baalda renders; it never generates.**
-  Home/personal pins are device-local, shared Home/pins use `vault_appearance`; appearance PATCH
-  and atomic pin toggles preserve concurrent fields. Installed Codex runs under a dedicated named
-  permission profile; installed Claude uses restricted headless file tools with private-path denials, no shell or MCP tools, and saved CLI authentication. See `docs/DASHBOARDS.md` for API and boundaries.
-- `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
-- `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
-  (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`
-  resolves links by basename *then* title and `notes_fts` has a title column — while the **UI
-  displays the filename stem** (`src/lib/notePath.ts noteLabel`); that asymmetry is deliberate
-  (`aliases` would unify it later). New notes are created **empty** (`notefile.rs create_note`).
-- `index.rs` — SQLite at `<vault>/.context/index.sqlite` (WAL): `notes` (id=`doc_id`, path UNIQUE),
-  FTS5 `notes_fts`, `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. Notes keyed by
-  `doc_id`; `rebuild` preserves ids and never wipes the CRDT tables; `rename_note` rewrites paths by id so
-  backlinks survive moves. `note_file_identity.rs` retains reliable filesystem identity plus creation
-  time beside each note ID, including across removal/rebuild batches. A unique owner at an absent old
-  path lets local external renames retain identity; equal content or ambiguous hard links never merge.
-  Unsupported identity metadata fails closed. Local tabs follow these indexed moves; synced moves
-  remain registry-owned.
-- `watcher.rs` — `notify` recursive watcher, 150ms-debounced (1000ms ceiling), emits ONE batched
-  `files-changed {changes: [{path, kind}]}` per drain. `kind` is `modified` | `removed` | `tree`, derived
-  from an existence check rather than forwarded from `notify` (whose event kinds and rename pairing we
-  deliberately ignore); a rename therefore arrives as an unpaired `removed` + `modified` in one batch.
-- `attachments.rs` — path-validated binary I/O under `attachments/`; never enters the note/CRDT pipeline.
-- `keychain.rs` — `keyring` crate, service `com.baalda.context`; trait-based so tests use a fake.
-- `skills_sync.rs` — team skills on disk (`docs/SKILLS.md` §4). Writes ONLY
-  `<claude config dir>/skills/<name>` (`$CLAUDE_CONFIG_DIR` if absolute, else `~/.claude`) and
-  `~/.agents/skills/<name>` (Codex, Cursor, Gemini CLI, Copilot, OpenCode); never `~/.codex/skills`
-  (deprecated). Every command is `trusted_window`-gated; name and relPath rules are re-validated in
-  Rust, never trusted from the webview; a symlinked root/ancestor is refused. A folder is ours only
-  when its `.baalda-managed.json` matches the owner = skillId + orgId + serverUrl + userId (a marker
-  with no `userId` is legacy and matches any user); a marker naming another folder counts as none.
-  Anything else (unmanaged, another server/vault/user) is never written or removed by a sync run:
-  install `conflict` (`unmanaged`/`other_owner`), remove `conflict`. Only the person's explicit
-  "Use team version" (`replaceUnmanaged`) backs such a folder up to `skill-backups/` and replaces it,
-  another owner's copy included (2026-10-28); a symlinked folder is never replaced. Install = validate shas → stage in
-  `.baalda-staging-<uuid>` → write the marker last → re-verify staged hashes → rename the old dir
-  aside, rename staging in, roll back on failure (never rename over a dir). A drifted (edited) copy
-  is `edited` unless `force` ("Use team version"), which copies it to app data `skill-backups/`
-  first. Remove `delete` backs up a drifted copy then removes the dir; `release` deletes only the
-  marker (no backup) so the folder stays as the user's own skill. Install/remove share one
-  process-wide lock; `skills_scan` sweeps stale staging/old dirs after 1 h.
+- `tree.rs` — nested `TreeNode` walk; surfaces exactly `vault.rs ALLOWED_EXTS`; hides the root `attachments/` folder. **`ALLOWED_EXTS`/`NOTE_EXTS` are ONE contract** with `src/lib/formats.ts` (`SURFACED_EXTS`/`NOTE_EXTS`, the single authority for how a file surfaces, opens, embeds, uploads and syncs) and the `NOTE_EXTS` literals in `sync/registry.ts`/`sync/inbound.ts`; `formatsLockstep.test.ts` fails on drift. Only `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas, url, webloc) are CRDT notes and index rows; a viewer choice never promotes a file into the bridge.
+- **CSP** in `tauri.conf.json` is pinned by `csp.test.ts`. Tauri injects it only in packaged builds (dev never exercises it); `frame-src`/`media-src` must allow `asset:`, `http://asset.localhost` (Windows) and `https://asset.localhost`.
+- `dashboard.rs`/`dashboard_query.rs` — HTML notes render through the `baalda-view` protocol (guest CSP, opaque-origin iframe, epoch-pinned leases; private paths and symlink escapes denied); optional SDK bridge for reads/theme/state/navigation. **Baalda renders; it never generates.** Agent runners (Codex profile, restricted Claude) and pins/Home: `docs/DASHBOARDS.md`.
+- `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`; a bridge's `write_note` keys the indexed row by its doc id when the row is new or its id has no CRDT/disk base (`adopt_writer_id`; before, a teammate's note written before it was on disk got a second, fresh id); `sweep_stale_temp_files` at vault open removes only our `.{name}.{pid}.{n}.tmp` shape, another pid, older than `STALE_TEMP_AGE` (10 min); skips `.git`/`node_modules`, never follows symlinks. New notes are created **empty**.
+- `parse.rs` — title/tags/`[[wikilinks]]`/frontmatter. `derive_title` (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title; the **UI shows the filename stem** (`notePath.ts noteLabel`) — deliberate. `TAG_RE` is one contract with the editor's `ofm/hashtag.ts`.
+- `index.rs` — SQLite `<vault>/.context/index.sqlite` (WAL): `notes` (id=`doc_id`, path UNIQUE), FTS5 `notes_fts` (self-contained, not contentless, because `snippet()` needs content), `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. `rebuild` preserves ids and never wipes CRDT tables. `rename_note` rewrites paths by id and skips its whole-vault link pass when no row moved; many renames defer it (`deferLinks` + one `flush_deferred_links`; debt = `index_flags` `links_dirty`).
+- **One note, one id** (`sync/forkHeal.ts`, Rust `heal_note_id`): beside each CRDT sweep, an index row whose id is not the registry's is re-keyed to it; the fork's local history is folded into the real id only when provably the same lineage (covered, shared writers, or grown from the acked state; two independent seeds are never merged), then pushed like a `ready.behind` doc and recorded in the hello manifest (`noteLocalState`). `rebuild` keeps a case twin's row with history under the disk's spelling.
+- `note_file_identity.rs` — filesystem identity + creation time per note id, so local external renames keep identity; equal content or ambiguous hard links never merge, but the same file under another case/Unicode spelling (a teammate's `casef/b.md` landing in this disk's `CaseF/`) adopts its row instead of getting a second id (whose delete then resurrected it); unsupported metadata fails closed. Local tabs follow indexed moves; synced moves stay registry-owned.
+- `watcher.rs` — `notify` recursive, 150 ms debounce (1000 ms ceiling), ONE batched `files-changed {changes:[{path,kind}]}` per drain. `kind` = `modified`|`removed`|`tree` from an existence check (notify's kinds/rename pairing are ignored), so a rename is an unpaired `removed` + `modified`. A whole directory moved is ONE event (FSEvents names no file inside), so a folder still present that a batch names has its index subtree reconciled (`reconcile_present_dirs`: files first, identity carries a moved note's row; then rows on missing files dropped), and the sync layer runs the closed-app drift check on its mapped notes AFTER the folder-move drain (`sweepPresentFolders`; before it, a rotation read B as still at home). Without both, swapping two folders left the owner's disk silently different from the server.
+- `attachments.rs` — path-validated binary I/O under `attachments/`; never enters the CRDT pipeline.
+- `keychain.rs` — `keyring`, service `com.baalda.context`, trait-based (tests use a fake).
+- `skills_sync.rs` — writes ONLY `<claude config dir>/skills/<name>` and `~/.agents/skills/<name>` (never `~/.codex/skills`). `trusted_window`-gated; names re-validated in Rust; ownership by `.baalda-managed.json` (skillId + orgId + serverUrl + userId). Full rules: `docs/SKILLS.md` §4.
 
-Tauri events to the UI: **`vault-opened`** and **`files-changed`** (the only two).
+## Desktop — the bridge (`src/lib/bridge/`)
 
-### Desktop — the bridge (`src/lib/bridge/`)
-Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.ts` wires production I/O.
-`noteBridge.ts` = one `Y.Doc` with a single `Y.Text("content")` per note. Transaction origins:
-`ORIGIN_DISK`, `ORIGIN_EDITOR`, `ORIGIN_REMOTE`.
+Pure TS with injected I/O (vitest in Node); `adapter.ts` wires production I/O. `noteBridge.ts` = one `Y.Doc`, one `Y.Text("content")` per note; origins `ORIGIN_DISK`, `ORIGIN_EDITOR`, `ORIGIN_REMOTE`.
 
-**Loop avoidance — two guards you must never break:**
-1. `onTextChange` ignores `disk`-origin transactions (don't write back what we just read in).
-2. `lastWrittenHash`: egest hashes the bytes *before* writing; ingest drops any file read whose hash
-   equals it (our own echo).
+**Two loop guards you must never break:** (1) `onTextChange` ignores `disk`-origin transactions; (2) `lastWrittenHash`: egest hashes before writing, ingest drops a read whose hash equals it (our echo).
+- **Ingest (disk→CRDT):** 150 ms debounce; diff-match-patch the file against the serialization, apply as `Y.Text` ops under `disk`. Diff ratio > 0.6 (an AI rewrite) takes a recovery snapshot first. If a transaction races the read/hash/snapshot, apply the disk diff on a branch from the pre-read CRDT and merge its ops into the live doc. **Never re-diff older file bytes against newly arrived peer content** (turns peer additions into deletions); after a pull, strip the pull's own insertions (`withoutPullInsertions`). Ignore repeat reads of the merged input until the result is written; branch only when a race actually happens.
+- **Egest (CRDT→disk):** 300 ms debounce; set echo hash, atomic write (Rust re-indexes).
+- **Guards:** a 0-byte file never clears a populated doc (`allowTruncateFromDisk` default false); seeding re-checks emptiness INSIDE the transaction (a seed racing a pull doubles the text).
+- Persistence: every `doc.on("update")` appends to SQLite; compact past ~64 updates.
+- **Debounces are load-bearing** (150/300 ms): the echo-loop and convergence tests depend on them.
 
-- **Ingest (disk→CRDT):** debounced 150ms; diff current serialization vs file (diff-match-patch), apply as
-  `Y.Text` insert/delete under `disk` origin. A large diff ratio (>0.6, e.g. an AI whole-file rewrite)
-  takes a recovery snapshot first. If a transaction races the file read, hash, or snapshot,
-  retain the pre-read CRDT and apply the disk diff on that branch, then merge its operations
-  into the live doc. Never re-diff older file bytes against newly arrived peer content: that
-  turns peer additions into deletions. Ignore repeat reads of the merged disk input until
-  the combined result is written; allocate the branch only when a transaction actually races.
-- **Egest (CRDT→disk):** debounced 300ms; set echo hash, atomic write (Rust re-indexes on write).
-- CRDT persistence: every `doc.on("update")` appends to the SQLite log; compact into a snapshot past ~64 updates.
+## Desktop — sync (`src/lib/sync/`)
 
-### Desktop — sync (`src/lib/sync/`)
-- `docSession.ts` (`syncManager`) — owns the registry, current `DocSync`, presence, attachments.
-  Each sync lifetime gets a fresh `VaultRegistry`; teardown permanently retires the previous one.
-  Never rebind a retired registry: suspended requests must retain the old scope and cannot write
-  another vault's files, identity map, baseline, progress, or selection. Flush the editor before
-  switching the vault epoch, and gate late note-open completions on that epoch.
-- `syncManager.ts` (`DocSync`) — `HocuspocusProvider` over the bridge's `Y.Doc`; doc name
-  `vault:<vaultId>/note:<docId>`. Token is a **function** re-minted per (re)connect via `POST /api/sync-token`;
-  403 → `no-access`. WS URL derived from the server URL (`deriveWsUrl`): ALWAYS same-origin
-  `ws(s)://<server>/sync`, like the vault channel's `/vault-sync`. (It used to bump an explicit
-  `:3010` to the dedicated `:3011`, which broke every single-port self-host — the Compose bundle
-  publishes only 3010 — so content never uploaded while structure synced fine, #79.)
-- `startup.ts` (`decideSeed`) — **split-brain rule**: when signed in, pull from server FIRST, then seed a
-  local orphan only if the doc is still empty. Reversing this causes permanent divergence.
-- `registry.ts` — reconciles local vault ↔ server vault/folders/notes, persists the doc-id map to
-  `.context/config.json`, materializes server-only notes create-only (`write_note_if_missing`) and then
-  fills them in from THIS device's local CRDT when it has one (`InboundHost.materializeContent` →
-  `NoteBridge.writeThrough`); with no local CRDT the file stays 0 bytes and hydrates lazily on open or
-  from the vault channel's backfill. Each path it creates is remembered for exactly one watcher echo
-  (`consumeMaterialized`), so the app's own placeholder is never mistaken for an external edit.
-  Registry pulls are collapsed (`VaultRegistry.pull`: requests made while a pull runs join one trailing
-  pull) and teammate-driven ones (`registry-frame`/`meta-frame`) start no sooner than
-  `REGISTRY_FRAME_PULL_MIN_GAP_MS` (2 s) after the last pull ended; local, reconnect and ACL reasons keep
-  the 250 ms path; one pull is one paged `/api/notes` listing (5000 per page, the server's cap).
-  Windows-unsafe server paths (trailing dot/space, reserved device names, `<>:"|?*`, over 200 characters; `sync/windowsPaths.ts`) are skipped with one warning per path per session, never retried, by inbound folder creation/materialize, the bootstrap content apply, tree-binary downloads and inbound renames (the old local path stays); outbound never registers a Windows-stripped twin of a server name. `consumeMaterialized` matches echoes ignoring case and Unicode form, and on Windows with trailing dots and spaces stripped. After 3 consecutive registry pulls that change nothing, `watcher` (folder-only batches), `reauth` and `register-failed` pulls back off 2 s → 30 s; a watcher batch with a real file change stays within 2 s; any changing pull, a user-action reason or teardown releases it. Pulls also wait while a disk-delete drain is pairing moves.
-- `tokenRefresh.ts` — re-mint 60s before JWT expiry. `attachments.ts` — content-hash (sha256) diff, upload/download.
-- **External writers are first-class** (`handleLocalFileChanged` in `docSession.ts`): a watcher event for a
-  non-open note routes to the sync layer — unmapped/structural changes trigger the debounced registry pull
-  (register + upload), mapped notes get a debounced `ContentUploader` run with `force` + `ingestFromFile`
-  (diff-merge the file into the CRDT via `NoteBridge.ingestNow`, echo-guarded fast-path skips our own egest
-  echoes; the `divergedDocs` set forces a connect for out-of-band merges by resident bridges / cold applies).
-  `NoteBridge.hydrate` also ingests the file on reopen when it moved on while the doc was closed.
-  Edits to mapped, unopened notes made while the app was closed are detected at launch, once the
-  session is live, by comparing the index `notes.sha256` with `diskBase` (`list_disk_drift`,
-  `sync/closedAppEdits.ts`) and pushed through the same ingest + push queue in chunks of 50 (#284);
-  padlocked notes, notes the server says this user cannot edit (an unanswered check counts as
-  read-only) and notes whose file already equals the local CRDT are never pushed.
-- **Disk deletes ARE propagated** (`SyncManager.drainDiskDeletes`, #93), after a `DISK_DELETE_GRACE_MS`
-  (2.5 s) window that filters everything which merely looks like a delete: a `modified` for the same path
-  cancels it (an editor's unlink-and-rewrite save, a rename-back), the file is re-checked on disk
-  (`ipc.noteExists`), and a pending delete whose doc text hashes equal to an unmapped file that appeared in
-  the same window is a RENAME — `registry.renamePath` + `ipc.rebindNoteId` keep the `doc_id` (a batch that
-  queued a delete also defers its registry pull, or the new path would register as a second note first).
-  Survivors call `registry.deletePath` — or `registry.deletePaths` → `POST /notes/delete-batch`
-  above `BULK_THRESHOLD_DOCS`,
-  both pooled — the SAME soft delete the sidebar's Delete makes, never `ipc.deletePath` (the file
-  is already gone). Three refusals: a doc that is not `isPushed` (its only copy may be local), a session
-  that is not yet live (`liveSince` = vault channel `synced` + one completed pull, so a missing file at
-  startup re-materializes instead), and more than `max(5, ceil(mapped * 0.2))` deletes in one window — judged
-  FIRST, before any server call. Over the cap a disk delete is NEVER propagated: deleting for everyone
-  happens inside the app, where the creator-only rule applies. With the root present and the session
-  live the batch is HELD briefly (#221): an informational notice says the notes stay for the team and
-  will be restored here, with Restore now and Dismiss; Restore now, Dismiss or its 20 s fade all call
-  `releaseDeleteDecision`, which clears the hold so the pull stops skipping those docs and
-  re-materializes them. With the root gone it is still refused silently, because an unmounted volume
-  looks exactly like a bulk delete. A mapped FOLDER that vanishes while an unmapped folder appears is
-  paired first (`drainFolderMoves`: ≥80% of its notes present at the same sub-path with matching content
-  ⇒ ONE server folder move, every id kept; below that, per-note pairing then the drain). A mapped folder
-  that vanished and was NOT a move is deleted on the server after its notes and files
-  (`propagateGoneFolders` → `registry.deleteVanishedFolder` → `DELETE /api/folders/:id?ifEmpty=1`,
-  server feature `folder-delete-if-empty`; 409 `folder_not_empty` or a creator refusal keeps it),
-  deepest first, under the same cap (before this, a folder deleted on disk came back empty on every
-  device). A refused delete of a teammate's tree binary is put back like a note
-  (`BinaryDeleteQueue.onNotCreator` → `restoredFromServer` with `NOT_CREATOR_DETAIL`). A vanished vault
-  root pauses every materialize/register/delete step, closes the tabs and offers Restore here (recreate
-  it at the old path and sync down — the Set-up prompt's empty-folder path) or Locate folder… (its
-  open-folder path) from the banner, Settings → Vaults and the launch prompt (#228). A folder that lived INSIDE the vaults root is not asked about
-  (`lib/vault/missingFolder.ts planMissingFolder`, 2026-10-09): after a 2 s settle a renamed copy carrying
-  the vault's stamp is rebound (toast "<Vault> moved to <folder>."), else a synced vault is recreated
-  and synced down with an informational notice whose one action is "Locate the original instead…";
-  outside the root, a local-only vault, or a missing root keep the prompt. The ingest side is
-  guarded too: a 0-byte file never clears a populated doc (`allowTruncateFromDisk`, default false). A disk delete the server refuses on the creator rule (403
-  `delete_not_creator` / `folder_has_others_items`, per item in a batch) is put back, never retried:
-  `registry.restoreRefusedDelete` re-creates the file create-only, fills it from the local CRDT, owes
-  one `consumeMaterialized` echo and records one `restoredFromServer` entry (detail
-  `NOT_CREATOR_DETAIL`, `lib/sync/deletePolicy.ts`), the held banner's Delete for everyone included.
-- **`ready.empty` is filtered against disk** (`SyncManager.settleServerEmpty`): the server names every
-  readable doc it holds no CRDT for on each connect, but a doc whose LOCAL file is empty too has nothing
-  to push — it is marked pushed + badged synced and never queued (a vault with 307 zero-byte `_Index.md`
-  stubs used to "re-sync 307 notes" on every reload). Files over `MAX_NOTE_BYTES` (10 MB, the server's
-  `MAX_NOTE_MB`) fail once, permanently, without a socket (`permanentFailures`) instead of being rejected
-  by the server on every reconnect. A transient push failure (timeout, network, 5xx) is listed only
-  after 3 attempts or 5 min (`sync/failureGrace.ts`), and any `registry.markPushed` clears the doc's
-  non-permanent failure rows, so Activity never says Failed beside a synced dot.
-  `listEmptyDocs` probes only live `notes` rows (never `files` ids, which have no Yjs content), and past
-  the 2000 cap it names a stable set: the lowest `md5(id || UTC-day)`, the same on every connect that
-  day and a different window the next.
-- **`ready.behind` is the other authority** (`SyncManager.handleServerBehind`, #98): the server's backfill
-  diff (`loadDocDiff`) treats a client whose state vector *covers* the server's as up to date — unequal is
-  not behind — and flags `clientAhead` when the client holds ops the server never received; those docs are
-  named on `ready.behind` and queued for a push exactly like `ready.empty` ones. Before this, 40 notes with
-  unflushed local edits re-downloaded a 2-byte empty diff on every connect ("Syncing 40/40" on each
-  reload) and the edits never left the device.
-- **`ready.revoked` is the third doc list** (`docSession.handleServerRevoked`): on every connect the
-  server names the docs the client's own hello manifest claims that are NOT in its readable set
-  (`vault-channel.ts revokedFromManifest`, `REVOKED_CAP` 2000, pure set arithmetic, no query) — bounded
-  by what the client holds, never by the vault. It fires ahead of `setStatus("synced")`, because that
-  flip arms the pull the authority is meant to cover; that ordering is what cleans up a member whose app
-  was closed when the owner went Private, on their next launch. A revoked file leaves the disk only when
-  all seven hold: both listings 200; the server ANSWERED the tombstone question; `isLive()`; an ACL
-  signal ≤60 s old (`ready.revoked`, batched `revoked`, or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))`
-  OR the server NAMED this doc; the access-check agrees where the cap lift is what saved it; and the doc
-  is `pushed` or the file is empty. The named list is NOT a second opinion — `/api/notes` and
-  `revokedFromManifest` both call `listReadableDocsInVault`, so it only catches a racy short answer; the
-  real cross-check is `POST /api/vaults/:id/access-check` (`InboundPlan.needsAccessCheck`, measured on
-  the revoked group BEFORE any refusal → `registry.confirmRevocations`, chunked in slices of
-  `ACCESS_CHECK_MAX` — mirrored in `lib/api.ts`, pinned by `accessCheckBound.test.ts`), and a
-  disagreement, an unanswered id, a throw on ANY slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` abort
-  LEAVES the whole group (a refused id also leaves the named set via
-  `InboundHost.revocationRefused`). The named set unions across the session
-  (`handleServerReauth` never clears it; `onServerDrop` feeds the live path) and a truncated list keeps
-  its 2000 as the allow-list for older peers. Clients advertising `revocation-batches` receive all
-  named revocations in frames of at most 2000 ids (before `ready` on connect, before `reauth` live).
-  `hello.held` includes mapped notes without a local state vector; `hello.files` carries binaries.
-  Doc-bound tree binaries sync three-way (`attachments.ts planBinarySync`) against a per-`files`-id
-  base sha persisted as `config.json fileBases`: local==base ⇒ download the teammate's version,
-  server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
-  changed ⇒ server canonical, the local bytes replaced with no copy kept (2026-11-19) — never a flip.
-  `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (including
-  `DENIED_DIRS`). A download that fails permanently (sha mismatch or path refusal) is remembered per
-  blob id+sha (`undownloadable`) and not retried until the server's sha changes. Uploads verify what
-  they stream: Rust's `VerifyingReader` hashes and counts the PUT body against the intent's sha/size and
-  fails with `file changed during upload` (never completed; the path's cached sha is dropped), and the
-  sync pass skips a binary modified within `UPLOAD_QUIET_MS` (3 s), retrying on one shared settle
-  timer. Multipart parts check length only.
-  An `attachments/` drop uploads unless the server lists the same sha as an `attachments/` row
-  (`planBinarySync attachmentShas`): a tree file holding the same bytes does not count, since
-  teammates materialize embeds only from `attachments/` rows (a PDF in a folder and the same PDF
-  dropped into a note left the embed missing on every other device).
-  Drops and pastes are size-checked BEFORE the bytes are read: `ipc.readExternalFile(path,
-  preReadLimit(ext))` refuses in Rust from file metadata (`ExternalFileTooLarge`) and the paste path
-  checks `File.size`; formats that transcode (`transcodeTo`) are read first, since their cap
-  applies after conversion. Reading a 600 MB drop whole used to push the app past 700 MB.
-  A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
-  ids from `file_tombstones` with no live row) is `toTrash`: removed outright, its id
-  forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a
-  failed listing means no suppression that pass.
-  Clients advertising `bulk-regrant` receive `bootstrap` for live grants of 25 or more
-  notes, then pull the registry and use the HTTP bulk downloader. Bootstrap pages are
-  gzip without `Content-Encoding`; the desktop explicitly inflates before decoding.
-  Active backfill retains download progress across buffer pauses, and open read-only
-  notes compare the pre-pull file with confirmed server content before reporting an edit.
-  The named-list and independent access-check guards still apply. Confirmed access changes may
-  remove empty folders even with a named note list; folder removal is always non-recursive, after
-  note checks, and unannounced mass removals retain their cap.
-  Large local note removals use `delete_files_batch` in chunks of at most 64, including revoked CRDT
-  cleanup, and report a throttled `removing` phase with a remaining-item count. Confirmed deletions
-  and revocations are OUTRIGHT via Rust `delete_file`
-  (`rel_path_is_ignored` FIRST, so
-  `.context` AND `.context/config.json` are refused, then a directory refusal; `deletePath` stays the
-  sidebar's recursive one), regardless of authorship. A revoked removal also `docStore.drop`s +
-  `ipc.clearYjsDoc`s, so `ready` stops re-naming it; a DELETION drops the local CRDT the same way
-  (`noteRemoved`, 2026-11-19), so a checkpoint restore of a purged note can never merge stale ops into
-  it. The deletion cap is never lifted. **Nothing is ever written to `.context/trash` any more
-  (decided 2026-11-19, "deleted means deleted"):** deletes, revocations, read-only reconciliation,
-  refused read-only edits, unsendable edits, binary three-way conflicts and server-wins merges all
-  replace or remove the local bytes without a copy, and say so in the reconcile summary / Activity.
-  The Rust `trash_note`/`write_trash_copy`/`copy_to_trash` commands remain only so older copies stay
-  listable.
-- **Offline reconciliation** (`sync/ackedSv.ts`, `registry.ts`, `reconcileReport.ts`): the gate for an
-  inbound delete / revocation is UNSEEN WORK, not `pushed` (a badge). `ackedSv` is the per-doc Yjs state
-  vector the server is known to cover — recorded on Hocuspocus `synced`, a batch-push ack, the per-doc uploader's flushed editable
-  push (`ContentUploader` `markAcked`), a one-step create's `sv` and
-  `ready.covered` (NOT on a backfill/bootstrap apply: a server diff proves nothing about local ops),
-  merged by max, persisted as `config.json ackedSv` — and
-  `registry.unseenWorkVerdict` answers `none` (stale device: accept outright), `unseen` (local ops or a
-  file hash ≠ `diskBase` the server never saw)
-  or `unknown` (no content baseline). Since 2026-11-19 the verdict no longer keeps
-  anything: an inbound delete or revocation removes the file outright, no copy, and unsent edits
-  are NOT pushed into the deleted note either. For an explicit deletion, a matching local index
-  `doc_id` and path establish identity even without a per-document reconciliation baseline. An unprovable identity still stays on disk;
-  a tombstone must never remove an unrelated file reusing its path. A REVOCATION
-  (`registry.revokedVerdict`) likewise removes the note outright, unsent work included; an
-  unrelated local id at the path still stays. `store.openNoteByPath` refuses a path the server answered
-  `not_readable` for (`registry.isHiddenPath`) instead of opening its local bytes. A same-path create from two devices stays
-  two notes: the later one by `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>`
-  (`conflictPath`) and registered as its own note — never adopted onto the other's id. A rename made
-  while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the
-  `doc_id` survives. Every such action is recorded as a `ReconcileKind` (`restoredFromServer`,
-  `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`,
-  `externalEditSaved`) and shown once per session as one plain-words summary (`ReconcileBanner`,
-  which fades after 20 s like Dismiss; details stay in the Activity panel's Review changes); nothing
-  in the report persists. Entries are PER VAULT: `reconcileReport` stamps each one with the current
-  `vaultScopes` folder path and every reader (`items`/`drain`/`forgetReadable`/`clear`/subscribers)
-  sees only the open vault's; `enterVaultScope` and the session teardown call `vaultChanged()` so a
-  switch re-renders the banner, the review count and Activity (vault A's rows used to show in B). `selfRevoked` is a
-  revocation caused by an access change THIS device made for the signed-in user in the last 60 s
-  (`sync/selfAccessChanges.ts` `markSelfAccessChange`/`isSelfAccessChange`): the same safety outcome
-  as `keptLocally`, reported quietly and left out of the "N changes to review" count.
-  `reconcileReport.forgetReadable(docIds)` drops `keptLocally`/`deletedByTeammate`/`selfRevoked`
-  entries for docs the server lists again on a later pull, so regained access shrinks the banner.
-- **One-step creates** (`registry.ts registerNotesBatched`, pure packing/classification in
-  `sync/seedRegister.ts`): when the server's `/health` `features` (cached per server URL,
-  `lib/serverFeatures.ts cachedServerFeatures`) lists `notes-with-state`, EVERY new note, 1 or
-  20,000, registers through `notes/batch` WITH its binary Yjs state (`state` = base64
-  `encodeStateAsUpdate`, `textSha256` an alarm only) — `BULK_THRESHOLD_DOCS` no longer gates creates
-  and no new note opens a socket to upload. Chunks: 100 items / 4 MiB decoded (`packSeedChunks`); an
-  item over 4 MiB goes alone up to `MAX_NOTE_BYTES`, past that it registers without state. The state
-  is the local CRDT, or for an empty doc a THROWAWAY doc seeded from the file
-  (`docSession.buildNoteState`, never the open note): the live doc is seeded only after the server
-  says it holds those exact ops. Per item (`classifySeedResult`): `applied`/`covered` ⇒
-  `noteSeeded` = `markPushed` + `recordAck(sv)` (never before the response — a crash leaves the note
-  unpushed and the retry answers `covered`); `conflict` on our own id, or `adopted` onto ANOTHER id
-  ⇒ `noteNeedsMerge`, never applying local state onto a doc the server already filled (that is the
-  note-doubling bug); a missing `seeded` ⇒ old server, today's register-then-push. The merge is HTTP
-  (`docSession.httpMergeOnce`): `bootstrap` with `only` (≤100 ids), start from an EMPTY local doc +
-  the server's state, fold the file in with the uploader's post-pull routine, push the result
-  through docs/batch WITHOUT `expectEmpty`, then ack; without `bootstrap-only` or on a failed pull
-  it falls back to the per-doc uploader. **Decided 2026-10-04:** on `adopted`/`conflict` with
-  differing text the SERVER text wins, the local text is replaced with no copy (2026-11-19; the
-  fresh bridge's `unagreedFile` → `saveAside` now only reports) and reported once as `conflictKeptServer` in the reconcile
-  banner and the Activity review; a clean adopt (empty or identical local text) reports nothing. This is not the
-  `conflictPath` rule: `resolveSamePathConflicts` runs on the pull BEFORE registration and only for
-  an unmapped non-empty local file at the path of a server note this device has never agreed on, in
-  a collection it has a baseline for, so those stay two notes (`(conflict YYYY-MM-DD)`); `adopted`
-  is what registration meets when that step did not apply (first sync without a baseline adopts
-  by path on purpose, or the server row appeared after the listing), and `conflict` is our own id
-  already filled. A merge for the open note (or the path of an open adopt loser) is parked and
-  runs when the note closes. The eager single `registerNote` (a note opened before the
-  pass, `registry.ts eagerSeed`) sends state the same way through `POST /api/notes` and settles the
-  answer through the same `noteSeeded` / `noteNeedsMerge` hooks; an empty note, or one the host
-  will not build (`buildNoteState` refuses the open note, whose `DocSync` owns its content), still
-  registers without state. `ContentUploader`
-  is now a fallback only — servers lacking `notes-with-state`/`bootstrap-only`, the HTTP merge's
-  explicit fallback, and closed-note / read-only-rebase follow-ups not yet moved to HTTP — and is
-  deleted once `MIN_CLIENT_VERSION` retires those servers.
-- **No 0-byte placeholders when a bootstrap will deliver** (`registry.ts pendingFromBootstrap`,
-  `InboundHost.bootstrapWillDeliver`): a pull large enough for the bulk path (`useBulkPath`) whose
-  bootstrap is guaranteed to run records server-only notes instead of writing placeholders, and the
-  bootstrap creates them WITH content (a fresh device joining a 20,000-note vault used to show
-  20,000 empty files for the whole download). Small arrivals (a teammate's new note, a grant under
-  the bulk threshold) are deferred too while the vault channel is connected, live and backfilling
-  (`sync/deferredArrival.ts`): the first content frame's cold apply creates the file with its text
-  through `apply_bootstrap_batch` (create-only, `markMaterialized`), and whatever has not arrived in
-  `DEFERRED_ARRIVAL_WAIT_MS` (2 s), or on a channel drop, gets its placeholder; until then the note
-  is simply not on disk, so the sidebar has nothing to open. Placeholders are still written now for
-  docs the server holds no state for (`ready.empty`), docs this device holds CRDT for
-  (`materializeContent` fills them), D5 restores, and everything when nothing will deliver. When
-  the download ends however it ends, `materializePendingFromBootstrap` writes create-only
-  placeholders for what it did not deliver (the server-empty `ready.empty` class, or a cancelled
-  run), re-resolved by `doc_id`. The pending set is memory only, never persisted as done: an
-  interrupted run leaves files missing and the next pull finds them again. A server-content
-  confirmation (`markPushed`) must not clear this pending file creation: an empty Y.Doc can be
-  acknowledged without any disk write. Only confirmed materialization clears it. Pending arrivals
-  are excluded from missing-file recovery notices and offline rename candidates on subsequent pulls.
-- **The open note's "was removed" banner waits** (`lib/openNoteRemoval.ts`, wired in `App.tsx`): a
-  rename (in-app, Finder, an AI agent, a folder move) also reports the old path as `removed`, and
-  setting the banner on that raw event flashed "was removed" on every rename until the move was
-  paired. The check now runs after `DISK_DELETE_GRACE_MS` + `OPEN_NOTE_REMOVED_SLACK_MS` (500 ms) and
-  shows only if the open note STILL sits on that path and `ipc.noteExists` says missing (a throw
-  shows nothing); `noteRemovedSynced` is sampled when the file vanished. `store.renameNoteFileExact`
-  re-points the open note, tabs, order and sorts right after the disk rename, BEFORE the server
-  PATCH (a PATCH failure only warns). Empty notes pair too (`sync/emptyRename.ts
-  pickUniqueEmptyRename`): every 0-byte placeholder hashes the same, so a renamed empty note used to
-  reach the server as delete + create; the drain now pairs one only when exactly one empty note went
-  and exactly one empty unmapped file appeared, sharing a basename or a parent folder.
-- **Paths compare case-insensitively everywhere** — notes (`samePath`) AND folders in `planInbound`, like
-  the server's `lower(path)` unique indexes and the outbound `registry.ts` adoption. A vault whose disk
-  said `Projects/community` while the server said `Projects/Community` (with empty server folders under
-  it) used to create and remove the same directories on alternate pulls, each pass re-triggering the next
-  through the watcher's `tree` event: one idle client pulled the full registry every ~1.5 s (#98).
+### Sessions and sockets
+- `docSession.ts` (`syncManager`) owns the registry, current `DocSync`, presence, attachments. Each sync lifetime gets a fresh `VaultRegistry`; teardown retires the old one **permanently** — never rebind it (suspended requests keep the old scope and must not write another vault's files, id map, baseline or selection). Flush the editor before switching the vault epoch; gate late note-open completions on that epoch.
+- `syncManager.ts` (`DocSync`) — `HocuspocusProvider` on the bridge's `Y.Doc`, doc name `vault:<vaultId>/note:<docId>`. Token is a **function** re-minted per (re)connect (`POST /api/sync-token`; 403 → `no-access`; `tokenRefresh.ts` re-mints 60 s before expiry). WS URL (`deriveWsUrl`) is ALWAYS same-origin `ws(s)://<server>/sync`, like `/vault-sync` (bumping to :3011 broke single-port self-hosts, #79).
+- `startup.ts` (`decideSeed`) — **split-brain rule**: signed in, pull from the server FIRST, then seed a local orphan only if the doc is still empty. Reversing this causes permanent divergence.
+- **Paths compare case-insensitively everywhere** (notes `samePath` and folders in `planInbound`), like the server's `lower(path)` unique indexes; case-variant folders made one idle client pull every ~1.5 s (#98).
 
-### Desktop — React (`src/`)
-The top banners above the editor share ONE notice slot (`lib/noticeSlot.ts`, hook
-`components/useNoticeSlot.ts`): each claims it and only the highest-priority claim shows, in the
-order held bulk delete > reconcile summary > open note deleted/access removed > vault made local
-only > membership ended (folder deleted) > vault folder missing > vault folder restored > Team subscription lapsed (read-only sync) > closed-app changes > not syncing > sync paused > note limit > create
-refusal > open note's file gone on disk > attachments local only. Informational notices fade after
-`NOTICE_FADE_MS` (20 s) through their own Dismiss; notices with a pending choice (sign in, locate,
-upgrade, close note, keep local) stay until answered. A faded notice loses nothing: Activity keeps
-the record. The editor's inline locked/view-only banner is not part of the slot.
-`store.ts` is a Zustand **UI view-state mirror only** (vault, tree, open note, auth/session, org members,
-sync status, locks, prefs). Editor is CodeMirror 6 + `y-codemirror.next` (`yCollab`) — the buffer *is* the
-markdown. In `collab` mode CM6 history/onChange are dropped so Yjs owns undo. Graph view is a hand-rolled
-canvas force sim (no deps). Live-preview and inline-HTML rendering sanitize aggressively (drop
-script/style/iframe, strip `on*`/`javascript:`). The editor's horizontal inset lives on **`.cm-line`**
-via `--editor-pad-x`, never on `.cm-content`: `drawSelection()` reads the first line's padding and is
-blind to the content element's, so a centring pad there made every full-line selection rect overrun the
-margins — block replace widgets (which are `.cm-content`'s direct children) get the inset back through
-the shared `cm-block-inset` class.
+### Registry and pulls (`registry.ts`)
+- Reconciles local ↔ server vault/folders/notes; persists the id map in `.context/config.json`. Server-only notes materialize create-only (`write_note_if_missing`) then fill from THIS device's CRDT if it has one (`InboundHost.materializeContent` → `NoteBridge.writeThrough`); otherwise the file stays 0 bytes and hydrates on open or from backfill. Each path it creates owes exactly one watcher echo (`consumeMaterialized`; matched ignoring case/Unicode form, and on Windows trailing dots/spaces).
+- `VaultRegistry.pull` collapses requests into one trailing pull; teammate-driven reasons (`registry-frame`/`meta-frame`) wait `REGISTRY_FRAME_PULL_MIN_GAP_MS` (2 s), local/reconnect/ACL keep 250 ms; a pull is one paged `/api/notes` listing (5000/page). After 3 no-change pulls, `watcher` (folder-only), `reauth` and `register-failed` pulls back off 2 s → 30 s; real file changes stay ≤ 2 s. Pulls wait while a disk-delete drain is pairing moves.
+- Windows-unsafe server paths (`sync/windowsPaths.ts`: trailing dot/space, reserved names, `<>:"|?*`, > 200 chars) are skipped once per path per session everywhere inbound; outbound never registers a stripped twin.
+- **Never write a 0-byte placeholder when content is coming:** a pull big enough for bootstrap (`useBulkPath`, `pendingFromBootstrap`/`bootstrapWillDeliver`) records server-only notes and the bootstrap creates them with content; small arrivals defer while the vault channel is live and backfilling (`deferredArrival.ts`: the first content frame's cold apply creates the file through Rust `apply_bootstrap_batch`, create-only; `DEFERRED_ARRIVAL_WAIT_MS` 2 s or a channel drop, then placeholder). Placeholders still go for `ready.empty` docs, docs with local CRDT, D5 restores, or when nothing will deliver. `materializePendingFromBootstrap` runs **on the pull chain** and writes what the download didn't deliver; the pending set is memory-only (an interrupted run leaves files missing and the next pull finds them), and `markPushed` must NOT clear it.
 
-Live preview reveals markdown at **two scopes** (`lib/editor/reveal.ts`): LINE for the markers that
-shape a line (`#`, `>`, the task dash, block widgets) and TOKEN for inline ones (`**`, `==`, `%%`,
-`` ` ``, `[]()`), where `tokenOwner` finds the inline node a marker delimits and only a selection
-touching THAT node unfolds it. A blurred editor has no active line at all. Obsidian-flavoured syntax
-lives in `lib/editor/ofm/` — note the node names `OfmComment*`, because `@lezer/markdown` already owns
-`Comment`/`CommentBlock` and `configure()` silently skips a duplicate name. The editor's `#tag` rule
-(`ofm/hashtag.ts`) and Rust's `TAG_RE` (`parse.rs`) are ONE contract: change one, change both, or a
-tag becomes visible but unsearchable.
+### What the server names on connect (vault channel `ready`)
+- `ready.empty` — docs with no server CRDT. Filtered against disk (`settleServerEmpty`): an empty local file is marked pushed, never queued. `listEmptyDocs` probes live `notes` only; past 2000 it names a stable daily set (`md5(id || UTC-day)`).
+- `ready.behind` — the client's state vector covers the server's but holds ops it never received (`clientAhead`; unequal ≠ behind): queue a push, like empty.
+- `ready.revoked` — docs the client's hello manifest claims that are not readable (`revokedFromManifest`, `REVOKED_CAP` 2000). Fires before `setStatus("synced")`. Clients advertising `revocation-batches` get them in frames of ≤ 2000. `hello.held` includes mapped notes without a local state vector; `hello.files` carries binaries.
+- `ready.tombstones` (deleted, incl. purged; never also revoked) and `ready.covered` (manifest docs the server covers).
+- Files over `MAX_NOTE_BYTES` (10 MB) fail once permanently (`permanentFailures`). Transient push failures surface only after 3 attempts or 5 min (`failureGrace.ts`); `markPushed` clears non-permanent failure rows.
 
-Above the body sit two more block decorations, both React inside a CM6 widget (`lib/editor/noteHeader.ts`;
-`updateDOM` returns **true** so the host node — and the focused `<input>` — survives a remote keystroke,
-and the title widget's `eq()` compares only `{path, readOnly, hasFrontmatter, mode}`, never doc content):
-- **The inline title** is the note's *filename*. Committing it is a **rename** (`store.renameNoteFileExact`,
-  the no-dedup half of `renameNoteFile`), never a CRDT edit; an illegal or taken name is refused inline
-  (`lib/editor/titlePlan.ts`) instead of being silently suffixed.
-- **The Properties panel** replaces the frontmatter range. Every edit is a **minimal span replacement**
-  (`lib/frontmatter/parse.ts` gives doc-absolute spans, `edit.ts` plans the changes) dispatched as an
-  ordinary editor transaction, so it reaches the `.md`, the index and Yjs undo exactly like typing.
-  YAML outside the supported flat subset is **never rewritten** — it renders as source under a banner.
-  Per-vault types live in `.context/types.json`; the Visible/Hidden/Source mode is a device-local pref.
-  `frontmatterView(state)` is the single authority for which of the three renderings the region gets —
-  two block replaces over one range would throw.
-  Both widgets key on the SAME `state.readOnly` the body editor and the view-only banner use: read-only,
-  the panel renders static text with no inputs (`StaticRow`), the title refuses a rename and drops a
-  pending draft, and `readOnlyPropertiesGuard` drops any `input.properties` transaction from a
-  read-only state, because a programmatic `view.dispatch` is never stopped by that facet alone.
+### Local changes going out
+- **External writers are first-class** (`handleLocalFileChanged`): unmapped/structural changes → debounced registry pull; mapped closed notes → `ContentUploader` with `force` + `ingestFromFile` (`NoteBridge.ingestNow`; `divergedDocs` forces a connect). `hydrate` ingests on reopen if the file moved on.
+- **Edits made while the app was closed** (#284, `closedAppEdits.ts`): once live, index `notes.sha256` vs `diskBase` (`list_disk_drift`), pushed in chunks of 50; padlocked/view-only notes (unanswered = read-only) and files equal to the CRDT are never pushed, but a view-only note whose file differs gets the team's text written back, said once per note (`announceUnsendableEdit`: the read-only review entry, toast throttled to one a minute). A one-step create records the seed's bytes as the disk base (no base ⇒ the pass skips the note). An EXACTLY empty file of a mapped note is refilled from the CRDT 5 s later (`setEmptyFileRefiller`; at launch `refillEmpty`).
+- **Offline:** once the vault channel drops (`channelDown`, `localChangesAwaitChannel`), disk deletes, binary deletes and local-change pushes keep their queues and drain on the next `synced` (at once on terminal `no-access`), re-reading paths from the registry. Per-note retryable failures requeue (15 s, ≤ 5 tries). A delete made while the app is CLOSED still comes back (missing at startup ≠ delete).
+- **One-step creates** (server feature `notes-with-state`; `registerNotesBatched`, `seedRegister.ts`): EVERY new note registers through `notes/batch` with its base64 Yjs `state` (+ `textSha256` alarm); no new note opens a socket. Chunks 100 items / 4 MiB (`packSeedChunks`); one item over 4 MiB alone up to `MAX_NOTE_BYTES`, past that without state. State = the local CRDT, or for an empty doc a THROWAWAY doc from the file (`buildNoteState`, never the open note); the live doc is seeded only after the server confirms. Per item (`classifySeedResult`): `applied`/`covered` → `noteSeeded` (`markPushed` + `recordAck(sv)`, only after the response); `conflict` on our id or `adopted` onto ANOTHER id → `noteNeedsMerge` (never apply local state onto a doc the server filled — the note-doubling bug); missing `seeded` → old server path. Merge = `httpMergeOnce`: `bootstrap` with `only` (≤ 100), empty local doc + server state, fold the file in, push via docs/batch without `expectEmpty`, ack. **Decided 2026-10-04: server text wins**, local text replaced, reported once as `conflictKeptServer`; a clean adopt reports nothing. The open note's merge waits for close. `eagerSeed` (a note opened before the pass) uses `POST /api/notes` the same way. `ContentUploader` is a fallback only (old servers, explicit fallback, closed-note/read-only follow-ups).
+- **Create-then-delete within a second stays deleted:** `seedAnswered`/`registeredBlank` count as server-held (`serverHoldsContent`) so the delete propagates; `buildSeeds` drops a file already gone; `heldDocIds` includes pending deletes; `foldersRegistered` re-checks new folders; re-created paths register when the hold lapses (`own-delete-expired`, `claims-released`). The move step indexes with `materializeNotesBatch(…, { indexOnly: true })` (never creates a missing file).
 
-Vault Settings has ONE **Members and access** tab (id `members`; the old `access` tab and
-`AccessPanel.tsx` are gone): `components/MembersAccessTab.tsx`, `MemberProfilePage.tsx` (a PAGE
-inside Vault Settings with a back link, not a dialog; rows open it on click; tabs Personal info /
-Access / Activity), `InvitePeopleDialog.tsx`, pure logic in `lib/membersAccess.ts`. Owners/admins see the
-**Everyone in <vault>** row (Can edit / Can view / No access = wire `open`/`readonly`/`private`), the
-**New members** row ("For notes made before they joined": Can edit / Can view / No access
-= `join_default`), and a per-person Access cell (Can edit everything / Can view everything /
-No access / Custom) plus a ⋯ menu (View profile, Manage access, Make admin/member, Remove). Plain
-members get a read-only roster from `GET /orgs/:orgId/members/overview`. Who may change one person's access is one rule,
-`lib/membersAccess.ts canManageMemberAccess` mirrored by the server's `access-management.ts` helper
-(bulk access, per-user `POST /shares`, the share reset): an owner manages anyone, themselves included;
-an admin manages everyone except the owner, other admins included (403 `access_manager_required`;
-decided 2026-10-09; role changes and removal stay stricter, never another admin). "Owners and admins can always
-manage access" means *manage*, never an exemption from the caps they set. No UI shows or creates
-per-folder Everyone overrides; changing the Everyone row (`PUT team-access`) clears any that exist. One person's per-folder checkboxes live in
-their profile's Access tab and apply immediately through the atomic bulk-access API (users
-audience); the tree updates optimistically and re-reads only the affected subtree plus its ancestors,
-never a fresh `listAccessTree`. The Board and List load through
-`GET /vaults/:id/access-board?userId=` (`permissions/access-board.ts`: the access-tree arrays plus a
-`modes` string, one index load and one resolve per item per request, each char equal to that row's
-`access/summaries` answer); `POST access/summaries` stays for old desktops and small post-write re-reads. The Access tab has a segmented icon toggle (top-right) between two
-views, persisted per device in localStorage `context.memberAccess.view`: **List** (that
-checkbox tree with the "Across the vault" level) and **Board** (default; `MemberAccessBoard.tsx`, the same
-bulk-access writes, one resource per write): columns Can edit / Can view / No access, rows moved by
-drag-and-drop or arrows, grey ancestor rows showing only the path (up to 5 levels), a "Set
-everything to" menu with Reset to vault default and per-column Add all / Remove all. Add all targets
-existing item roots (including their folder subtrees), never the vault resource; future root items
-keep the vault's existing default. An empty item selection is a no-op. A single-row
-move applies at once with no confirm and no undo; the app's standard toast states the result
-("Sara can now view X."). **Confirms are for destructive changes only**, i.e. a target of No access
-(`private`): the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
-everything to → No access, Add all → No access, Remove all and Reset to vault default. Can view, Can edit, Set
-everything to → Can view and the New members row never confirm. Access levels are colour-coded
-everywhere (List and Members-table pills, board column headers, drag highlight, landing pulse):
-Can edit green, Can view amber, No access grey, Custom/Mixed neutral, from `--access-{edit,view,none}-{bg,fg}`
-in `src/styles/tokens.css` (light and dark).
-Board drag uses **pointer events**, never native HTML5 drag-and-drop: Tauri's `dragDropEnabled`
-swallows HTML5 drag events inside the webview, so they never fire. A press becomes a drag after
-4px, the drop target is the whole column band under the pointer, and moves animate (lift, column
-highlight, landing).
-Personal info shows Name, Email, Role, Joined ("…, invited by X"), Last active and Status
-(Online/Away from vault presence); Activity renders `GET …/members/:userId/activity`. Vault Settings
-no longer has an Updates tab (version + Check for updates live in Account Settings → About), and
-each settings dialog cross-links the other bottom-left. Hover/pressed colours are one accent tint
-app-wide (`--bg-hover`/`--bg-active` in `tokens.css`). A quiet tip under the list links to the MCP tab. The vault mode is **unknown until fetched** (`lib/teamAccessCache.ts` seeds the paint
-from localStorage but can never authorise a write); `lib/accessMode.ts` `effectiveTeamMode` stays
-the single authority for resolved modes, mirroring `permissions/resolver.ts` at the org level.
-`readonly` is the item-level combined grant+cap (the vault posture still stores `view`).
+### Disk deletes and moves going out (`SyncManager.drainDiskDeletes`, #93)
+- Wait `DISK_DELETE_GRACE_MS` (2.5 s): a `modified` for the path cancels; the file is re-checked (`ipc.noteExists`); a delete whose doc text hashes equal to a new unmapped file is a RENAME (`registry.renamePath` + `ipc.rebindNoteId` keep the id; the batch defers its pull). Empty notes pair only when exactly one went and one appeared sharing a basename or parent (`emptyRename.ts`).
+- Survivors → `registry.deletePath`, or `deletePaths` → `POST /notes/delete-batch` above `BULK_THRESHOLD_DOCS` — the same soft delete as the sidebar, never `ipc.deletePath`.
+- **Refused up front:** a doc not `isPushed`; a session not live (`liveSince` = channel `synced` + one pull); more than `max(5, ceil(mapped * 0.2))` in one window, judged FIRST. Over the cap a disk delete is NEVER propagated (deleting for everyone happens in-app, under the creator rule): with the root present and the session live the batch is HELD with an informational notice (Restore now / Dismiss / 20 s fade → `releaseDeleteDecision` re-materializes); with the root gone, refused silently (looks like an unmounted volume).
+- **Own removals are never user deletes** (#419, #420): every inbound removal is marked `registry.markOwnRemovals` BEFORE the file goes, and `queueDiskDelete`, the folder hold, the drain (again before the request), `propagateGoneFolders` and `BinaryDeleteQueue` skip `isOwnRemoval` paths (120 s, cleared by `markMaterialized`). Mappings are pruned only at the end of a pass.
+- **Folders:** a mapped folder that vanishes while an unmapped one appears pairs first (`drainFolderMoves`: ≥ 80 % of notes at the same sub-path with matching content ⇒ ONE server folder move; unregistered folders under a new one are candidates too, so a move into a brand-new parent pairs, and the server move registers that parent first, as a note move does; the closed-app pairing (`pairClosedAppFolderMoves`, #276) accepts a candidate whose missing ancestors are all new local folders for the same reason). Both passes PLAN deepest first (a paired sub-folder counts for its parent when its new place lies under the parent's candidate, and is no evidence either way when it went elsewhere, so "rename P and P/Sub together" and "move Sub out, delete the emptied P" both stay folder moves) and MOVE parents first, a child from where its moved parent put it; per-note fallbacks are decided only once the plan is whole. A ROTATION (`mv B C && mv A B`): a vanished A may target a registered B that is still there only when A's items match in B AND B's own items no longer match at home but match under a new folder (or the next folder of a chain); B moves first, A takes its path, and index rows re-key in REVERSE (B's paths still carry B's ids until A's notes take them). Never a target at or around its own source; a straight swap of two folders that both stay is not covered. By name alone B's sharing reached A's notes. Failing to pair a SHARED folder's move is an access loss, not just churn: its notes go over one by one into a new folder with no sharing rows. A vanished, non-moved folder is deleted after its contents (`propagateGoneFolders` → `registry.deleteVanishedFolder` → `DELETE /api/folders/:id?ifEmpty=1`, feature `folder-delete-if-empty`; 409 `folder_not_empty` or a creator refusal keeps it), deepest first, under the cap, retrying 2.5/5/10 s up to `GONE_FOLDER_SETTLE_MS` (60 s); a waiting folder doesn't hold back its own files' deletes (`binaryBesideNoteDeletes`). A note deleted inside a folder still being paired is held (`removedWhilePairing`) and re-judged after the move.
+- **Refusals are PUT BACK, never retried:** a creator refusal (403 `delete_not_creator`/`folder_has_others_items`) or view-only refusal (403 `no_edit_permission`, bare 403, batch `denied`) → `registry.restoreRefusedDelete` re-creates the file create-only from the CRDT, owes one echo, records `restoredFromServer` (`NOT_CREATOR_DETAIL`/`VIEW_ONLY_DELETE_DETAIL`, `deletePolicy.ts`). Refused tree-binary deletes too (`BinaryDeleteQueue.onNotCreator`). A refused move/rename (403 `rename_not_creator`) is reverted on disk (`registry.moveOnServer` → `revertRefusedMove`) with a toast; only the name the file LEFT is an own move (`isOwnMoveSource`), so deleting the restored name is a real delete.
+- **Vanished vault root:** pause every materialize/register/delete step, close tabs, offer Restore here / Locate folder… (banner, Settings → Vaults, launch prompt; #228). Inside the vaults root (`lib/vault/missingFolder.ts planMissingFolder`, 2 s settle): a renamed copy carrying the vault stamp is rebound, else a synced vault is recreated and synced down; outside the root, local-only or a missing root keep the prompt.
+- `store.renameNoteFileExact` re-points the open note/tabs right after the disk rename, before the server PATCH. A rename in place refused `path_folder_mismatch` (a teammate moved its folder meanwhile) is sent once more under the folder's current server path (`moveOnServer`); a folder renamed in place as its parent moved, likewise under the parent's.
 
-Automatic sidebar colours are a deterministic, account-personal fallback for FOLDERS without an
-explicit manual colour (files stay neutral unless coloured by hand). A broad palette hashes stable item identities, then resolves collisions
-within each ordered sibling group so the two preceding rows do not repeat; explicit synced colours
-always win and participate in that neighbour check. Automatic colours are stable across restarts and
-can be turned off in Account Settings → Appearance; they are ON by default (an explicit off is
-kept). The palette pairs baalda.com's pastel fills with a deeper outline of the same hue.
+### Teammates' changes coming in (`inbound.ts`)
+- **Teammates' deletions have no cap** (decided 2026-11-24): a deletion is planned only for an explicit tombstone matched by id (absence takes the revocation path). A deletion drops the local CRDT too (`noteRemoved`). Folders those deletions emptied that no server folder owns are removed, deepest first, empty-only. A matching local index `doc_id` + path proves identity; an unprovable identity stays on disk (a tombstone must never remove an unrelated file reusing its path).
+- **Revocations** remove a file only when ALL hold: both listings 200; the tombstone question answered; `isLive()`; an ACL signal ≤ 60 s old (`ready.revoked`, batched `revoked` or `reauth`); the group fits `revokeCap = max(20, ceil(mapped*0.5))` OR the server NAMED this doc; `POST /api/vaults/:id/access-check` agrees where the cap lift saved it (`needsAccessCheck` → `confirmRevocations`, slices of `ACCESS_CHECK_MAX`, pinned by `accessCheckBound.test.ts`); and the doc is `pushed` or the file empty. A disagreement, unanswered id, throw on any slice or the 30 s `ACCESS_CHECK_TIMEOUT_MS` LEAVES the whole group. Unsent work (unseen verdict, file hash ≠ disk base, binary sha ≠ `fileBases`) is re-checked `REVOKE_UNSENT_SETTLE_MS` (2 s) later and stays if readable again; a clean note is removed only while it still hashes to its base (`delete_files_batch` `ifAtBaseOf`, `CHANGED_ON_DISK`). The named list is not a second opinion (`/api/notes` and `revokedFromManifest` both call `listReadableDocsInVault`); the access-check is the real cross-check. The named set unions across the session and shrinks only on evidence of access (`revocationRefused`, also from `learnFileAuthorship`). Revoked removals also `docStore.drop` + `ipc.clearYjsDoc`; rule-hidden (parked) items go too (`revokeParked`). Confirmed revoked binaries are deleted outright (`removeRevokedBinary`), and `attachments/` drops only now-hidden notes embed leave too (#408, `settleHiddenEmbeds`); a drop any local note still names stays. Large removals use `delete_files_batch` in chunks ≤ 64 with a throttled `removing` phase. `bulk-regrant` clients get `bootstrap` for grants ≥ 25 notes (pages are gzip without `Content-Encoding`; inflate explicitly).
+- Confirmed access changes may remove empty folders even with a named note list; folder removal is always non-recursive, after note checks, and unannounced mass removals keep their cap. Active backfill keeps download progress across buffer pauses, and open read-only notes compare the pre-pull file with confirmed server content before reporting an edit.
+- Confirmed deletions/revocations remove files via Rust `delete_file` (`rel_path_is_ignored` first, so `.context` is refused; refuses directories); `deletePath` stays the sidebar's recursive one.
+- **A teammate's folder move is followed, never echoed back** (2026-11-23): every inbound rename is marked an own move BEFORE `renamePath`; renames explained by a moved folder id are exempt from the rename cap; a capped/unmaterializable rename keeps the note at its current path (`heldRenames`). The carry skips files the server tombstoned (fetched before planning) and leaves them to tombstone removal; `BinaryDeleteQueue` skips `isOwnMoveSource`; `setFileId` never maps an id back onto the name it left; the drain refuses a delete whose `files` id the server lists elsewhere (`forgetStaleFilePath`); `moveFileId` → `setFileMovedListener`. Notes the post-apply re-read no longer lists are suppressed at both paths and re-keyed (`rebindNoteId`); a folder holding only suppressed notes never registers (`holdsOnlySuppressed`). An old directory with leftovers stays pending in `revokedFolders`; new work made in it follows the folder (`carryNewWorkIntoMovedFolders`). Own-move list prunes past 20,000 entries.
+- A rename whose destination another note of the SAME plan vacates is kept and ordered vacate-first (`settleOccupiedRenames`); refused one by one, the far half of a teammate's chain stayed at its old path while a placeholder took the freed name under a fresh id, split in two on every receiver. A cycle (a swap) is refused as before.
+- `pairClosedAppRenames` pairs renames made while closed by content hash. A same-path create from two devices stays two notes: the later `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>` (`conflictPath`) — only via `resolveSamePathConflicts` (unmapped non-empty local file at a never-agreed server path, with a baseline), capped by `samePathConflictCap`, never for a note with local CRDT.
+- `store.openNoteByPath` refuses a path the server answered `not_readable` (`isHiddenPath`). A retiring background bridge holds its doc until its final flush (`vaultDocStore.retireHeld`/`holdUntil`).
 
-Vault Health tab removed 2026-10-04 (#289); vault-level sync state surfaces only through the sidebar
-badge, the reconcile banner / Activity review and file previews. `vaultSyncStatus` (vault channel) stays
-independent of the open note's `syncStatus`, which still controls editor permissions; a note-level
-refusal is not lost vault membership.
-An attachment-local-only notice is driven only by the server's explicit
-`attachment_sync_requires_pro` refusal. Do not infer it from a Free plan label:
-the vault may be Pro, and billing-disabled self-hosts may still sync attachments.
-The notice shows in file previews while notes continue to report their own sync state.
-The vault list lives in Account Settings → Vaults (Vault Settings keeps it only
-when signed out) and shows account memberships and this app profile's recent
-local folders, not a scan of the managed root. Production and staging have
-separate recents even when they share a root; Open existing reopens a folder.
+### Binaries (`attachments.ts`)
+- Doc-bound tree binaries sync three-way (`planBinarySync`) against a per-`files`-id base sha (`config.json fileBases`): local==base ⇒ download; server==base ⇒ upload with `baseSha` (409 `stale_base`); no base or both changed ⇒ server wins, local bytes replaced. Retiring a superseded version is serialized per file and keeps the newest. `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (incl. `DENIED_DIRS`).
+- Teammate renames/moves are followed (`toFollow` → `registry.followFileMove`, `InboundPlan.movedFolders`); `GET /vaults/:id/blobs` lists a doc-bound blob at its `files` row's CURRENT path.
+- Tombstoned ids (`GET /vaults/:id/file-tombstones`) are `toTrash`: removed, id forgotten, never re-uploaded (#215; id match only). A failed tombstone listing (`tombstonesUnknown`; 404 = older server) HOLDS every known file the server stopped listing, retried after `HELD_FILES_RETRY_MS` (15 s). A known file the listing stopped naming uploads only after access-check (`registry.noAccessIds`); `isOwnRemoval` paths never upload; revoked ids (`isRevoked`) neither upload nor hold; view-only paths (`readOnlyPaths`, 10 s cache) skip the text pass; an edit of a file the server holds that is refused 403 for want of write access is put back to the team's version with a notice (`ViewOnlyFile`, like a view-only note), while a new file refused that way stays local. Lock lookups resolve through `registry.idToPathIndex()`, never the lazy tree.
+- Uploads: Rust `VerifyingReader` hashes/counts the PUT body against the intent; a 2xx counts only when `verified` (else `file changed during upload`); skip files modified within `UPLOAD_QUIET_MS` (3 s). Drops/pastes are size-checked BEFORE reading (`ipc.readExternalFile(path, preReadLimit(ext))` → `ExternalFileTooLarge`; paste checks `File.size`; `transcodeTo` formats read first). An `attachments/` drop uploads unless the server lists the same sha as an `attachments/` row (`attachmentShas`).
+- Empty files sync with server feature `empty-files` (size 0, empty sha). Not-indexed-yet intents wait a few rounds (`indexWaits`) then go `unsynced`; a register refusal is permanent only for a 4xx other than `path_folder_mismatch`. `blobRefusals` storage is `v2`.
+- Downloads: permanent failures remembered per blob id+sha (`undownloadable`, `isPermanentDownloadFailure`); network failures retry 15 s doubling to 5 min (`transientTimer`), and every `channel-synced` owes one pass (`attachmentsOwedByFrame`). A download or replacement skipped because its path sits in an open `BinaryDeleteQueue` window (a teammate's move landing here opens one) is owed one pass when the window closes (`onDrained` → `deleteWindowClosed`); a drain re-arms for paths noted while it ran. Transfers run smallest first (`smallestFirst`; the first item is the probe; files over the 32 MiB in-flight budget run alone). A binary next to held note deletes waits (`noteDeleteVerdict` → `binaryBesideNoteDeletes`, 60 s after an over-cap batch).
+- New tree binary with `files-with-bytes`: one-step registration at intent (`oneStepRegister`); 402 `attachment_sync_requires_pro` registers nothing and raises the notice; other refusals fall back to the old path once.
 
-The **backend-behind notice** (`components/BackendBehindNotice.tsx`, pure logic in
-`lib/serverFeatures.ts`) is a persistent, non-dismissible line at the bottom of the sidebar, above the
-identity bar. It polls `GET /health` (on server URL / user / vault change and every 10 min) and shows
-only when the server ANSWERED and lacks a feature in `REQUIRED_SERVER_FEATURES` (`notes-with-state`)
-— keyed off `features`, never the version string; an old `{ ok: true }` counts as lacking all of
-them. Unreachable or unparseable ⇒ unknown ⇒ nothing (a flaky network never raises it). Copy depends
-on the host: the managed `api.baalda.com` says the server is being updated; any other server tells
-the self-hoster to update it. Clicking opens Account Settings → About. The verdict is a store
-mirror (`backendStatus`) and never gates sync on its own; the sync layer reads the same cached
-feature set.
+### Offline reconciliation and what the user is told
+- The gate for an inbound delete/revocation is UNSEEN WORK, not `pushed`. `ackedSv.ts` = per-doc state vector the server is known to cover (Hocuspocus `synced`, batch ack, `ContentUploader markAcked`, one-step `sv`, `ready.covered`; a backfill/bootstrap apply records only the server update's OWN state vector, never the local doc's), merged by max, in `config.json ackedSv`. `registry.unseenWorkVerdict` → `none` | `unseen` | `unknown`.
+- **Deleted means deleted (decided 2026-11-19):** nothing is ever written to `.context/trash`. Deletes, revocations (unsent work included, reported as `unsentRemoved`, 2026-11-26), read-only reconciliation, refused/unsendable edits, binary conflicts and server-wins merges replace or remove local bytes with no copy and say so. Rust `trash_note`/`write_trash_copy`/`copy_to_trash` remain only so older copies stay listable. A refused edit to a view-only note is put back (`keepUnsendableEdit` → `replace` → `writeThrough()`).
+- Every action is a `ReconcileKind` (`restoredFromServer`, `deletedByTeammate`, `renamedConflict`, `keptLocally`, `selfRevoked`, `folderKept`, `externalEditSaved`, `unsentRemoved`, `conflictKeptServer`) shown once per session (`ReconcileBanner`, 20 s fade; details in Activity → Review changes); nothing persists. Entries are PER VAULT (`vaultScopes`; `vaultChanged()` on switch). `selfRevoked` = caused by this device's own access change in the last 60 s (`selfAccessChanges.ts`), left out of the review count. `forgetReadable` drops entries for docs listed again.
+- **Open note "was removed" banner** (`lib/openNoteRemoval.ts`) waits `DISK_DELETE_GRACE_MS` + `OPEN_NOTE_REMOVED_SLACK_MS` (500 ms), shows only if the note still sits on that path and is missing, says "removed for the team" only after the server accepted this session's delete (`wasDeletedForTeam`), and clears when the file is back.
 
-### Desktop — team skills (`src/lib/skills/`)
-`syncEngine.ts` is PURE: `planSkillsSync` (manifest + device prefs + Rust scan → actions) and
-`runSkillsPlan` (injected deps). Rules: no manifest ⇒ no plan (a failed fetch never removes);
-owned = marker on THIS server and (no `userId` or THIS user), everything else is foreign — never
-removed, never installed over, only a `conflict` on a wanted name; an edited copy is never
-overwritten by a run (`edited`, or `keptMine` when Keep mine is set); a removal (team deleted,
-lost membership, opted out, target switched off) RELEASES an edited/kept copy
-and deletes a clean one; a cross-org name clash goes to the vault already holding the folder,
-else the first by vault name then id. `syncHost.ts` runs it for every vault the user belongs to on
-the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (debounced 500 ms; open Skills pages, the skill page and the sidebar shortcut also reload on it via `useSkillsChanged`, so a teammate's add shows live), every
-2 min (the frame only covers the OPEN vault), on coming back to the app (≤ every 30 s) and on Check now, one run at a time; a failed install waits 10 min between tries and stops after 3 retries for that version (Check now or a restart starts over). Two accounts on ONE computer share the skill folders: the first owner's copy is `other_owner` to the second (by design). The API client is shared and a server switch repoints
-it before App's effect stops the host, so a run halts (plans and acts on nothing) once the client's
-base URL differs from the host's, and `store.setServerUrl` pauses the host first (`pauseSkillsSync`,
-resumed unless a switch to another URL landed). Device prefs (`prefs.ts`, localStorage
-`context.skills.device.v1`): target switches, Optional opt-ins, explicit opt-outs and Keep mine keyed by
-server|org|skill(|target). A skill switched Required → Optional stays on a device that holds our
-copy and never opted out (`syncEngine.ts impliedOptIns`, saved as an opt-in before planning);
-delivery changes show at once (`syncHost.ts showDeliveryNow`, undone on a refused PATCH). UI: Vault Settings → **Skills** (`components/skills/`; admins edit,
-members read and opt in): a grid of cards (no list view), with a Team | On this device toggle (the device side leaves out team copies, first group open, and admins get a quick Add to team square per card)
-(both counted; the read-only device scan runs once per session, `deviceScan.ts`), grouped "Shared with your team" first then one group per import source (only the first group open by default; every group toggles, and a search opens all)
-(`lib/skills/grouping.ts`); a skill's page has one-click Publish (auto note, `publishNotes.ts`), delivery and version menus, Versions with
-.zip download, and a Draft editor: a file tree (`fileTree.ts`, folders first, SKILL.md pinned)
-beside a standalone CodeMirror 6 view (`SkillCodeEditor.tsx`, NOT the CRDT note editor; one undo
-history per file, ⌘S), a SKILL.md Name (locked) / Description header that edits the frontmatter by
-one span replacement (`skillMdEdit.ts`, raw fallback when unreadable), autosave ~1 s after typing
-(PATCH with `baseRevision`; `stale_draft` stops it and offers Load latest) and an Expand full view.
-Account Settings → **AI tools** shows this machine's targets and per-skill state. There is NO
-publishing to GitHub or claude.ai (the "Claude Chat & Cowork" bridge and `skipClaudeLocal` were
-removed 2026-10-26); GitHub is an import source only, and the admin's token for it lives only in the
-OS keychain (`baalda.skills.github:<serverUrl>|<orgId>`), managed on the marketplace page.
-- **Marketplace import** (`marketplace.ts` + `components/skills/MarketplaceBrowser.tsx`, Skills →
-  Browse marketplace, admins): an overview of marketplace cards (`anthropics/skills`, `openai/skills` and `BenAIOS/skills` are
-  BUILT IN for every vault, never saved as sources; then the vault's saved sources and an Add card),
-  each opening a grid of skill cards. A card's mark is the repo's own `logo|icon.(svg|png|jpg|webp)`
-  (≤512 KB; `.claude-plugin/`, `.agents/plugins/`, root, `.github/`, `assets/`, `docs/` in that order,
-  `findRepoLogo`), read through the reader as a `blob:` URL, else the owner's GitHub picture. A card's + is "Import all": it reads the full listing, confirms the
-  count of new usable skills (one per name; imported, name-taken and refused ones skipped), then imports
-  4 at a time with progress on the card and one summary toast; a ✓ once nothing is left to add, which offers "Remove all" (confirm; deletes every skill imported from that repo+ref, 4 at a time). a pasted `owner/repo` / GitHub URL / `@ref` is saved as a vault
-  source, then browsed with `commits/{ref ?? HEAD}` + ONE recursive `git/trees` call (a `truncated`
-  tree is refused). Detection, first match wins: Claude (`.claude-plugin/marketplace.json`,
-  relative sources via `metadata.pluginRoot`, `{source:"github"}` followed into its repo, other
-  source types "not supported yet"), Codex (`.agents/plugins/marketplace.json`, `{source:"local",
-  path}`, `.codex-plugin/plugin.json`), else every `SKILL.md` folder ≤5 deep outside
-  `node_modules`; a marketplace yielding no skills falls back to that scan. A plugin's listed
-  `skills` paths (entry, then `plugin.json`) REPLACE the default `<root>/skills/*`, and a folder two
-  plugins list shows once. Only SKILL.md is read for the listing (rows appear `pending` via
-  `onPartial`, 16 reads in flight); sizes and caps come from the tree, files are fetched on import
-  with the upload skip rules. With the admin's keychain token reads go through `/git/blobs`;
-  without one through `raw.githubusercontent.com/{repo}/{commitSha}/…`, so a public repo costs two
-  anonymous API calls. Errors are plain words (`MarketplaceError`: not_found, rate_limited with the
-  reset time, unauthorized, truncated, network). Import = create with files + `source`, then
-  publish v1 "Imported from o/r@<7-char sha>" (Optional; a refused publish keeps the draft);
-  `skills.source` `{repo, ref, path, commitSha, treeSha, pluginName?}` matches rows by repo
-  (case-insensitive) + path: Imported, Update available (tree sha moved) or Name taken (refused).
-  Pull update = draft PUT with the upstream files AND the new `source` under one `baseRevision`,
-  then the admin reviews and publishes; an imported skill's page re-checks its own source
-  (`SkillSourceRow`, `loadOriginSkill`: one commit + one tree call) and offers Pull update. Limits: truncated monorepos cannot be browsed, one request
-  per SKILL.md (~40 s for 300 skills), §1.3 caps refuse oversized upstream skills.
+### Sync rules = `.baaldaignore` (#401; `lib/syncRules/`, Rust `sync_rules.rs`, server `sync-rules/`; no settings tab since 2026-11-22)
+- One per-vault setting whose face is a root `.baaldaignore` (gitignore syntax, last match wins), FLOOR-hidden (`vault.rs is_floor_name`, `folders.ts isFloorName`): never in the tree, index or sync. Watcher flags it (`files-changed.rulesFile`) → `rulesFileChanged` (700 ms) → `refreshSyncRules`: an owner/admin edit is `PUT` `{version: 2, patterns}` with `baseRevision` (feature `baaldaignore`); a member's edit is answered 403 and put back; a stale-base edit is replaced; an empty/missing file is restored; network failure, unreadable file or over-cap text keep the file. Every device writes the server's text to its file (`sync-rules-changed`). v1 rows read through `rulesTextOf`.
+- Under v2 every type group is on (`code`/`extra` when the server lists `more-file-types`); the default file hides `.*`, `BUILD_DIRS` (EXACT lowercase names, so a `Build/` notes folder keeps syncing; shared `fixtures.json`) and `*.tfvars`. Local-only vaults apply it locally (`applyLocalRulesFile`, cached `.context/sync-rules.json`). The FLOOR never syncs: `.context`, `.git`, `.baaldaignore`, lock/temp files, OS junk (`._*`, `.DS_Store`, `Thumbs.db`), symlinks; `BUILD_DIRS`/`OS_JUNK` pinned to `vault.rs` by `formatsLockstep.test.ts`.
+- **A rule never deletes:** hidden items are PARKED (`parkedDocs`/`parkedFiles`/`frozenFiles`, `config.json parked`; `changeRules` parks before Rust installs, on the pull chain); removing the rule rebinds the same ids. `isExcludedPath` = type hidden OR hidden segment OR pattern. Parked docs MUST stay on the CRDT GC keep list (`registry.crdtKeepIds`, used by every `collectCrdtGarbage`), or un-hiding writes the server's text over edits made while hidden. Patterns never enable an unsupported type. Older desktops refuse unknown types per blob+sha and honour only the default lines.
+- **Membership loss** (`delete_departed_vault` → `remove_departed_contents`) deletes every path the folder's config registered (parked included), everything syncable under its cached rules, the root `.baaldaignore` and `.context`; only never-registered unsyncable files and symlinks stay.
 
-### Server (`app/apps/server/src/`)
-Two listeners, one Node process (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010). The same
-Hocuspocus instance is also served on the HTTP port at `/sync` (`sync/http-upgrade.ts`) so the whole
-server runs behind a single port/domain — that's what production deploys use (Dockerfile +
-Railway IaC in `app/.railway/railway.ts`, applied with `railway config apply` from `app/` — the repo-root
-`railway.json` is the legacy copy new Railway services ignore — + `docs/DEPLOY.md`; migrations run
-pre-deploy via `node dist/db/migrate.js`). MCP writes
-flow through the same sync server via `createDocWriter` so AI edits persist/broadcast like human edits.
-- `auth/auth.ts` — Better Auth; **argon2id** (overrides default scrypt) via `@node-rs/argon2`; `bearer` +
-  `organization` plugins (org = **vault**, the user-facing unified entity — Local / Synced / Remote states;
-  roles owner/admin/member; invitations last `INVITATION_EXPIRES_HOURS`, default 7 days, and may carry
-  an access level — `invitation_access`, applied as a per-user vault row on acceptance by the
-  `afterAcceptInvitation` hook AND the join-code path, see `src/members/`). Session token is
-  opaque (instant revocation), stored client-side only in the OS keychain.
-  Desktop "Remember password" is a separate explicit opt-in: `rememberedPassword.ts`
-  keeps only the last successfully authenticated password in the OS keychain,
-  bound to server URL and email. Logout clears the session but retains this saved
-  login; turning the switch off deletes it. The old email-only preference does
-  not opt existing users into password storage. No password enters localStorage.
-  Failed email sign-ins are throttled per lowercased email string (`auth/signin-throttle.ts`,
-  Postgres `signin_throttle`, migration 036; wrapped around `POST /api/auth/sign-in/email` in
-  `http/app.ts`): 5 failures in 15 min lock the account from ANY IP with 429 + `Retry-After`,
-  1 → 5 → 15 min on repeat lockouts; success and `onPasswordReset` clear it. Unknown addresses
-  are counted identically, so the response never reveals whether an account exists (#237).
-- `http/routes/` — `registry` (vaults/folders/notes/files), `shares` (folder/file ACL), `orgs` (join codes),
-  `members` (`GET /orgs/:orgId/members/overview` — roster + `last_seen_at`, access levels for
-  owner/admin only, plus `invitedBy` = inviter of the latest accepted invitation for that email, null
-  for the owner or a join-by-code; `GET /orgs/:orgId/members/:userId/activity?limit=50` (max 100) —
-  `{events}` newest first: `joined` (+ invitedBy), `created`, `edited` (authored `note_versions` +
-  `notes.last_edited_*`, one per doc per UTC day), `accessGranted` (per-user share rows; `path` null
-  when the caller cannot see the resource); owner/admin or self, else 403; 404 `not_member`;
-  created/edited filtered to the CALLER's readable set, no role exemption;
-  `DELETE /orgs/:orgId/members/:userId/shares` (`createMemberShareRoutes`, the Access tab Board's "Reset
-  to vault default") → `{removed, disconnectedDocs}`: one transaction deletes every per-user share row
-  the member holds in the org (vault/folder/file, their own `denied`/`locked` too, so it can widen as
-  well as narrow), leaves `member_access_snapshots` alone, disconnects docs that left their readable
-  set (before/after) and fires `onAclChanged` per vault; owner → anyone, admin → anyone but the
-  owner, else 403 `access_manager_required`; 404 `not_member`;
-  `POST /orgs/:orgId/invitations` {emails, role, access}), `appearance` (`GET|PUT
-  /api/orgs/:orgId/appearance`: any member reads, owner/admin replaces the vault-wide theme/autoColors/
-  contentWidth/textSize/lineNumbers/properties object validated by `appearance/schema.ts`, then the vault
-  channel fans out `{t: "appearance-changed", orgId, settings, updatedAt}` like the `org` icon frame),
-  `graph` (nodes/edges + semantic search), `sync-token`, `blobs` (attachment store), `mcp`, `billing`,
-  `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
-  read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
-  no renderer deps).
-- `audit/access.ts` + migration 056 record share, membership and join-default changes in
-  `access_audit`, including actor, time and before/after values. Database triggers retain deletes
-  and roll back with the mutation; explicit transaction-local actor context covers HTTP/MCP writes.
-  Better Auth membership hooks enrich the recorded event with request identity (never confuse
-  the hook's target user with its actor). Unknown/system actors remain null; history begins at
-  migration, without fabricated backfill. Owners/admins read paginated history via
-  `GET /api/orgs/:orgId/access-audit?limit=100&before=<cursor>` or MCP `list_access_audit`.
-  No note content or credentials are recorded. There is no desktop history panel yet.
-- `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
-  always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
-  `BILLING_MODEL=vault|team` (default `vault` until the production flip) picks the model. **`team`
-  (the shipped model):** Free = 2 people per account (owner counts), 1 synced vault, MCP included,
-  no standalone-file sync (embeds under `attachments/` still sync), "unlimited"
-  notes/storage under hidden per-vault ceilings `ABUSE_MAX_NOTES` (100000) / `ABUSE_MAX_STORAGE_MB`
-  (10240). Team = $10/seat/month or $110/seat/year, `TEAM_MIN_SEATS` 3, owner buys N seats upfront
-  (402 `seat_limit_reached {seats, used, pending, message}` when full; pending unexpired invites
-  reserve a seat), unlimited vaults on one account, file sync included; managed in
-  Account Settings → Plan & Billing (per-vault usage: Vault Settings → Usage), plan named "Team" in-app (was "Pro"). Existing subscribers keep
-  their price via a Polar discount on the Team seat product (ops scripts
-  `scripts/billing/move-legacy-subs.ts`, `polar-spike.ts`). Old 402 codes stay emitted for old
-  desktops (`attachment_sync_requires_pro`, `vault_limit_reached`,
-  `member_limit_reached` now `{limit: 2, scope: 'account'}`); new:
-  `account_read_only`, `upgrade_in_new_app`, `transfer_retired`. **`vault` (legacy):** per-vault
-  Pro; new accounts get `FREE_MAX_VAULTS` (2) unsubscribed vaults, migration 031 keeps three for
-  older accounts, and an active or past-due Pro vault unlocks standalone-file sync for its members.
-  Billing-disabled self-hosts remain unlimited under both.
-  Deleting a vault cancels **at period end first** and aborts the delete if the provider refuses (502
-  `subscription_cancel_failed`; Better Auth's own org-delete is off via `disableOrganizationDeletion`).
-  The row then outlives the org as a **tombstone** — migration 024 dropped the cascade and added
-  `deleted_at`/`org_name`/`owner_user_id` — so a late webhook is stored, not FK-failed and retried
-  forever. Webhooks resolve by `provider_subscription_id` first, then metadata, which is what lets
-  `POST /api/billing/orgs/:orgId/transfer` (owner; un-cancels at Polar) move one; `/mine` reconciles.
-  Under `team`, `/mine` adds `accountPlan`/`accountId` per vault and transfer answers `transfer_retired`.
-- `billing/plan.ts` — the SINGLE plan resolver (`resolveAccountPlan` by org, account or user → plan,
-  limits, `lapsed`); `planEnforced()` = Cloud deployment AND billing configured, else unlimited.
-  `billing/accounts.ts` — `billing_accounts` (one per owner) + `billing_account_orgs` join, created
-  lazily (`ensureAccountForUser`/`ensureAccountForOrg`). `billing/lapse.ts` — lapse (period ended or
-  failed payment past grace, over Free limits) makes every attached vault sync read-only for
-  everyone: 402 `account_read_only`, a synthetic `billing:<orgId>` lock row with
-  `reason: 'billing_lapsed'`, sockets reconnected read-only; reads untouched, local files stay
-  editable. `billing/usage.ts` — per-vault counts for the account (people, live notes, ready blob
-  bytes, `files` rows). Account routes (`routes/billing.ts`): `GET /api/billing/account`,
-  `…/account/usage`, `…/account/seats/preview?seats=n`, `POST …/account/checkout {seats, interval,
-  successUrl}`, `PATCH …/account/seats`, `POST …/account/cancel|resume|portal`,
-  `POST /api/billing/orgs/:orgId/move {toAccountId}`; the old per-org checkout answers 409
-  `upgrade_in_new_app`.
-- `sync/hocuspocus.ts` — `onAuthenticate` verifies the per-doc JWT & sets `readOnly` for view grants;
-  `onChange` appends the binary update + schedules re-index. `disconnectDoc` force-closes sockets on revoke.
-- `yjs/persistence.ts` — binary-only store: `doc_updates` append log + `doc_snapshots` (compact past
-  `COMPACTION_THRESHOLD`).
-- `versions/shrink-guard.ts` — both write paths (Hocuspocus `onChange`, `applyDetached`) report an
-  update that leaves ≤20% of a ≥200-char note; the prior text becomes a `pre-shrink` version (#200).
-  It never refuses the update: a CRDT client keeps its op, so a refusal would re-push forever.
-  `versions/recovery.ts` proposes (never applies) restores for already-damaged notes; apply is a
-  forward write with a `pre-revert` version, owner/admin only.
-- **Checkpoints** (`versions/checkpoints.ts`, `capture.ts`, `revert.ts`). A note's FIRST server
-  content never triggers the daily checkpoint, by any route (`capture.ts isFirstContent`: no
-  snapshot and ≤1 stored update, both write paths append before they report) — 13 of 21 notes in
-  one reported checkpoint were structure-only because the seed itself fired it. **Deferral**
-  (`maybeDailyCheckpoint`): a note created within `CHECKPOINT_DEFER_MS` (120 s) the server holds no
-  content for, a `pending` blob, or a `files` row with no ready blob means a device is mid-upload;
-  the capture is deferred and asked again `CHECKPOINT_DEFER_RETRY_MS` (30 s) later, until
-  `CHECKPOINT_MAX_DEFER_MS` (30 min) takes it anyway. **Top-up**: first content arriving within
-  `CHECKPOINT_TOPUP_WINDOW_MS` (1 h) of an automatic checkpoint that stored the note structure-only
-  is added to it (collected per vault for 30 s, one pass). **Binaries**: each capture pins every
-  registered tree file's ready blob and every `attachments/` drop in `vault_checkpoint_blobs`
-  (migration 047, no byte copies: content-addressed). Pins are kept by the DATABASE rather than by
-  every delete site: a `BEFORE DELETE` trigger on `blobs` retires a pinned Postgres-store row's bytes
-  into `checkpoint_blob_bytes`; on S3 `blobs/gc.ts objectStillReferenced` counts a pin; when the last
-  pin of a (vault, sha) goes (prune, vault delete) an `AFTER DELETE` trigger drops the retired bytes
-  and re-queues the object for the drain, which checks liveness again. Postgres-store pins are capped
-  at `CHECKPOINT_BLOB_MAX_POSTGRES_BYTES` (2 GiB) per checkpoint; past it files are structure-only
-  and logged. **Revert** restores pinned files under their SAME `files` id: same sha ⇒ skip;
-  different bytes ⇒ a ready row on the pinned bytes (the newer one is pinned by the revert's undo
-  checkpoint); row gone ⇒ re-registered, its `file_tombstones` entry cleared (else every desktop
-  trashes it again), blob recreated. Missing bytes or a path now held by another file ⇒ skipped
-  and logged.
-- `permissions/resolver.ts` — `effectivePermission(userId, docId)`: owner/admin → edit; a note's
-  **creator** → edit on their own note; else max of file/folder shares (walk `parent_id` up) — either
-  per-user or an org-wide "share with team" grant — plus any vault-wide grant; a `locked` share caps at
-  view even for admins. **The vault posture is a baseline for everyone** (`vaultBaseline`): Read-only
-  caps every shortcut at view; a vault that was never shared withdraws the owner/admin shortcut but
-  keeps authorship (the private-by-default space); and **`sealed`** — an org `denied` row on the
-  vault resource, which is what Everyone → No access now writes — withdraws authorship too, so
-  nobody reads anything until a grant lifts it. An org grant on a folder/note still lifts out of a
-  sealed vault (a floor, not a wall); an *item* set to Private drops those too, because there the
-  point is withdrawing one item from a team that can otherwise reach it. Creation follows reading:
-  `vaultRootWritable` refuses a root create in a sealed vault, since a note you cannot read is not
-  worth making. **Deletion narrows further by authorship** (`http-gates.ts canDeleteItem`, behind
-  every note/file/folder delete route, the note batch and MCP `delete_*`): owners and admins delete
-  anything, a plain member only notes, files and folders they created (a row with no `created_by`
-  counts as someone else's; migration 050 backfills a pre-049 file's creator from the blob uploader
-  where exactly one is recorded, and a file restored by checkpoint revert stays without a creator) → 403 `delete_not_creator`,
-  and a member's folder delete is refused whole with 403 `folder_has_others_items` when anything in
-  its subtree was created by someone else; checkpoint revert, restore and trash purge are exempt.
-  **A per-user row on the vault resource is that person's ABSOLUTE level**
-  (`personalVaultLevel`, "person wins either way"): for them alone it replaces the org posture, the
-  join snapshot, the owner/admin shortcut and authorship — `edit` = edit everywhere, `view` = view
-  everywhere (raises AND caps), `denied` = nothing, and org (Everyone) folder/file grants do not lift
-  it; only that person's own folder/file rows do. Item-level per-user rows still override inside
-  their subtree and locks still cap. **Among ONE user's own per-user rows, the deepest wins**: a
-  per-user file row beats that user's ancestor-folder row in either direction (file `edit` over
-  folder `readonly`/`view`/`denied`; file `denied` over folder `edit`), and a per-user folder row
-  beats their vault-level row. Org-principal `readonly`/`locked`/`denied` rows keep their cap
-  semantics and still cap per-user grants. (Why: the Board's Can view on a folder writes a per-user
-  folder `readonly`, which used to swallow a later per-user file `edit` inside it.) `ResolverCache.personal(db, orgId, userId)` memoises that level
-  once per request (`canEditFolder`, `vaultRootWritable`, `resolveAccessForUser`). Lockstep: `effectivePermission` + `resolveAccessForUser` + the
-  indexed/cached paths, `vault-docs.ts vaultAccess.personal`, `http-gates.ts`
-  `canEditFolder`/`vaultRootWritable`, `POST /shares` (accepts a per-user vault `denied`) and
-  `GET /vaults/:id/locks` (synthetic `vault:<orgId>` lock when the caller's personal level is `view`;
-  their own per-user vault `edit` is a lift). `GET team-access` also returns
-  `posture: edit|view|sealed|none`. Keep
-  `vault-docs.ts vaultAccess` in lockstep: it reads the same grant rather than short-circuiting on the
-  role, which is what makes the readable set, the folder tree, blob reads, the graph, MCP search, the
-  registry pull and `ready.revoked` follow the posture for free. Management stays role-based
-  (`shares.ts canManage`), so an owner can always undo what they set; two gates that used to ride on
-  the role now ask for content access too — minting a public link, and a whole-vault checkpoint
-  revert (which needs vault-wide read, 403 `no_vault_wide_access`). `edit > view > none`; no grant → no sync access (403 at token mint). A blob that carries a
-  `doc_id` is judged by this same resolver (`canReadAttachment` / `canWriteBlob` in
-  `permissions/http-gates.ts`), so a folder share reaches the FILES in it and not only the notes;
-  a hash-named `attachments/` blob has no doc to resolve and keeps the older heuristic — readers of
-  EVERY item see all (`vault-docs.ts readsWholeVault`: a vault-wide grant AND no per-user or team
-  `denied` row on a folder/file in the vault AND no Private join snapshot hiding anything; also gates
-  attachment search and whole-vault checkpoint revert), everyone else only what a readable note references (matched on each note's
-  reference excerpt `note_index.ref_text` when its `ref_heads` cover the anchors, else its full text;
-  `blobs/ref-windows.ts`, migration 063, #343). **New
-  vaults are shared with their team by default** — `POST /api/vaults` creates the org-wide `edit`
-  grant, but only alongside the org's *first* collection, so re-running it can't resurrect a grant an
-  owner revoked via Access → Private. (This reverses the private-by-default posture of 2026-07-21,
-  which left an invited teammate on an empty sidebar with no way to ask for access.) Vaults that
-  predate the reversal are untouched: no grant means private, and the owner flips it in Access. Keep
-  this in lockstep with `permissions/vault-docs.ts` (the readable-set dual that gates live sync +
-  registry listings). The Access panel's vault-level control is **"Entire vault"** and **enforces** a
-  mode rather than defaulting it: `PUT /api/orgs/:orgId/team-access` (`http/routes/shares.ts`,
-  owner/admin) clears every org-principal row on every folder/file in the org's collections and
-  upserts the vault row, all in one transaction — per-**user** rows survive, so people shared with by
-  name keep their access. `GET` on the same path returns the mode plus the surviving overrides, which
-  is what lets the panel confirm with exact counts before writing. Grants rank `edit=2 > view=1 >
-  everything else 0` (`locked`/`denied` grant nothing, they only cap), and **only a narrowing kicks
-  sockets**: a cleared item row kicks its docs iff its rank exceeds the target's, the posture kicks
-  every doc iff it dropped — so Read-only→Shared and Private→Shared kick nobody, Shared→Read-only and
-  →Private kick everything. `grantId` is stable (the vault row is upserted in place, deleted only for
-  Private) and a no-op re-apply clears nothing, kicks nobody and broadcasts nothing.
-  `GET /vaults/:id/locks` reports the Read-only posture as a synthetic `vault` lock row (id
-  `vault:<orgId>`, `permission: 'locked'`) plus the **lifts** — the surviving org `edit` rows and the
-  caller's own per-user `edit` rows — so the sidebar can padlock everything except what a grant frees.
-  The desktop can no longer CREATE a per-item team lock (the row menu's "Lock for everyone" and the
-  selection bar's Lock were retired: they conflict with the per-person access model); legacy
-  `locked` rows still render as padlocks and owners/admins remove them with the row menu's or
-  selection bar's Unlock, shown only on rows that carry such a row (`FileTree.tsx`).
-  Delete is creator-only for plain members: the row menu's Delete and the selection bar's trash are
-  disabled ("Only the person who created this, or an admin, can delete it") unless
-  `registry.isAuthoredByMe` says every item is theirs, from authorship ids learned off the listing's
-  `createdBy` (missing = someone else's); owners/admins are ungated and a racing 403 toasts that sentence.
-  Renaming a note someone ELSE created (`PATCH /api/notes/:id`, `registry/rename-guard.ts`) is
-  refused when it adds a `(conflict YYYY-MM-DD)` suffix (409 `conflict_rename_refused`) and
-  budgeted at 100 per (user, vault) per 5 min (429 `rename_rate_limited`) — a burst brake after one
-  client renamed 619 teammates' notes (2026-09-30). The desktop's same-path step also refuses to
-  treat a note it holds local CRDT for as a clash, renames none past `samePathConflictCap`, and marks
-  its own moves (`isOwnMove`) so the disk-delete drain and `pairClosedAppRenames` never pair them.
-  Creates are gated by `permissions/http-gates.ts` `canCreateIn` (= `canEditFolder` in a folder;
-  `vaultRootWritable` at the root, which a per-user vault-scoped `edit` lifts) and attachment uploads by
-  `canWriteAttachment` (vault posture only — a blob has no folder to resolve a lock against); refusals
-  carry `code: "no_write_access"` and are checked BEFORE the `root_frozen` latch. `onAuthenticate`
-  re-resolves `effectivePermission` at connect, so a pre-revocation edit token cannot be replayed for the
-  rest of its TTL.
-  Future-member access is separate from the live vault posture. Migration 032 adds an org
-  `join_default` (Private by default), per-membership snapshots and an ordered ACL revision, and
-  migration 033 seeds that default ONCE from each existing vault's posture (org-wide vault grant
-  `edit` → `open`, `view` → `readonly`, sealed or ungranted → `private`) so a Shared team sees no
-  change. A vault created later gets `open` alongside its org-wide `edit` grant (`POST /api/vaults`,
-  first collection only), so people who join afterwards see the notes that already exist. Only
-  content that already existed when someone joined uses that snapshot; a team grant written before
-  a Private join stays hidden, while a later Everyone action has a newer revision and deliberately
-  opens the selected subtree. Existing memberships have no snapshot and are unchanged. The default
-  and atomic bulk mutation live in `permissions/access-management.ts`, shared by HTTP and MCP, and
-  management remains owner/admin-only even when the manager cannot read the selected content.
-  `POST /vaults/:vaultId/access-check` (member-gated, `ACCESS_CHECK_MAX` 2000, `runPool` at
-  `config.backfillConcurrency`) answers per-doc `effectivePermission` so the desktop can cross-check a
-  revocation against the resolver rather than against the listing that announced it; an id with no row
-  in this vault is left UNANSWERED, never `none`. `listDocsInVault`'s deleted branch resolves a
-  hard-deleted folder's ancestry from `folder_tombstones` (`d.deleted_at >= n.created_at`, so a dead
-  tombstone cannot claim a note created later) — without it a folder delete reaches a share-only
-  member as a REVOCATION (no tombstone) instead of a deletion.
-- `trash/` — deleted notes (migration 035). **No Trash window since 2026-11-19: a deleted note is
-  deleted.** Every soft delete (`softDeleteSet` in `trash/retention.ts`: single, batch, folder cascade,
-  MCP, checkpoint revert) stamps `deleted_by` and `purge_after = now()`, and `purgeDeletedSoon`
-  (`trash/service.ts`) runs `purgeExpiredTrash` for those ids 2 s later (after the socket
-  evictions), then `scrubPurgedContent` once more at 60 s for a late socket write; the hourly sweep
-  (`trash/scheduler.ts`, started only from `index.ts`) is the backstop for both. Notes deleted under
-  the old 30-day rule keep their date. The purge compares against the DATABASE clock. Pushes into a
-  deleted doc are refused at once (`trash/access.ts syncPermission` finds no window). The purge stamps
-  `purged_at` and drops CRDT, versions, index/links/blob_refs and per-note shares but KEEPS the
-  `notes` row as a permanent content-free tombstone, so an offline device still hears "deleted"
-  rather than an absent id (which
-  would land on the revocation path). Checkpoints keep the text they captured (`note_texts`, still
-  referenced by `vault_checkpoint_docs`), so a whole-vault revert brings a purged note back; revert
-  clears `purged_at`. `GET /vaults/:id/trash`, `trash-content` and `POST /notes/:id/restore` stay for
-  older desktops and find nothing once purged (410 `purged`); the desktop no longer lists or restores
-  server Trash (`activitySource.tsx useTrash` fetches nothing). The vault channel's `ready` names `tombstones` (held ids that are
-  soft-deleted, purged included; never also in `revoked`) and `covered` (manifest docs whose state vector
-  the server covers; omitted in live-only), and `refreshAcl` keeps deleted docs out of live
-  `revoked`/`drop`. A read-only socket's dropped edit is reported to its user as a `rejected` frame
-  (`beforeSync` hook, throttled).
-- `GET /health` (`http/app.ts`) answers `{ ok, version, minDesktopVersion, features }`: `version`
-  is the server package version read once at startup, `minDesktopVersion` the live
-  `client-version.ts` floor (null when off), `features` today `notes-with-state`
-  (`registry/seed-on-register.ts`), `bootstrap-only` (`routes/bootstrap.ts`), `files-with-bytes`
-  (`routes/blobs.ts`), `access-board` (`routes/registry.ts`) and `skills` (`skills/feature.ts`). A missing `features` means none. Desktops pick their path from it once per
-  server URL; the per-item `seeded` flag stays the fallback.
-- **Registration with state** (`registry/seed-on-register.ts`, used by `POST
-  /api/vaults/:vaultId/notes/batch` in `routes/bulk.ts` and `POST /api/notes` in
-  `routes/registry.ts`): an item may carry `state` (base64 Yjs update) + `textSha256`. `parseState`
-  validates and size-checks it BEFORE registration, so a malformed (`invalid_state`) or oversized
-  (`note_too_large`, 413 on the single route) state never gets a row. The row then goes in through
-  `registerNotes`/`registerNote` exactly as before — quota, `canCreateIn`, `root_frozen`,
-  `path_folder_mismatch`, adopt-by-path, 23505 — the register connection is released, and only then
-  `seedRegistered` writes state, through `applyDocPushBatch` with `expectEmpty` and the bulk seed
-  origin, so the live Hocuspocus branch, shrink guard, fan-out and indexing apply unchanged (a CTE
-  inserting row + update together would have bypassed all of them). State goes ONLY to a row this
-  call created, or a row that already carried the SAME id in this vault (an old client or an
-  interrupted run registered it and never pushed), after `syncPermission` and a covered check under
-  the doc lock. Per item: `seeded`, `content` = `applied` | `covered` (server already held every op:
-  a retry after a lost response) | `conflict` (row already holds other text; nothing written) |
-  `skipped` (adopted onto a DIFFERENT id) | `refused` (+`reason`), and `sv` = the submitted state's
-  vector, safe for the client's `recordAck`, when seeded. Items without `state` answer exactly as
-  before. Caps: 16 MiB raw body always; with any state, ≤`BATCH_MAX_DOCS` (100) items and
-  ≤`BATCH_MAX_DECODED_BYTES` (4 MiB) decoded, a single item up to `MAX_NOTE_MB` (400
-  `batch_too_large`). `registry-changed` is published AFTER the apply, so a receiver's pull finds
-  content, not a placeholder.
-- `POST /vaults/:vaultId/bootstrap` takes `only: string[]` (≤`BATCH_MAX_DOCS`, 400
-  `batch_too_large`): the session covers exactly those ids, unreadable or unknown ones silently
-  dropped, never a 403. It is the desktop's HTTP pull-then-merge.
-- **One-step file upload** (`files-with-bytes`, `routes/blobs.ts`, migration 048
-  `blobs.pending_register`): `POST /vaults/:id/blobs/intent` may carry `register: { docId, relPath,
-  folderId? }`; the Pro gate and a dry-run `registerFile` (adopt-by-path, `path_folder_mismatch`,
-  create permission, frozen root, rolled back) run at intent BEFORE any row exists, with the same
-  statuses/codes as `POST /api/files`. The registration waits on the pending blob row, and
-  `complete` creates the `files` row in the SAME transaction that marks the blob ready, then
-  broadcasts `registry-changed` (`setBlobRegistryNotifier`). A never-completed upload is collected
-  by the pending sweep with its registration: no `files` row without bytes. Without the feature the
-  old `POST /api/files` + intent → PUT → complete flow is unchanged. The desktop uses it for a NEW
-  tree binary (no `files` id known) when the server advertises the feature (`attachments.ts
-  oneStepRegister`): no `POST /api/files` / `preregisterFiles`, the id is recorded from the intent's
-  `file` (dedupe, or `adopted` = bind to that row) or complete's; a 402
-  `attachment_sync_requires_pro` registers nothing and raises the usual notice, and any other
-  registration refusal sends that file down the old path once.
-- **Messages to users** (`messages/`, `http/routes/messages.ts`, migration 095, `docs/MESSAGES.md`):
-  operator-created popup/banner/toast messages in `app_messages` (spec JSONB, validated on write;
-  audience filters, named `condition` such as `vault-key-not-saved` (unknown ⇒ nobody), allowlisted
-  action kinds, per-message frequency). Desktops read `GET /api/messages` and post receipts per
-  (message, user, org), so done/snooze holds on every device. Admin routes `/api/admin/messages`
-  need `x-baalda-admin-token` = `BAALDA_ADMIN_TOKEN` (404 when unset or wrong); `pnpm messages`
-  wraps them. Writes push `{t: "messages-changed"}` to `messages`-cap connections: scope all over
-  the process-wide `messages` pub/sub topic (`PS_MESSAGES_CHANGED` 0x10, subscribed once per
-  instance), scope user over `user:{id}` (`messages/events.ts`, wired in `index.ts`).
-- `metrics/sync-metrics.ts` — in-process counters, no deps, no DB writes, reset on restart. Every 60 s,
-  only when something changed, one line `[sync-metrics] {"windowS":60,"counters":{…}}` with DELTAS
-  (sum across lines and instances): `seed.applied`/`appliedBytes`/`covered`/`conflict`/`refused`/
-  `invalid`, `ready.empty.count` and `ready.behind.count` (+`.connects`, `.bucket.0|1-10|11-100|101-2000`),
-  `checkpoint.captures`, `checkpoint.docs.text`/`structureOnly`/`oversized`, `checkpoint.deferred.<reason>`.
-  Each capture also logs `[checkpoint] vault=… notes= text= structureOnly= oversized= blobs= ms=`. Ids
-  and counts only, never paths or text.
-- `tokens/sync-token.ts` — HS256 per-doc JWT (`jose`), TTL `SYNC_TOKEN_TTL_SECONDS` (default 600).
-- `mcp/` — JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp` (no SSE; GET/DELETE → 405). Tools:
-  `list_vaults/list_folders/create_folder/move_folder/delete_folder/list_notes/read_note/search_notes/create_note/update_note/append_note/edit_note/move_note/delete_note/list_attachments/read_attachment_text/move_file/delete_file/list_skills/get_skill/read_skill_file`.
-  `delete_file` shares `deleteRegisteredFile` (`http/routes/registry.ts`) with `DELETE /api/files/:id`;
-  `move_file` re-registers the id at a new path through `registerFile`, like `POST /api/files`.
-  `read_note` returns a `revision` (sha256 of the body); `update_note`/`append_note`/`edit_note` take an
-  optional `expectedRevision` and refuse a stale write (the check runs under the doc writer's per-doc
-  lock, so check + apply are atomic). `edit_note` applies exact-anchor replace/insert/delete ops (an
-  anchor must match exactly once unless `all`; when no exact match exists, `foldForMatch` retries
-  ignoring CRLF, Unicode/doubled/trailing spaces, zero-width characters, curly quotes, dashes and
-  NFC/NFD under the same once-only rule, and `find`/`anchor`, `replace`/`text` are interchangeable —
-  the 7.4% error rate was mostly anchors that differed from the note by exactly those; refusals
-  carry `anchor_not_found`/`anchor_ambiguous`/`stale_revision`/`bad_edit`/`note_too_large` codes and
-  every tool counts `mcp.tool.<name>.ok|refused[.<code>]|internal|ratelimited` in the sync metrics). EVERY
-  refusal carries a code (`not_found`, `no_access`, `read_only`, `invalid_argument`, `invalid_target`,
-  `folder_not_empty`, `root_frozen`, `unknown_tool`, …) so a client dashboard's error rate can be split.
-  Inputs whose meaning is not in doubt are accepted rather than refused: numbers/booleans as strings,
-  `edits` as a JSON string or one bare object, a typeless find + replace, and a `vaultId` given as the
-  token's org id or the vault's name (an unknown one is refused with the ids the token can use).
-  `delete_note`/`delete_folder`/`delete_file` of an item already deleted in the token's vault answer
-  `alreadyDeleted: true`, never "Unknown". `update_note` sends only the changed span, and
-  `append_note` accepts an `idempotencyKey` so a retried call cannot append twice.
-  Structural tools (create/move/delete of folders and notes) broadcast `registry-changed` with a
-  `null` origin, and content writes fan out through `createDocWriter`, so an AI edit lands live on
-  every open app exactly like a teammate's. `delete_folder` refuses a non-empty folder unless
-  `recursive: true`. Move/delete semantics live in `src/registry/tree-ops.ts`, shared with the HTTP
-  registry routes so the two surfaces cannot drift.
-  `search_notes` ranks `blob_text` beside `note_index` and tags every hit `kind: "note" | "file"`
-  (opt out with `includeFiles: false`); `list_attachments` / `read_attachment_text` serve the
-  EXTRACTED TEXT of a file, never its bytes, through `filterReadableBlobs` / `canReadAttachment`.
-  There is deliberately no `attach_file` — base64 over JSON-RPC with no idempotency key, against a
-  byte path built to avoid exactly that (see the note in `tools.ts`).
-  Token = `mcp_…` minted from desktop Vault Settings → MCP; scoped to one (user, vault), gated by
-  the **same** per-file ACL. Only a sha256 hash is stored.
-- `skills/` + `http/routes/skills.ts` + `mcp/skills.ts` — team AI skills (`docs/SKILLS.md`), free on
-  every plan, stored in their own tables (`bytea`), never blobs or notes. Who gets a skill (migration 062,
-  `skills/access.ts`): the Everyone row (`delivery` + `everyone_access`) plus per-person
-  `skill_member_access` rows (Required/Optional/No access, person wins either way) filter the
-  manifest, catalog, skill page, versions and MCP; owners/admins see every skill but install only
-  at their own level (`docs/SKILLS.md` addendum "Who gets a skill"). Owners/admins edit one draft
-  per skill (`baseRevision`, 409 `stale_draft`) and Publish it into an immutable numbered version
-  (409 `nothing_to_publish` when the bundle hash equals the latest); only published versions are
-  delivered; effective = pinned ?? latest; Required installs for every member, Optional per device
-  opt-in. Routes under `/api`: `GET /skills/manifest` (every membership org, metadata only, fixed
-  query count), `/orgs/:orgId/skills[/:skillId[/draft[/reset]|/publish|/versions/:v]]`,
-  `/orgs/:orgId/skill-sources[/:sourceId]` (GitHub marketplaces to IMPORT from — the server never
-  calls GitHub, and there is no publish-to-GitHub bridge or per-vault skill settings; marketplace
-  sources: GET member, POST/DELETE admin, 100 per org; `source` rides create/PATCH/draft PUT);
-  members read, `isSkillAdmin` (owner/admin) writes
-  (403 `skills_admin_required`); 500 live skills per org (409 `skill_limit_reached`), 1000 files /
-  5 MiB per file / 25 MiB per version (400 `skill_too_many_files`, 413 `skill_file_too_large` /
-  `skill_too_large`, each with `limit` + plain `message`), route body limit 36 MiB. Create, publish, delivery/pin change, delete and source add/remove
-  call `member-events.ts announceSkillsChanged`, which publishes PS `0x0f` per vault;
-  the vault channel sends `{t: "skills-changed", orgId}` org-wide like `appearance-changed` (a hint:
-  desktops refetch the manifest). MCP `list_skills`/`get_skill`/`read_skill_file` (read-only, never
-  drafts). Bundle hash = sha256 over `relPath\0sha256\0(1|0)\n` sorted by UTF-8 bytes, identical in
-  `skills/validate.ts` and the desktop's `lib/skills/validate.ts`.
-- `index/` — `embedder.ts` is a dependency-free 256-dim hashed bag-of-words (works air-gapped;
-  `OPENAI_API_KEY` swap noted but not wired). `indexer.ts` derives search + wikilink graph from Yjs state.
-- `db/migrate.ts` — plain SQL in `migrations/*.sql`, applied in filename order, tracked in `_migrations`.
+### Sidebar marks (`syncRollup.ts`)
+Outside a run an `unsynced` file stays hollow with its reason on hover; a folder holding some says "N of M files not on the server yet" (`folderUnsentTitle`) but stays green unless nothing inside reached the server; `error`/`queued` read green outside a run. A vault waiting for its key shows **Sync paused** and no marks (`useVaultKeyBlocked`). Launching offline is not signing out (`authManager.waitingForServer`, `authOffline`/`retryAuth`, 3 s → 30 s).
 
-**Postgres tables** — Better Auth (`user`, `session`, `account`, `organization`, `member`, `invitation`;
-camelCase quoted, migration 001), app tables (all ids `TEXT`, migration 002+): `vaults`, `folders`, `notes`
-(id==doc_id, soft-delete via `deleted_at`), `files` (id==doc_id), `shares`, `doc_updates`, `doc_snapshots`,
-`blobs` (`doc_id` = the `files` row these bytes are, or NULL for an `attachments/` drop — m028),
-`blob_text` (a file's extracted text + vector; derived, purgeable, cascades with the blob and the
-vault — m028), `vault_appearance` (per-org shared appearance JSON, one row per vault — m053),
-`skills` (+ `source` JSONB for imported skills) + `skill_versions` + `skill_version_files` +
-`skill_draft_files` (team AI skills, file bytes as `bytea` — m060) and `skill_sources` (marketplace
-import, same migration),
-`invitation_access` (access chosen at invite, applied then deleted on accept — m046;
-the same migration adds `member.last_seen_at`, stamped at most every 10 min), `org_join_codes`, `note_index`, `note_links`, `mcp_tokens`, `public_links` (one
-plaintext token per note; revoke = DELETE), `vault_checkpoint_blobs` + `checkpoint_blob_bytes`
-(checkpoint binary pins and retired Postgres-store bytes — m047), `blobs.pending_register`
-(a one-step file upload's registration, applied at `complete` — m048).
+## Desktop — React (`src/`)
 
-## Server env vars (`app/apps/server/.env`)
-`DATABASE_URL` (Docker host port **5439**→5432) · `JWT_SECRET` (Better Auth crypto **and** sync JWTs —
-change in prod) · `BETTER_AUTH_URL` · `PORT` (3010) · `HOCUSPOCUS_PORT` (3011) · `SYNC_TOKEN_TTL_SECONDS`
-(600) · `COMPACTION_THRESHOLD` (50) · `CORS_ORIGINS` (optional) · `OPENAI_API_KEY` (optional) ·
-`EMAIL_FROM` + `SMTP_URL` | `RESEND_API_KEY` (optional; turns on password reset, sign-up verification
-and invitation emails — `src/email/mailer.ts`; unset ⇒ none offered, like Google OAuth) · `BAALDA_ADMIN_TOKEN` (optional, ≥32 chars; turns on the messages admin routes, `docs/MESSAGES.md`) · `BUG_REPORT_EMAIL` (optional; with email on, the desktop's sidebar bug icon emails reports
-there, Reply-To = reporter — `http/routes/bug-reports.ts`; unset ⇒ the icon is hidden) ·
-billing (managed/Polar only; self-hosters leave all unset ⇒ unlimited): `POLAR_ACCESS_TOKEN` +
-`POLAR_WEBHOOK_SECRET` + `POLAR_SERVER` · `BILLING_MODEL` (`vault`|`team`, default `vault`) ·
-`POLAR_PRODUCT_MONTHLY_ID`/`POLAR_PRODUCT_YEARLY_ID` (per-vault) ·
-`POLAR_PRODUCT_TEAM_MONTHLY_ID`/`POLAR_PRODUCT_TEAM_YEARLY_ID` · `TEAM_PRICE_MONTHLY_CENTS` (1000) ·
-`TEAM_PRICE_YEARLY_CENTS` (11000) · `TEAM_MIN_SEATS` (3) · `ABUSE_MAX_NOTES` (100000) ·
-`ABUSE_MAX_STORAGE_MB` (10240) · `FREE_MAX_VAULTS`/`FREE_MAX_MEMBERS`/`FREE_MAX_STORAGE_MB`
-(per-vault model only) ·
-vault keys: `BAALDA_VAULT_KEYS` (off) · `VAULT_KEY_CONVERSION` (off) · `VAULT_PLAINTEXT_RETENTION_DAYS` (30; 0 allowed) — see "Vault keys" below.
+- `store.ts` is a Zustand **UI view-state mirror only**. Editor = CodeMirror 6 + `y-codemirror.next` (`yCollab`): the buffer *is* the markdown; in `collab` mode CM6 history/onChange are dropped so Yjs owns undo. Graph view = hand-rolled canvas force sim. Live preview and inline HTML sanitize aggressively (drop script/style/iframe, strip `on*`/`javascript:`). `SearchPanel` renders Rust's FTS snippet via `dangerouslySetInnerHTML`, relying on Rust emitting only sanitized `<mark>`.
+- **Editor inset lives on `.cm-line`** (`--editor-pad-x`), never `.cm-content`: `drawSelection()` reads only the line's padding. Block replace widgets get it back via `cm-block-inset`; block widget hosts use padding, not margin.
+- **Live preview reveals at two scopes** (`lib/editor/reveal.ts`): LINE for line-shaping markers (`#`, `>`, task dash, block widgets), TOKEN for inline ones (`**`, `==`, `%%`, backtick, `[]()`) via `tokenOwner`; a blurred editor has no active line. Obsidian syntax in `lib/editor/ofm/` uses node names `OfmComment*` (`@lezer/markdown` owns `Comment` and `configure()` silently skips duplicates).
+- **Note header widgets** (`lib/editor/noteHeader.ts`; React in a CM6 widget, `updateDOM` returns **true**, title `eq()` compares only `{path, readOnly, hasFrontmatter, mode}`):
+  - Inline title = the *filename*; committing is a **rename** (`store.renameNoteFileExact`), never a CRDT edit; illegal/taken names refused inline (`titlePlan.ts`).
+  - Properties panel replaces the frontmatter range; every edit is a **minimal span replacement** (`lib/frontmatter/parse.ts` spans, `edit.ts`) dispatched as a normal transaction. YAML outside the flat subset is **never rewritten** (source under a banner). Types in `.context/types.json`; Visible/Hidden/Source is a device pref; `frontmatterView(state)` is the single authority (two block replaces over one range throw).
+  - Both key on `state.readOnly`: read-only renders static rows, refuses renames, and `readOnlyPropertiesGuard` drops `input.properties` transactions (a programmatic dispatch isn't stopped by the facet).
+- **One notice slot** (`lib/noticeSlot.ts`, `useNoticeSlot.ts`): banners FLOAT over the page (`.notice-overlay`, no height animation, no `overflow: hidden`); only the highest-priority claim shows: held bulk delete > reconcile summary > open note deleted/access removed > vault made local only > membership ended > vault folder missing > folder restored > Team subscription lapsed > closed-app changes > not syncing > sync paused > note limit > create refusal > open note's file gone > attachments local only. Informational notices fade after `NOTICE_FADE_MS` (20 s); ones with a pending choice stay. Activity keeps the record. The editor's inline view-only banner is separate.
+- **Rename/delete gating mirrors the server:** `lib/renameGate.ts renameBlockReason` (view-only, creator rule via `registry.isAuthoredByMe`, destination not addable) disables Rename, double-click rename and drag-moves; Delete is disabled for plain members unless every item is theirs (authorship from the listing's `createdBy`, missing = someone else's). Legacy `locked` rows still render as padlocks; owners/admins remove them with Unlock (shown only on rows carrying one, never on a group Can view padlock — `lib/locks.ts isRemovableLock`). Creating per-item team locks was retired.
+- **Members and access** (Vault Settings tab `members`; `MembersAccessTab.tsx`, `MemberProfilePage.tsx` (a page with back link; tabs Personal info / Access / Activity), `InvitePeopleDialog.tsx`, logic in `lib/membersAccess.ts`):
+  - **Access model of 2026-11-25:** Default access is fixed to Only what's shared (sealed) with no row and no New members setting (server: 409 `default_access_fixed` / `join_default_fixed` for any other mode, incl. org vault-row shares and Everyone writes via `access/bulk` or MCP). People get what's shared with them, their groups, or a level of their own. Admins start on Can edit everything (a per-user vault `edit` row; promotion overwrites theirs, demotion leaves it).
+  - Who may change one person's access: `canManageMemberAccess`, mirrored by server `access-management.ts` — owner manages anyone incl. themselves; admin everyone except the owner (403 `access_manager_required`; decided 2026-10-09). Role changes/removal stay stricter. "Manage" is never an exemption from caps.
+  - Per-person Access cell (Can edit everything / Can view everything / No access / Custom; hover = `accessSources().lines`; profile sentence = `accessSources().sentence`) + ⋯ menu. Plain members get a read-only roster (`GET /orgs/:orgId/members/overview`).
+  - Profile Access tab: **Board** (default; `MemberAccessBoard.tsx`; columns Can edit / Can view / No access; "Set everything to" incl. Reset to groups only; per-column Add all / Remove all, targeting item roots, never the vault resource) or **List** (checkbox tree + "Across the vault"); pref `context.memberAccess.view`. Loads via `GET /vaults/:id/access-board?userId=` (one resolve per item; `access/summaries` kept for old desktops). Writes go through atomic `access/bulk`, optimistic, re-reading only the affected subtree + ancestors. A single-row move applies at once with a toast.
+  - **Confirms only for destructive changes:** a target of No access, removing someone from a group or deleting one (copy says what leaves their computer: `groupRemoveNote`/`groupDeleteNote`, `groupRemoveCopy`). Can view/Can edit never confirm.
+  - Board drag uses **pointer events**, never HTML5 DnD (Tauri's `dragDropEnabled` swallows it): drag after 4 px, drop target = the whole column band.
+  - Access colours everywhere from `--access-{edit,view,none}-{bg,fg}` in `tokens.css` (edit green, view amber, none grey).
+  - Invite dialog Access: Only what's shared (Default, sends no level) / Can edit everything / Can view everything / groups; admins fixed on Can edit everything; warns under the fields when the person would see nothing. Join code tab picks only the groups a code joiner joins (migration 099 `join_code_groups`, `PUT /orgs/:orgId/join-code/groups`; `GET /orgs/join-code` returns `groupIds`, absent on older servers). `legacyNewMembersSetting` keeps the old "Vault default" line only in vaults still on an older posture.
+  - People | Groups toggle with one search; Groups tab "New" chip (`lib/groupsNewChip.ts`, 21 days or until opened). Group page: Members / Access board / Skills / Activity. `MenuSelect` options take `section` and `checked`.
+  - **Ticking people** (owners/admins): checkboxes cross-fade the toolbar into `MemberSelectionBar` (same 38 px slot): Add to group, Change access (one `access/bulk` per 100), Change role, Remove; each filters to who it may change (`canSetMemberAccess`/`canActOnMember`) and names who was skipped (`splitBulkTargets`/`bulkResultLine`). Checkboxes are drawn (`App.css`); ticks use `CheckIcon.tsx`, never "✓".
+  - Vault mode is **unknown until fetched** (`lib/teamAccessCache.ts` paints from localStorage but never authorises a write); `lib/accessMode.ts effectiveTeamMode` is the single authority for resolved modes. `readonly` = item-level combined grant+cap.
+- **Updates UI:** version + Check for updates live only in Account Settings → About, the only place an update error shows (`updateView.ts menuUpdateView`); the sidebar shows nothing about updates (2026-11-25). Settings dialogs cross-link bottom-left; hover/pressed tints are `--bg-hover`/`--bg-active`.
+- **Backend-behind notice** (`BackendBehindNotice.tsx`, `lib/serverFeatures.ts`): a persistent line above the identity bar when `GET /health` ANSWERED and lacks a `REQUIRED_SERVER_FEATURES` entry (`notes-with-state`); keyed off `features`, never the version; unreachable = nothing. Polled on URL/user/vault change and every 10 min; never gates sync.
+- Automatic sidebar colours: deterministic, account-personal, FOLDERS only, neighbour collision-free; explicit colours win; on by default (Account Settings → Appearance).
+- Vault-level sync state shows only via the sidebar badge, reconcile banner/Activity and file previews (Vault Health tab removed, #289). `vaultSyncStatus` is independent of the open note's `syncStatus` (which controls editor permissions). The attachment-local-only notice is driven only by an explicit `attachment_sync_requires_pro` refusal, never inferred from a plan label.
+- The vault list lives in Account Settings → Vaults (Vault Settings keeps it only signed out): memberships + this profile's recent local folders (production and staging keep separate recents).
 
-## Vault keys (`src/crypto/`, `docs/VAULT_KEYS.md`)
+## Desktop — team skills (`src/lib/skills/`; spec `docs/SKILLS.md`)
 
-Encryption at rest with **client-held** keys. **It is NOT end-to-end encryption**: a running server
-process sees plaintext and keys in memory while it works; the database, backups and admin tools alone
-yield only ciphertext for the sealed columns. Never describe it as E2EE or zero-knowledge.
-- **Who holds keys.** Each vault has a random 32-byte key (VK) that only members' devices keep (OS
-  keychain). Users have X25519 key pairs (`user_keys`); VK is sealed to each member per generation
-  (`vault_key_wraps`). The server keeps only `vaults.vk_check` to verify a presented key.
-- **Transport.** HTTP: `X-Baalda-VK` (`crypto/transport.ts vaultKeyHeader`/`requireVaultKey`); per-doc
-  sockets: token `<jwt>.<vk-b64>` (`splitSyncToken`); vault channel: `hello`. Neither may ever be logged
-  (`redactToken`; `tests/vk-redaction.test.ts`).
-- **Sealed columns** (AES-256-GCM, AAD = table|column|vault|row): `doc_updates.update_enc`,
-  `doc_snapshots.snapshot_enc`, `note_index.search_enc`, `blob_text.search_enc`,
-  `note_texts.content_enc`, `public_links.token_enc` (+ `token_hash`). **Not encrypted:** attachment/file
-  BYTES (S3/R2 uploads go presigned straight to the bucket and rely only on the provider's at-rest
-  encryption; Postgres-stored bytes are not sealed either), titles, paths, folder names, sizes,
-  timestamps, membership and ACL rows.
-- **Rule 1:** every request/socket that reads or writes content presents VK itself, checked against
-  `vk_check`. `key-cache.ts` serves ONLY server-internal background work (index, compaction,
-  checkpoints, backfill), never a user request; `get()` returns a copy the caller zeroes. It is FILLED by a
-  vault channel (while connected + 10 min) and, one-way, by any request whose key the server verified
-  (`holdForRequest`, 15 min after the last one): verified `X-Baalda-VK`, an MCP/OAuth write's unwrapped key
-  (checked against `vk_check` first), `keys/init`. Read-only public-link views never fill it. Keyed writes
-  index with the request's own key (debounced copy, zeroed after); otherwise `index_pending`, drained whole
-  (batches of 500) on any key arrival and by the tick while a key is held.
-- **Rule 2:** only a member's device seals VK to a new member or device; the server only queues the
-  request. Devices pin each member's key fingerprint on first seal (TOFU) and refuse a changed key until
-  a person approves it.
-- **Rule 3:** MCP tokens and public links store hashes only, plus VK wrapped under an HKDF key from the
-  token secret (`mcp_token_keys`, `public_links.wrapped_vk`); unwrapped per call, never cached, zeroed
-  after the request. MCP and links work with no desktop online.
-- **Device linking:** a new device signing in with a password unlocks the account key itself
-  (`user_keys.priv_wrapped_password`, under `POST /api/me/keys/unlock`'s HKDF(HMAC(`ACCOUNT_KEY_PEPPER`,
-  password))). Anyone with the password can open that person's vaults: the owner chose this (2026-11-01).
-  The pepper also makes login hashes `p1$` (rehashed on sign-in), so a DB dump alone cannot test passwords;
-  it must never change. `auth/pepper-boot.ts` settles it at boot: env wins; unset with vault keys on, the
-  server generates one once into `server_secrets` (migration 086; a stolen DB then includes it); unset with
-  keys off, off. A fingerprint is recorded and a different or missing pepper REFUSES THE BOOT. Google-only accounts and stale wraps (after a
-  reset) fall back to one-click approval on an existing device (code shown, not typed). A session alone
-  never yields keys. There is no account recovery kit.
-- **Seamless keys** (2026-11-01, contract in `members/invitation-keys.ts` + `docs/VAULT_KEYS.md`): the
-  inviter's device seals VK to an invitee's existing account key (`invitation_vault_keys`, moved into
-  `vault_key_wraps` on accept by `applyInvitationKeys`) and wraps it under a per-invite secret carried only
-  in the email link fragment (`#k=` → `baalda://invite/…&k=`); join codes are `<code>-<device secret>`
-  (`vault_join_wraps`, only `sha256(secret)` stored). `keys/requests` also lists members lacking a wrap
-  (`kind: "missing"`), and key holders service every vault they hold, so a conversion keys everyone.
-  The server never stores the secrets; every stored wrap came from a device that presented VK.
-- **Churn brakes** (`crypto/key-churn.ts`): ≤3 account-key replacements per user per 24 h (counted from
-  `user_key_history.replaced_at` under the `user_keys` row lock; first create and same-key re-PUT free),
-  ≤10 new device registrations and ≤10 new approvals per user per hour (in process). 429
-  `rate_limited` + Retry-After + plain message, nothing stored; desktop toasts it (`rateLimitedMessage`,
-  runtime `startFreshAccountKey`).
-- **Owner vault key:** owners reveal it in Vault Settings → General ("Show vault key"); no popup, never
-  emailed. "Restore with vault key" verifies against `vk_check`.
-- **Conversion gate + MCP upgrade** (`crypto/conversion.ts`): a device registers a pending key,
-  allow-lists existing tokens/links with an HMAC under VK, and they upgrade on next use while a member's
-  key is held. `keys/init` accepts when the check bytes match the pending row (`lockGateRows` + `initGate`
-  inside the init transaction). Decided 2026-11-02: it NO LONGER waits for connections (`conversion-ready`
-  is always ready and only reports `blockers`); one that cannot upgrade (an OAuth login renewed while no key
-  was held, a link nobody viewed) is reconnected or recreated once, and MCP says so (`KEY_REQUIRED_MESSAGE`). `VAULT_KEY_CONVERSION` plus
-  the `MIN_CLIENT_VERSION` floor gate whether a desktop may key a vault at all. No owner review any more (2026-11-01): the
-  converting device allow-lists every candidate; exclusions recorded by an earlier review
-  (`vault_conversion_exclusions`, migration 083) still stand, and the review UI is gone.
-  Since 0.1.102 (migration 087): the claiming device seals the pending key to the other owners/admins
-  (`vault_pending_key_shares`, `keys/pending/shares`, deleted at init); their `convertVault` takes it over
-  (`keys/mine` `pendingShare`, replacing only a provisional key, after `keys/pending` accepts its check).
-  The gate ignores links with no `last_viewed_at` in 30 days and OAuth rows consumed by a refresh over an
-  hour ago (`oauth_grant_consumed`, written by `oauth-token-endpoint.ts`). Grants with no
-  `mcp_oauth_vault` row count for the user's sole vault (`mcp/grant-pairs.ts`, the SQL twin of `grantOrg`).
-- **Launch safety net** (decided 2026-11-01, on until the owner switches it off): while
-  `KEY_RECOVERY_PUBLIC_KEY` is set, `crypto/key-recovery.ts` seals each vault key the cache acquires to that
-  OFFLINE public key (`vault_key_recovery`, migration 085, format in `recovery-seal.ts`); the owner's
-  `scripts/key-recovery.ts rescue` opens it locally and re-issues it through `POST
-  /api/admin/key-recovery/:vaultId/grant` (`KEY_RECOVERY_ADMIN_TOKEN` + the vault key itself; audited
-  `key_recovered`). Unset ⇒ no copies and every row deleted. While on, the offline key holder can read any
-  vault: the website must say so.
-- **Every vault converts automatically** (decided 2026-11-01, supersedes the 2026-10-29 opt-in): while
-  `VAULT_KEY_CONVERSION` is on, `crypto/conversion.ts encryptionRequested` answers true for every vault, so
-  `keys/mine` reports `conversionAllowed` (0.1.98+ clients) and `keys/pending`/`keys/init` accept it;
-  `vaults.encryption_requested_at` (migration 081) matters only with the flag off. There is no
-  "Encrypt this vault" button. An owner/admin device converts only when `lib/vaultKeys/conversionSafety.ts
-  conversionSafe` holds, so a lost laptop cannot lose the vault: another member has an account key
-  (`keys/mine` unkeyed `otherMembersWithKeys`), or this account has a password wrap, or 2+ devices hold
-  the account key; else `not-safe-yet` and it re-checks on later runs.
-  (d) 2026-11-01: while the launch safety net is on (`keys/mine` `recoveryNet`), every vault converts,
-  Google-only solo owners included. Owners with no other way back (no password wrap, one computer, no
-  teammate holding the key: keyed `keys/mine` `otherKeyHolders` 0) see `SaveVaultKeyCard` at the top of
-  Vault Settings → General: Save to file, Show key, and for Google-only accounts "Set a password instead" (`POST /api/me/password`, Better
-  Auth `setPassword`, then the password unlock writes the wrap). The key file is one line of 24 words;
-  `wordsToVaultKey` ignores numbering and punctuation.
-- **Desktops without vault keys** (`http/client-version.ts VAULT_KEYS_MIN_DESKTOP` = 0.1.98, no env
-  override, no grace, missing version = old): on a KEYED vault every entry point (`requireVaultKey`'s
-  refusal, plus `crypto/transport.ts refuseKeyIncapableClient` on the sync/vault-channel token mints,
-  bootstrap create, notes/batch and `POST /api/notes` with or without state, blob legacy POST/intent/
-  complete) answers them `426 client_outdated` (`reason: vault_keys`) instead of `key_required`, and
-  writes nothing — the refusal 0.1.97 and older already turn into "stop syncing, update". A verified
-  `X-Baalda-VK` also counts as capable. Sockets are gated at the mint (an old build never gets a token).
-  The desktop sends `clientVersion` on EVERY `/api/*` call except `/api/auth/*` (`api.ts
-  withClientVersion`, raw fetches included), and its key on both token mints. Unkeyed vaults: unchanged.
-  Ships only together with the 0.1.98 version bump (an unbumped build reports 0.1.97 and is refused
-  wherever it presents no key).
-- **Zero data loss:** plaintext is never removed before a per-row decrypt-and-compare check (a separate,
-  delayed, reversible step); `key_required` changes nothing server-side and never drops local edits;
-  compaction verifies the sealed snapshot first; key generations are never destroyed; when in doubt,
-  refuse and let the client retry.
-- **Converting docs and the null-out.** A keyed doc that still holds pre-keying plaintext is compacted by
-  `persistence.ts compactConverting`: sealed-only snapshot of everything + ONE dual log row holding
-  `Y.mergeUpdates` of exactly the old plaintext parts (verified, never post-keying edits); a lone dual row
-  is kept in place. `crypto/null-out.ts` (run from the backfill tick after `complete`) clears plaintext
-  only when the backfill is complete, a fresh `encryptionStatus` is 0 and `VAULT_PLAINTEXT_RETENTION_DAYS`
-  have passed: per row, open the sealed copy, compare byte for byte, clear under `WHERE plaintext =
-  original AND sealed = compared`; a mismatch keeps both (ids logged). `doc_updates`/`doc_snapshots`
-  clears run under the doc's EXCLUSIVE advisory lock (`withDocWriteLock`, the one compaction holds), so
-  a converting compaction can never fold a just-cleared row's plaintext back into its dual row. Inline pre-038 version/checkpoint
-  texts are first sealed into `note_texts` by the backfill. At zero plaintext `phase = 'sealed'`;
-  `keys/mine` reports `fullyEncrypted`/`plaintextRemaining` as last recorded (never counted per request).
-  A keyed re-index leaves stale `note_index`/`blob_text` plaintext that never byte-matches; it is derived,
-  so it is cleared (decided 2026-10-29) under the same guard when the sealed entry is CURRENT
-  (`sealedIsCurrent`: note body equals the CRDT text now; blob text opens under the current key).
-  `note_links` titles stay. Residuals with no sealed column: `blobs.data`, `checkpoint_blob_bytes`, skills files.
+- `syncEngine.ts` is PURE (`planSkillsSync` + `runSkillsPlan`). No manifest ⇒ no plan (a failed fetch never removes). Owned = marker on THIS server and (no `userId` or THIS user); anything else is foreign: never removed or installed over, only a `conflict`. An edited copy is never overwritten by a run (`edited`/`keptMine`); a removal RELEASES an edited copy and deletes a clean one. Two accounts on one computer: the second sees `other_owner` (by design). "Use team version" (`force`/`replaceUnmanaged`) replaces with no copy kept; a symlinked folder is never replaced.
+- `syncHost.ts` runs it for every vault on the current server (`GET /api/skills/manifest`) at sign-in, on `skills-changed` (500 ms), every 2 min, on refocus (≤ 30 s) and Check now; one run at a time; failed installs wait 10 min, 3 retries per version. A run halts once the API client's base URL differs from the host's; `store.setServerUrl` pauses it (`pauseSkillsSync`). Device prefs: `prefs.ts` (`context.skills.device.v1`); Required → Optional keeps an installed copy (`impliedOptIns`).
+- UI: Vault Settings → Skills (cards, Team | On this device, grouped by import source, `grouping.ts`); skill page with Publish, versions, Draft editor (`SkillCodeEditor.tsx` standalone CM6, NOT the note editor; `skillMdEdit.ts` one-span frontmatter edits; autosave ~1 s with `baseRevision`, `stale_draft` offers Load latest). Account Settings → AI tools. No publishing to GitHub or claude.ai (removed 2026-10-26); GitHub is import-only, token only in the keychain (`baalda.skills.github:<serverUrl>|<orgId>`).
+- Marketplace import (`marketplace.ts`, `MarketplaceBrowser.tsx`): built-in `anthropics/skills`, `openai/skills`, `BenAIOS/skills` + saved sources; one `commits/{ref}` + ONE recursive `git/trees` call (a `truncated` tree is refused); detection Claude → Codex → `SKILL.md` scan ≤ 5 deep; import = create + publish v1; `skills.source` matches by repo (case-insensitive) + path for Imported / Update available / Name taken. Details in `docs/SKILLS.md`.
+
+## Server (`app/apps/server/src/`)
+
+**Process.** One Node process, two listeners (`index.ts`): Hocuspocus WS (:3011) + Hono HTTP (:3010); the same Hocuspocus instance is also served at `/sync` on the HTTP port (`sync/http-upgrade.ts`) so the server runs behind one port/domain (how production deploys: Dockerfile + Railway IaC `app/.railway/railway.ts` applied with `railway config apply` from `app/`; the root `railway.json` is the legacy copy; migrations run pre-deploy via `node dist/db/migrate.js`). MCP writes go through `createDocWriter`, so AI edits persist/broadcast like human ones.
+
+**`GET /health`** → `{ ok, version, minDesktopVersion, features }`. `features`: `notes-with-state`, `bootstrap-only`, `files-with-bytes`, `empty-files`, `access-board`, `skills`, `access-groups`, `baaldaignore`, `folder-delete-if-empty`, … Missing `features` = none. Desktops pick paths from it per server URL; per-item flags stay the fallback.
+
+### Auth and members
+- `auth/auth.ts` — Better Auth, **argon2id** (`@node-rs/argon2`); `bearer` + `organization` plugins. **org = vault** (Local / Synced / Remote; roles owner/admin/member). Opaque session token (instant revocation), client-side only in the OS keychain. Invitations last `INVITATION_EXPIRES_HOURS` (7 days) and may carry an access level (`invitation_access`, applied on accept by `afterAcceptInvitation` and the join-code path, `src/members/`) or `groupIds` (both ⇒ 400 `access_or_groups`; a level also leaves the `auto_join` groups, `invitation-access.ts`).
+- Desktop "Remember password" (`rememberedPassword.ts`) is an explicit opt-in: only the last good password, in the keychain, bound to server URL + email; logout keeps it, the switch deletes it. No password in localStorage.
+- Sign-in throttle (`auth/signin-throttle.ts`, `signin_throttle`): 5 failures / 15 min lock that lowercased email from ANY IP (429 + `Retry-After`), 1 → 5 → 15 min; unknown addresses counted identically (#237).
+- Members routes: `GET /orgs/:orgId/members/overview` (roster, `last_seen_at`, levels for owner/admin, `invitedBy`); `GET /orgs/:orgId/members/:userId/activity` (`joined`/`created`/`edited`/`accessGranted`, filtered to the CALLER's readable set; owner/admin or self); `DELETE /orgs/:orgId/members/:userId/shares` (Reset to groups only: one transaction deletes every per-user row, disconnects docs that left the readable set; same manager rule); `POST /orgs/:orgId/invitations`. Promoting to admin (`PATCH /orgs/:orgId/members/:userId`) writes a per-user vault `edit` row unless one exists.
+- `audit/access.ts` (migration 056) records share/membership/join-default changes in `access_audit` via DB triggers + a transaction-local actor (Better Auth hooks add request identity; never confuse the hook's target user with its actor); history from migration on, no backfill, no content. `GET /api/orgs/:orgId/access-audit` / MCP `list_access_audit` (owner/admin).
+- Other routes: `registry`, `shares`, `orgs` (join codes), `appearance` (`GET|PUT /api/orgs/:orgId/appearance`, schema `appearance/schema.ts`, fan-out `appearance-changed`), `graph`, `sync-token`, `blobs`, `mcp`, `billing`, `public-links` (token is the capability; `GET /p/:token` renders via escape-first `render/note-html.ts`), `messages` (operator messages, `docs/MESSAGES.md`).
+
+### Permissions (`permissions/`)
+- `resolver.ts effectivePermission(userId, docId)`: owner/admin → edit; a note's **creator** → edit on it; else max of file/folder shares (walk `parent_id`) per-user or org-wide, plus vault-wide grants; a `locked` share caps at view even for admins. Ranks `edit=2 > view=1 > 0` (`locked`/`denied` only cap).
+- **The vault posture is a baseline for everyone** (`vaultBaseline`): Read-only caps every shortcut at view; a never-shared vault withdraws the owner/admin shortcut but keeps authorship; **`sealed`** (an org `denied` row on the vault) withdraws authorship too. An org grant on a folder/note still lifts out of a sealed vault; an *item* set Private drops those too. Creation follows reading (`vaultRootWritable` refuses root creates when sealed).
+- **A per-user vault row is that person's own level** (`personalVaultLevel`): replaces posture, join snapshot, role shortcut and authorship — `edit` everywhere, `view` at least view (groups still add), `denied` nothing (groups ignored); org folder/file grants don't lift it. **Among one user's own rows the deepest wins** in either direction; org `readonly`/`locked`/`denied` still cap per-user grants. `ResolverCache.personal` memoises it per request.
+- **Access groups** (migration 097; `groups/`, `routes/groups.ts`, MCP `list_groups`/`manage_group`): grants are `shares` rows with `principal_type='group'`, `view`/`edit`/`denied` (100). Within ONE group the deepest row decides (`rowsGroupGrant`; `groupReachInVault` for collections); groups combine highest-wins with everything else, after every branch; per-user caps and locks still cap them; a group can open a Private item or sealed vault. Only converted "Everyone" groups' rows (`shares.legacy_team_grant`) follow join snapshots. A "group may raise them" mark (`access_group_raises`, written by Let the group decide) goes when they leave the group, the group is deleted, on Reset, or when a setting just for them is written at or above its place (`clearRaiseMarks`, `access/bulk` and `POST /shares`). A group No access writes a group `denied` row where a grant from above reaches (`groupReachesFromAbove`), else removes the row. Group writes lock the group row `FOR SHARE`; `deleteGroup` takes `FOR UPDATE` (racing write → 404 `group_not_found`). `auto_join` groups take new members (trigger, owner excluded). `GET /locks` returns group `edit` rows as lifts and a group Can view as `readonly` (`reason: "group_view"`, id `group-view:<id>`) on the topmost visible view-only item.
+- **Lockstep:** `effectivePermission`, `resolveAccessForUser`, the indexed/cached paths, `vault-docs.ts vaultAccess` (the readable-set dual behind live sync, listings, folder tree, blobs, graph, MCP search, registry pull, `ready.revoked`), `http-gates.ts` `canEditFolder`/`vaultRootWritable`/`canCreateIn`, `POST /shares` and `GET /vaults/:id/locks`. No second permission algebra.
+- **Deletion and rename narrow by authorship** (`canDeleteItem`, `canRenameItem`; decided 2026-11-20 for rename): owners/admins anything; a plain member only what they created (no `created_by` = someone else's) → 403 `delete_not_creator` / `folder_has_others_items` / `rename_not_creator`, on top of edit access; a retitle is not a move. A move OUT to the root needs root creation (`canCreateIn(…, null)`) over HTTP and MCP, like a file move (2026-11-28). Checkpoint revert, restore and purge are exempt. Renaming someone else's note into a `(conflict …)` name is refused (409 `conflict_rename_refused`) and foreign renames are budgeted 100 per user+vault per 5 min (429 `rename_rate_limited`, `registry/rename-guard.ts`).
+- **Management stays role-based** (`shares.ts canManage`), so an owner can always undo. Public links and whole-vault checkpoint revert additionally need content access (403 `no_vault_wide_access`).
+- **Blobs** with a `doc_id` use the same resolver (`canReadAttachment`/`canWriteBlob`), so folder shares reach files. Hash-named `attachments/` blobs: readers of EVERY item see all (`readsWholeVault`), others only what a readable note references (`note_index.ref_text` / `ref_heads`, `blobs/ref-windows.ts`, migration 063, #343). A note's index gaining or losing a reference to a held drop sends one coalesced `registry-changed` (`refs.ts announceGainedRefs`), so those members' devices re-list; `blob_refs` extractor v3 (`BLOB_REFS_VERSION`) gates both the purge cleanup and the orphan sweep (`refsAreCurrent`). `canWriteAttachment` = any effective edit grant in the vault. Refusals carry `no_write_access`, checked before the `root_frozen` latch.
+- **Everyone row** (`PUT /api/orgs/:orgId/team-access`, owner/admin) ENFORCES: one transaction clears every org-principal folder/file row and upserts the vault row; per-user rows survive; `GET` returns mode, `posture` and overrides. Only a narrowing kicks sockets; `grantId` is stable; a no-op changes nothing. `GET /vaults/:id/locks` reports Read-only as a synthetic `vault:<orgId>` lock plus lifts.
+- **New vaults start on Only what's shared** (decided 2026-11-23): `POST /api/vaults` (first collection only) writes the org `denied` vault row, `join_default = private` and a per-user vault `edit` row for the creator. Later collections write nothing.
+- **Join snapshots** (migration 032; seeded once by 033): per-membership snapshot + ordered ACL revision; content that existed at the join follows the old join default; a later Everyone action has a newer revision and opens it.
+- **Access model conversion** (migration 101, logged in `access_personal_conversion(_rows|_snapshots)` for an exact undo; decided 2026-11-27, no group is created). Rule: nobody gains or loses anything, except owners/admins of never-shared vaults, who get Can edit everything. Can edit / Can view vaults: every member without one gets the team level as their own vault row, the org vault row becomes `denied`, team folder/file rows and join snapshots go, and per-person rows are written wherever the new state would answer differently (every folder that existed at a join, and everything under it). Sealed vaults untouched; never-shared vaults are not sealed (members keep what they write). Every org gets `join_default = private`; migration 103 sets `new_member_level` / the join code level to the lower of the old team level and the old New members setting. An admin who joins without a level gets Can edit everything (`applyAdminStart`). Rehearsed on a production copy 2026-11-28 (2.5M answers): no differences beyond the planned gain; an undo script restores the access tables exactly.
+- `POST /vaults/:vaultId/access-check` (member-gated, `ACCESS_CHECK_MAX` 2000, `runPool` at `config.backfillConcurrency`): per-doc `effectivePermission`; an id with no row in this vault is UNANSWERED, never `none`. `listDocsInVault`'s deleted branch resolves hard-deleted folder ancestry from `folder_tombstones` (`d.deleted_at >= n.created_at`) so a folder delete reaches share-only members as a deletion. Deleted-note permission queries expand ancestor prefixes and equijoin (no correlated prefix cross products).
+- Restricted folder listings keep per-user grants through an Everyone deny (empty folders too); ancestors of a readable item stay visible as navigation only. Tree-file authorship uses `files.created_by` everywhere (migration 050 backfill; 057 credits the owner only in sole-owner legacy vaults with no ACL rows).
+
+### Content, versions, deletion
+- `sync/hocuspocus.ts` — `onAuthenticate` verifies the per-doc JWT (`tokens/sync-token.ts`, HS256, `SYNC_TOKEN_TTL_SECONDS` 600) and re-resolves `effectivePermission` at connect (sets `readOnly`); `onChange` appends + schedules re-index; `disconnectDoc` kicks on revoke; a read-only socket's dropped edit is reported as a throttled `rejected` frame (`beforeSync`).
+- `yjs/persistence.ts` — binary-only: `doc_updates` log + `doc_snapshots` (compact past `COMPACTION_THRESHOLD`).
+- `versions/shrink-guard.ts` — both write paths report an update leaving ≤ 20 % of a ≥ 200-char note; the prior text becomes a `pre-shrink` version (#200). It never refuses (a CRDT client would re-push forever). `versions/recovery.ts` proposes restores; apply is a forward write with `pre-revert`, owner/admin.
+- **Checkpoints** (`versions/checkpoints.ts`, `capture.ts`, `revert.ts`): a note's FIRST content never triggers the daily checkpoint (`isFirstContent`: no snapshot, ≤ 1 update). Deferred while a device is mid-upload (note < `CHECKPOINT_DEFER_MS` 120 s old with no content, a `pending` blob, a `files` row with no ready blob), retried every `CHECKPOINT_DEFER_RETRY_MS` (30 s) up to `CHECKPOINT_MAX_DEFER_MS` (30 min). First content within `CHECKPOINT_TOPUP_WINDOW_MS` (1 h) of a structure-only capture tops it up. Captures pin binaries in `vault_checkpoint_blobs` (047); DB triggers retire pinned Postgres bytes into `checkpoint_blob_bytes` and drop them with the last pin (S3: `objectStillReferenced`); Postgres pins capped at `CHECKPOINT_BLOB_MAX_POSTGRES_BYTES` (2 GiB). Revert restores files under their SAME `files` id (clears `file_tombstones`; missing bytes or an occupied path ⇒ skipped and logged).
+- **No server Trash since 2026-11-19:** every soft delete (`trash/retention.ts softDeleteSet`) stamps `deleted_by` + `purge_after = now()`; `purgeDeletedSoon` purges 2 s later, `scrubPurgedContent` again at 60 s; the hourly sweep (`trash/scheduler.ts`, started only from `index.ts`) is the backstop; DB clock. Pushes into a deleted doc are refused (`trash/access.ts syncPermission`). Purge drops CRDT, versions, index, links, blob refs and per-note shares but KEEPS the `notes` row as a content-free tombstone (`purged_at`) so offline devices hear "deleted". Checkpoints keep captured text (`note_texts`), so a vault revert brings a purged note back. Old trash routes stay for old desktops (410 `purged`).
+
+### Sync write paths
+- **Registration with state** (`registry/seed-on-register.ts`; `POST /api/vaults/:vaultId/notes/batch` in `routes/bulk.ts`, `POST /api/notes`): optional `state` + `textSha256`, validated before any row (`invalid_state`, `note_too_large`). Registration runs unchanged (quota, `canCreateIn`, `root_frozen`, `path_folder_mismatch`, adopt-by-path, 23505); then `seedRegistered` applies via `applyDocPushBatch` with `expectEmpty` (live branch, shrink guard, fan-out, indexing intact — never a row+update CTE). State goes only to a row this call created or one already holding the SAME id. Per item `content` = `applied` | `covered` | `conflict` | `skipped` | `refused`, plus `sv`. Caps: 16 MiB body; with state ≤ `BATCH_MAX_DOCS` (100) and `BATCH_MAX_DECODED_BYTES` (4 MiB), one item up to `MAX_NOTE_MB` (400 `batch_too_large`). `registry-changed` is published AFTER the apply.
+- `POST /vaults/:vaultId/bootstrap` takes `only` (≤ 100 ids; unknown/unreadable silently dropped).
+- **One-step file upload** (`files-with-bytes`, migration 048 `blobs.pending_register`): `blobs/intent` may carry `register: { docId, relPath, folderId? }`; Pro gate + dry-run `registerFile` at intent; `complete` creates the `files` row in the same transaction that marks the blob ready. No `files` row without bytes (the pending sweep collects an uncompleted registration). Without the feature, the old `POST /api/files` + intent → PUT → complete flow.
+- `MAX_NOTE_MB` (10) ceiling in `beforeHandleMessage` and the MCP writer; migration 021 unique live path index (one path = one live note). Paths validate parent from path on every create/move (`registry/tree-ops.ts` `resolveParentFolder`/`planNoteMove`/`planFolderMove`; mismatch → 400 `path_folder_mismatch`).
+
+### Billing (`billing/`; managed Polar only, self-hosts unlimited)
+- Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row. `billing/plan.ts resolveAccountPlan` is the single plan resolver; `planEnforced()` = Cloud AND billing configured. `BILLING_MODEL=vault|team` (default `vault`; `team` is the shipped model).
+- **`team`:** Free = 2 people per account (owner counts), 1 synced vault, MCP included, no standalone-file sync (embeds under `attachments/` still sync), hidden ceilings `ABUSE_MAX_NOTES` (100000) / `ABUSE_MAX_STORAGE_MB` (10240). Team = $10/seat/mo or $110/seat/yr, min `TEAM_MIN_SEATS` (3), owner buys seats (402 `seat_limit_reached`; pending invites reserve seats). Billing unit = account (`billing/accounts.ts`). Lapse (`billing/lapse.ts`) makes every attached vault sync read-only: 402 `account_read_only`, synthetic `billing:<orgId>` lock (`billing_lapsed`); local files stay editable. Account routes: `GET /api/billing/account` (+ `/usage`, `/seats/preview`), `POST …/account/checkout|cancel|resume|portal`, `PATCH …/account/seats`, `POST /api/billing/orgs/:orgId/move`; the old per-org checkout answers 409 `upgrade_in_new_app`. Legacy subscribers keep their price via a Polar fixed discount (`scripts/billing/move-legacy-subs.ts`). Webhooks resolve by `provider_subscription_id` first; an event naming a billing account this server never had and none of its vaults (another server's checkout on the shared Polar org) is claimed and answered 202, never a 500 retry loop. Old 402 codes (`attachment_sync_requires_pro`, `vault_limit_reached`, `member_limit_reached`) stay for old desktops; new: `account_read_only`, `upgrade_in_new_app`, `transfer_retired`. **`vault` (legacy):** per-vault Pro, `FREE_MAX_VAULTS` (2).
+- One vault = one subscription (409 `already_subscribed`). Deleting a vault cancels at period end first and aborts if the provider refuses (502 `subscription_cancel_failed`; Better Auth org delete off). The row outlives the org as a tombstone (migration 024) so late webhooks are stored. Note quota checks serialize on a per-vault advisory lock (`billing/note-quota.ts`); `note_limit_reached` never blocks reconciling existing notes.
+
+### MCP (`mcp/`, JSON-RPC 2.0 over Streamable HTTP at `POST /api/mcp`; no SSE)
+- Tools: `list_vaults`, folders (`list/create/move/delete_folder`), notes (`list/read/create/update/append/edit/move/delete_note`, `search_notes`), files (`list_attachments`, `read_attachment_text`, `move_file`, `delete_file`), skills (`list_skills`, `get_skill`, `read_skill_file`). Move/delete semantics live in `registry/tree-ops.ts` shared with HTTP. Deliberately no `attach_file`.
+- `read_note` returns `revision`; writes take `expectedRevision` checked under the doc writer's lock. `edit_note` anchors must match once (unless `all`); on no exact match `foldForMatch` retries ignoring CRLF, odd spaces, zero-width chars, curly quotes, dashes, NFC/NFD. EVERY refusal carries a code (`anchor_not_found`, `stale_revision`, `no_access`, …), counted as `mcp.tool.<name>.ok|refused[.<code>]|internal|ratelimited`. Lenient inputs (numbers as strings, `vaultId` as org id or name); deletes of already-deleted items answer `alreadyDeleted: true`; `append_note` takes `idempotencyKey`.
+- `delete_file` shares `deleteRegisteredFile` with `DELETE /api/files/:id`; `move_file` re-registers via `registerFile`; `delete_folder` refuses a non-empty folder unless `recursive: true`; structural tools broadcast `registry-changed` with a `null` origin. `search_notes` tags hits `kind: "note" | "file"` (`includeFiles: false` opts out); `list_attachments`/`read_attachment_text` serve EXTRACTED TEXT, never bytes (`filterReadableBlobs`). `list_folders` uses the same filtered listing as HTTP.
+- Token `mcp_…` (Vault Settings → MCP), scoped to one user+vault, same per-file ACL, sha256 stored only.
+
+### Other server pieces
+- **Skills** (`skills/`, `routes/skills.ts`, `mcp/skills.ts`; `docs/SKILLS.md`): own tables (`bytea`), free on every plan. Access by `delivery`/`everyone_access` + `skill_member_access` + `skill_group_access` (person wins). One draft per skill (`baseRevision`, 409 `stale_draft`); Publish → immutable version (409 `nothing_to_publish`); 500 skills/org, 1000 files / 5 MiB per file / 25 MiB per version. Changes publish `skills-changed` (PS `0x0f`). Bundle hash = sha256 over `relPath\0sha256\0(1|0)\n` sorted by UTF-8 bytes, identical in server and desktop `validate.ts`.
+- **Messages** (`messages/`, migration 095, `docs/MESSAGES.md`): `app_messages` (validated JSONB spec; unknown `condition` ⇒ nobody); desktops read `GET /api/messages` and post receipts per (message, user, org); admin routes need `x-baalda-admin-token` = `BAALDA_ADMIN_TOKEN` (404 otherwise); writes push `{t: "messages-changed"}` to `messages`-cap connections (scope all over `PS_MESSAGES_CHANGED` 0x10; scope user over `user:{id}`).
+- `metrics/sync-metrics.ts` — in-process counters; one `[sync-metrics]` line per 60 s of DELTAS when changed. Ids and counts only, never paths or text.
+- `index/` — `embedder.ts` dependency-free 256-dim hashed bag-of-words (works air-gapped; an `OPENAI_API_KEY` swap is noted, not wired); `indexer.ts` derives search + wikilink graph from Yjs. `search_notes` ranks `blob_text` beside `note_index`.
+- `db/migrate.ts` — plain SQL `migrations/*.sql` in filename order, tracked in `_migrations`.
+- **Tables:** Better Auth (camelCase quoted, migration 001) + app tables (all ids `TEXT`). Non-obvious: `notes.id` == `doc_id` (soft delete `deleted_at`); `blobs.doc_id` = the `files` row or NULL for an `attachments/` drop (028); `blob_text` is derived and purgeable; `public_links` one token per note, revoke = DELETE.
+- **Env vars:** every one is documented in `.env.example`. `JWT_SECRET` signs Better Auth and sync JWTs (change in prod). Email (`EMAIL_FROM` + `SMTP_URL`|`RESEND_API_KEY`) turns on reset/verification/invites; `BUG_REPORT_EMAIL` turns on the bug icon; unset billing vars ⇒ unlimited; `CORS_ORIGINS` optional. Any new server env var name must also be listed in `app/.railway/railway.ts`.
+
+## Vault keys (`src/crypto/`; details `docs/VAULT_KEYS.md`)
+
+Encryption at rest with **client-held** keys. **NOT end-to-end encryption**: a running server sees plaintext and keys in memory; the DB, backups and admin tools alone yield ciphertext for sealed columns. Never describe it as E2EE or zero-knowledge.
+- Each vault has a 32-byte key (VK) only members' devices keep; users have X25519 key pairs (`user_keys`); VK sealed per member per generation (`vault_key_wraps`); the server keeps only `vaults.vk_check`.
+- Transport: HTTP `X-Baalda-VK`; per-doc sockets `<jwt>.<vk-b64>` (`splitSyncToken`); vault channel `hello`. **Never logged** (`redactToken`, `vk-redaction.test.ts`).
+- Sealed (AES-256-GCM, AAD = table|column|vault|row): `doc_updates.update_enc`, `doc_snapshots.snapshot_enc`, `note_index.search_enc` (+ `search_score_enc`, `ref_enc`: the attachment reference excerpt the scoped list opens instead of the body, healed on read; a trigger drops it when the body changes without one), `blob_text.search_enc`, `note_texts.content_enc`, `public_links.token_enc`. NOT encrypted: file/attachment BYTES, titles, paths, folder names, sizes, timestamps, membership/ACL rows, `note_links` titles, `checkpoint_blob_bytes`, Postgres `blobs.data`, skills files.
+- **Rule 1:** every content request/socket presents VK itself, checked against `vk_check`. `key-cache.ts` serves ONLY server-internal background work, filled by a connected vault channel (+10 min) and by verified requests (`holdForRequest`, 15 min), never by read-only public-link views; `get()` returns a copy the caller zeroes. Without a key, indexing goes `index_pending`.
+- **Rule 2:** only a member's device seals VK to a new member/device; the server only queues. Devices pin member key fingerprints (TOFU). Seamless keys: invite-time sealing (`invitation_vault_keys`), invite-link fragment secret (`#k=`), join codes `<code>-<device secret>` (`vault_join_wraps`); key holders service `keys/requests` incl. `kind: "missing"`.
+- **Rule 3:** MCP tokens and public links store hashes plus VK wrapped under an HKDF of the token secret (`mcp_token_keys`, `public_links.wrapped_vk`), unwrapped per call, never cached.
+- Password unlock (`user_keys.priv_wrapped_password`, `POST /api/me/keys/unlock`, HMAC `ACCOUNT_KEY_PEPPER`; the owner chose this 2026-11-01). The pepper also makes login hashes `p1$` and **must never change**; `auth/pepper-boot.ts` refuses to boot on a different or missing pepper. Google-only accounts and stale wraps fall back to one-click approval. A session alone never yields keys. No recovery kit.
+- Churn brakes (`crypto/key-churn.ts`): ≤ 3 account-key replacements/user/24 h, ≤ 10 device registrations and ≤ 10 approvals/user/hour → 429 `rate_limited`.
+- **Conversion** (`crypto/conversion.ts`): a device registers a pending key and allow-lists existing MCP tokens/links by HMAC under VK; they upgrade on next use; `keys/init` accepts when the check bytes match (`lockGateRows` + `initGate` in one transaction); it no longer waits for connections (2026-11-02). Since 0.1.102 the claiming device seals the pending key to other owners/admins (`vault_pending_key_shares`). The gate ignores links with no `last_viewed_at` in 30 days and OAuth rows `oauth_grant_consumed` over an hour ago.
+- Every vault converts automatically while `VAULT_KEY_CONVERSION` is on (decided 2026-11-01), only when `conversionSafe` holds; owners with no other way back see `SaveVaultKeyCard` (24-word key file, `wordsToVaultKey`). Launch safety net: while `KEY_RECOVERY_PUBLIC_KEY` is set, vault keys are sealed to an offline key (`vault_key_recovery`; rescue script + `KEY_RECOVERY_ADMIN_TOKEN`); the offline key holder can read any vault and the website must say so. It stays on until the owner switches it off; unset ⇒ every copy deleted.
+- Desktops below `VAULT_KEYS_MIN_DESKTOP` (0.1.98, no override) get `426 client_outdated` (`reason: vault_keys`) on keyed vaults at every entry point, sockets at the token mint; the desktop sends `clientVersion` on every non-auth `/api/*` call.
+- **Zero data loss:** plaintext is cleared only after a per-row decrypt-and-compare (`crypto/null-out.ts`: backfill complete, `VAULT_PLAINTEXT_RETENTION_DAYS` (30) passed, under the doc's exclusive `withDocWriteLock`, so compaction can't fold cleared plaintext back; derived `note_index`/`blob_text` plaintext is cleared when the sealed entry is current, `sealedIsCurrent`); `key_required` changes nothing server-side; compaction verifies the sealed snapshot first (`compactConverting`); key generations are never destroyed; when in doubt, refuse and let the client retry.
 
 ## Conventions & gotchas
 
-- **`doc_id` is identity.** Never resolve or store a note by path across layers.
-- **`rel_path` and `folder_id` must agree.** A note/file/folder's location is stored twice; the server
-  derives or validates the parent from the path on every create and move
-  (`registry/tree-ops.ts` `resolveParentFolder` / `planNoteMove` / `planFolderMove`; mismatch → 400
-  `path_folder_mismatch`) and the root-freeze latch judges the *resolved* parent. Migration 022 repaired
-  the drift that let a phantom root folder appear (2026-08-27).
-- **`.context/` is sacred and hidden** — never walk, sync, or index it. It holds `index.sqlite`, the CRDT
-  store, and `config.json` (server vault id + doc-id map; travels with the vault).
-- **The folder's stamp outranks the profile's binding when it names a vault this account cannot see.**
-  `planTurnOnSync` (`lib/vault/turnOnSync.ts`) returns `blocked-foreign` (`foreignFolderMessage`)
-  even when `orgVaults` binds the path to a visible vault, and `planUnsyncStamp` takes `boundOrgId`
-  so a stamp/binding mismatch answers "foreign" locally without asking the server. Before, a
-  production vault id 404'd on a local server, showed the "made local only" banner and could wipe
-  the stamp.
-- **Reuse patterns, not code.** We study OSS references (Noteriv, Relay, Hocuspocus, Better Auth) but write
-  our own implementation.
-- **Debounce timings are load-bearing:** watcher/ingest ~150ms, egest ~300ms. Changing them affects the
-  echo-loop and convergence tests.
-- **IDs are `TEXT`, not `UUID`** server-side (Better Auth emits TEXT; lets `shares.resource_id` reference a
-  folder or a file, and lets clients supply stable doc_ids).
-- **Intentional spec deviations** (documented in-code): `index.rs` uses a *self-contained* FTS5 table (not
-  the spec's contentless one) because `snippet()` needs content; `SearchPanel` renders the Rust FTS snippet
-  via `dangerouslySetInnerHTML`, relying on Rust emitting only sanitized `<mark>` tags.
-- Product identifier: `com.baalda.context`; Tauri `productName` is "Baalda".
-- **Terminology — "vault" (the workspace→vault rename).** *Vault* is the single user-facing name for the
-  unified entity (Local / Synced / Remote states). It maps to two internal things that are 1:1 in practice:
-  (1) the **user-facing vault = the Better Auth `organization`** — its data key stays `organizationId`; only
-  the *concept name* changed (identifiers like `refreshVault`/`joinVault`, UI copy, docs); and (2) the
-  **note collection = the Postgres `vaults` table row** (`vaultId`), the storage child that keeps all its
-  `vault*` wire/DB names. The rename went all the way down (pre-launch, no compat window): migration 013
-  renamed `shares`/`blobs.workspace_id` → `org_id` (org-id columns; `vault_id` already means the
-  collection), rewrote the org-wide grant value `resource_type = 'workspace'` → `'vault'` (+ CHECK), and
-  renamed `mcp_oauth_workspace` → `mcp_oauth_vault`; the 402 tokens are `vault_limit_reached` /
-  `member_limit_reached`, the billing JSON fields `vaultsPerUser` / `membersPerVault`, and the env var
-  `FREE_MAX_VAULTS`. The word *workspace* now survives only as pnpm's `pnpm-workspace.yaml` tooling
-  term plus the Rust `#[serde(alias = "workspace_root")]` that keeps pre-rename desktop config files
-  loadable.
+- **`doc_id` is identity.** Never resolve or store a note by path across layers. IDs are `TEXT`, not `UUID`, server-side (Better Auth emits TEXT; `shares.resource_id` references a folder or file; clients supply stable doc ids).
+- **`rel_path` and `folder_id` must agree** (validated on every create/move; migration 022 repaired a phantom root folder).
+- **`.context/` is sacred and hidden** — never walk, sync or index it. It holds `index.sqlite`, the CRDT store and `config.json` (server vault id + doc-id map; travels with the vault).
+- **The folder's stamp outranks the profile's binding** when it names a vault this account can't see: `planTurnOnSync` (`lib/vault/turnOnSync.ts`) returns `blocked-foreign`; `planUnsyncStamp` takes `boundOrgId` so a mismatch answers "foreign" locally.
+- **Server switching** (Account Settings → Connection, up to eight addresses, tokens per server in the keychain): flush edits and close the vault before changing the shared API client; clear the old bearer before exposing the new URL; then choose a destination vault explicitly.
+- **Attachments on Free:** `attachments/` embeds without a standalone `files` identity sync on Free (quotas + blob ACLs); a standalone-file Pro refusal must not stop embedded transfers. Existing embed links and blob ids are kept; missing embedded paths are restored without overwriting occupied ones; legacy whole-list Pro refusals are re-probed after a one-minute cooldown. Rich copy embeds bytes in sanitized clipboard HTML (paste imports them); plain-text fallback stays Markdown.
+- **Read-only recovery** refuses an empty server state over populated local bytes/CRDT (same as the bridge's guard). Failed folder removals keep their server identities (parents included, across restart); filesystem failures are distinct from non-empty folders.
+- **HTML previews** compare content on watcher notifications, including `unchanged` echoes (the preview may hold the empty pre-sync doc); identical HTML never reloads interactive frames.
+- **Linked dashboard tabs** (Claude/ChatGPT) use `dashboard_remote.rs` native child webviews (Tauri `unstable` multi-webview): no IPC or vault bridge; caller-checked commands must use the main `Webview` identity (a multi-view window is no longer a `WebviewWindow`); React owns bounds; viewers hide under overlays. Shared Home/pins ride `vault_appearance` with stable note ids; references register before publishing, and an active shared Home follows a changed vault Home. Hiding Home unsets the personal Home and disables Home navigation while hidden (the team setting stays). Publishing Home waits for the normal upload, then gives every current member read access to that one file (a per-user read-only share for anyone excluded), committed with the pointer; nothing else changes.
+- **Reuse patterns, not code** from OSS references (Noteriv, Relay, Hocuspocus, Better Auth).
+- Product identifier `com.baalda.context`; Tauri `productName` "Baalda".
+- **Terminology:** *vault* is the one user-facing name. It maps to (1) the Better Auth `organization` (data key stays `organizationId`) and (2) the Postgres `vaults` row, the note collection (`vaultId`, keeps its `vault*` names). Migration 013 finished the workspace→vault rename (`shares`/`blobs.org_id`, `resource_type = 'vault'`, `mcp_oauth_vault`, `vault_limit_reached`/`member_limit_reached`, `vaultsPerUser`/`membersPerVault`, `FREE_MAX_VAULTS`). "workspace" survives only in pnpm tooling and the Rust `#[serde(alias = "workspace_root")]`.
 
-## Build state (see `docs/STATUS.md`)
+## Build state (`docs/STATUS.md`)
 
-Phases 0–3 are complete and wired end-to-end: local Obsidian-lite → local CRDT bridge → sync server
-(multi-device) → team collaboration (orgs, folder ACL, presence, attachments) — plus MCP, locks, join
-codes, semantic search, and a graph view. Deferred to Phase 4: structural WYSIWYG CRDT, richer vector
-search, AI-as-CRDT-peer, at-rest encryption, OAuth, and an iOS app.
-
-Embedded attachments under `attachments/` without a standalone `files` identity sync on Free,
-subject to storage quotas and existing blob ACLs. Bytes remain in the configured blob store,
-not in Yjs. A standalone-file Pro refusal must not stop embedded transfers. Rich note copy
-embeds attachment bytes in sanitized clipboard HTML; paste imports them into the destination
-vault. Plain-text clipboard fallback remains Markdown.
-
-Existing embedded links and blob IDs are retained across the Free attachment-policy
-update; no note rewrite or blob migration is required. Missing embedded paths are
-restored even if identical bytes already exist at another local path, without
-overwriting occupied paths. Legacy whole-list Pro refusals can be re-probed on
-a sync pass after a one-minute cooldown, allowing a running updated desktop to
-recover when its server is upgraded.
-
-On Cloud servers with billing on, Free vaults can register up to `ABUSE_MAX_NOTES` (100000) live
-notes under `BILLING_MODEL=team` (a hidden abuse ceiling; Free is marketed unlimited) and 20,000
-under the legacy `vault` model. New note
-registration and MCP creation serialize quota checks with the same per-vault
-session advisory lock (`billing/note-quota.ts`). Existing notes remain adoptable
-at/above the cap; no data is deleted. `note_limit_reached` prompts an upgrade but
-does not stop reconciliation of existing notes. Self-hosters and
-active paid subscriptions bypass this note cap.
-
-Linked Claude/ChatGPT dashboard tabs use `dashboard_remote.rs` native child webviews
-(Tauri `unstable` multi-webview API). These HTTPS viewers have no remote IPC
-capabilities or vault bridge. Main-app commands requiring a caller must use the
-main `Webview` identity, since a multi-view window is no longer a `WebviewWindow`.
-React owns viewer bounds and lifetime; native viewers are hidden beneath app overlays.
-
-
-Shared Home and pins use the vault appearance channel with stable note IDs, not
-separate dashboard identities. Shared references are registered before publishing;
-clients resolve delayed references through the registry/index and refresh defaults
-on reconnect. An active shared Home follows a changed vault Home; an ordinary open
-file or personal Home does not. Hiding Home unsets the device's personal Home and
-disables effective Home navigation and startup while hidden, including inherited
-vault Home; the team's shared setting stays intact. Publishing Home waits for the
-normal note upload before applying its default view grant, which preserves existing editing access
-and adds no lock. Owners/admins can change it through normal sharing controls.
-Publishing Home also ensures every current member can read
-that file: an excluded member receives a normal per-user read-only file share,
-overriding file/ancestor restrictions only for Home. Existing view/edit access,
-parent-folder permissions and sibling files remain unchanged. The permission and
-Home pointer commit together, with ordinary ACL and appearance broadcasts.
-HTML previews compare file content on watcher notifications, including indexed
-`unchanged` echoes: the preview may still contain the empty pre-sync document even
-when the disk index already has the newly received content. Bridge echo guards
-remain unchanged, and identical HTML does not reload interactive frames.
-
-Restricted folder listings preserve per-user grants through an Everyone deny, including empty
-folders. Ancestors of a readable item remain visible as navigation paths without granting content
-access. MCP `list_folders` uses the same filtered listing. Deleted-note permission queries expand
-paths into ancestor prefixes and equijoin them; avoid restoring correlated prefix cross products.
-Read-only recovery refuses an empty server state over populated local bytes or CRDT content,
-matching the bridge's empty-write guard. Failed folder removals retain their server identities,
-including parent folders and across restart; filesystem failures are distinct from non-empty folders.
-
-Tree-file authorship uses `files.created_by` consistently in direct, prefetched and indexed
-permission resolution and readable-set listings. Explicit denies and vault postures still apply.
-Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
-it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments are
-DELETED from the ex-reader's disk outright (`registry.ts removeRevokedBinary`; since 2026-11-19 an
-edited copy too, no `.context/trash` copy). `attachments/` drops only now-hidden notes embed leave
-the same way (#408, `settleHiddenEmbeds`); a drop any local note still names is kept. A failed
-removal leaves the file and identity intact.
-
-Account Settings → Connection remembers up to eight normalized server addresses locally,
-with tokens kept only in the per-server OS keychain. One server is active at a time.
-Switching flushes pending edits and closes the previous vault before changing the shared
-API client; clear the old bearer before exposing the new URL. Choose a destination vault
-explicitly after switching, rather than reconciling the previous server's local folder.
+Phases 0–3 are complete end to end (local editor → CRDT bridge → multi-device sync → team collaboration with ACL, presence, attachments), plus MCP, locks, join codes, semantic search, graph view and vault keys. Deferred (Phase 4): structural WYSIWYG CRDT, richer vector search, AI-as-CRDT-peer, an iOS app.

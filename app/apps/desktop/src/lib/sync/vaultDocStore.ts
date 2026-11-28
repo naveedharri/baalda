@@ -31,6 +31,7 @@ import { createTauriBridgeIO } from "../bridge/adapter";
 import type { BridgeIO } from "../bridge/types";
 import * as ipc from "../ipc";
 import type { DocUpdateSink } from "./vaultSyncEngine";
+import { ackSvFromServerUpdate } from "./ackedSv";
 
 /** Default resident-doc cap (spec 05 §10; override via opts). */
 export const HOT_DOC_CAP = 100;
@@ -81,6 +82,25 @@ export function createIpcManifestStore(epoch?: ipc.VaultEpoch): ManifestStore {
 export interface VaultDocStoreOptions {
   /** Resolve a docId to its vault-relative path (from the registry). */
   resolvePath: (docId: string) => string | null;
+  /**
+   * The doc's file just left its path on disk and the session has not yet
+   * decided whether that was a rename or a delete (the disk-delete grace
+   * window and the drain after it). Writing a teammate's update now would
+   * recreate the old path: the drain then finds the file "back", pairs
+   * nothing, and the renamed copy is left unsynced beside a resurrected
+   * original. Such updates are parked and applied by {@link settleParked}
+   * once the hold ends, at whatever path the registry then gives.
+   */
+  holdUpdates?: (docId: string) => boolean;
+  /**
+   * Is the doc's file missing on disk? A background apply for a registered
+   * note whose file is gone must not recreate it: the person just renamed or
+   * deleted it (a note, or the folder around it), and the disk-delete drain
+   * judges which. Writing the old path first is what made the drain find it
+   * "back", pair nothing and fork the note. Parked instead, and applied by
+   * {@link settleParked} once a pull has placed the doc again.
+   */
+  fileMissing?: (path: string) => Promise<boolean>;
   io?: BridgeIO;
   hotCap?: number;
   /** A cold apply found (and merged) an EXTERNAL edit on disk — bytes the doc
@@ -100,6 +120,16 @@ export interface VaultDocStoreOptions {
    * had already handed us over one socket apiece.
    */
   onConverged?: (docId: string) => void;
+  /**
+   * The server just sent these ops for `docId` (every update this store
+   * applies came from the server: channel frames, bootstrap merges, parked
+   * re-applies). `sv` is the UPDATE's own state vector, never the local doc's,
+   * so it covers only ops the server holds and can never vouch for unsent local
+   * work. Recording it as an acknowledgement (`registry.recordAck`) keeps a
+   * teammate's later edit from reading as this device's own unsent work when
+   * access goes.
+   */
+  onServerOps?: (docId: string, sv: Uint8Array) => void;
   /**
    * A cold apply for a doc whose placeholder the registry DEFERRED: create the
    * file with this content in one create-only write and return the new state
@@ -133,8 +163,11 @@ interface HotEntry {
 export class VaultDocStore implements DocUpdateSink {
   private readonly io: BridgeIO;
   private readonly resolvePath: (docId: string) => string | null;
+  private readonly holdUpdates?: (docId: string) => boolean;
+  private readonly fileMissing?: (path: string) => Promise<boolean>;
   private readonly onExternalMerge?: (docId: string) => void;
   private readonly onConverged?: (docId: string) => void;
+  private readonly onServerOps?: (docId: string, sv: Uint8Array) => void;
   private readonly createDeferred?: VaultDocStoreOptions["createDeferred"];
   private readonly hotCap: number;
   private readonly manifest: ManifestStore;
@@ -182,8 +215,11 @@ export class VaultDocStore implements DocUpdateSink {
   constructor(opts: VaultDocStoreOptions) {
     this.io = opts.io ?? createTauriBridgeIO();
     this.resolvePath = opts.resolvePath;
+    this.holdUpdates = opts.holdUpdates;
+    this.fileMissing = opts.fileMissing;
     this.onExternalMerge = opts.onExternalMerge;
     this.onConverged = opts.onConverged;
+    this.onServerOps = opts.onServerOps;
     this.createDeferred = opts.createDeferred;
     this.hotCap = opts.hotCap ?? HOT_DOC_CAP;
     this.manifest = opts.manifest ?? nullManifestStore;
@@ -217,6 +253,24 @@ export class VaultDocStore implements DocUpdateSink {
 
   knownDocs(): string[] {
     return [...this.svCache.keys()];
+  }
+
+  /**
+   * The CRDT sweep just removed every local doc outside `live` from SQLite.
+   * Forget their cached state vectors too: left here, every `hello` for the
+   * rest of the session claimed those dead docs, the server named them as
+   * tombstones on each reconnect, and each answer cost a registry pull. An open
+   * (hot) doc is never forgotten. Returns how many entries went.
+   */
+  forgetExcept(live: ReadonlySet<string>): number {
+    let gone = 0;
+    for (const docId of [...this.svCache.keys()]) {
+      if (live.has(docId) || this.hot.has(docId)) continue;
+      this.svCache.delete(docId);
+      this.dirtySv.delete(docId);
+      gone++;
+    }
+    return gone;
   }
 
   async stateVector(docId: string): Promise<Uint8Array | null> {
@@ -270,7 +324,18 @@ export class VaultDocStore implements DocUpdateSink {
   }
 
   async applyUpdate(docId: string, update: Uint8Array): Promise<void> {
+    if (this.onServerOps) {
+      try {
+        this.onServerOps(docId, ackSvFromServerUpdate(update));
+      } catch {
+        // Unreadable update: no acknowledgement, which only keeps the gate strict.
+      }
+    }
     if (docId === this.suppressed) return; // open note: its own provider owns it
+    if (this.holdUpdates?.(docId)) {
+      this.park(docId, update);
+      return;
+    }
     const entry = this.hot.get(docId);
     if (entry) {
       entry.bridge.applyRemote(update);
@@ -303,7 +368,7 @@ export class VaultDocStore implements DocUpdateSink {
       this.hot.delete(docId);
       const i = this.recent.indexOf(docId);
       if (i !== -1) this.recent.splice(i, 1);
-      await this.retire(entry.bridge);
+      await this.retireHeld(docId, entry.bridge);
     }
   }
 
@@ -312,7 +377,7 @@ export class VaultDocStore implements DocUpdateSink {
     if (entry) {
       this.hot.delete(docId);
       // Flush any pending write, then tear down — access is gone, so stop syncing.
-      void this.retire(entry.bridge);
+      void this.retireHeld(docId, entry.bridge);
     }
     this.svCache.delete(docId);
     this.dirtySv.delete(docId);
@@ -427,7 +492,7 @@ export class VaultDocStore implements DocUpdateSink {
     if (!entry) return;
     this.hot.delete(docId);
     this.rememberSv(docId, Y.encodeStateVector(entry.bridge.doc));
-    await this.retire(entry.bridge);
+    await this.retireHeld(docId, entry.bridge);
   }
 
   hotBridge(docId: string): NoteBridge | null {
@@ -475,6 +540,14 @@ export class VaultDocStore implements DocUpdateSink {
   }
 
   // ---- durable manifest --------------------------------------------------
+
+  /** A doc's local log grew outside a bridge (the fork heal folded history in):
+   *  the manifest the next `hello` sends must say so, or the server never
+   *  learns this device holds ops it lacks. An open doc's bridge is the truth. */
+  noteLocalState(docId: string, sv: Uint8Array): void {
+    if (this.hot.has(docId)) return;
+    this.rememberSv(docId, sv);
+  }
 
   private rememberSv(docId: string, sv: Uint8Array): void {
     this.svCache.set(docId, sv);
@@ -536,6 +609,8 @@ export class VaultDocStore implements DocUpdateSink {
     const now = this.now();
     const ready: Array<[string, Uint8Array]> = [];
     for (const [docId, entry] of [...this.parked]) {
+      // Still being judged as a rename or a delete: neither applied nor dropped.
+      if (this.holdUpdates?.(docId)) continue;
       if (this.resolvePath(docId)) {
         this.unpark(docId);
         ready.push([
@@ -659,6 +734,14 @@ export class VaultDocStore implements DocUpdateSink {
         return;
       }
     }
+    // A registered note whose file left the disk (renamed, moved with its
+    // folder, deleted): never bring the old path back from here.
+    // Only for a doc this device already held (it had a file here): a new
+    // arrival or a pending bootstrap note has no file yet by design.
+    if (this.fileMissing && this.svCache.has(docId) && (await this.fileMissing(path).catch(() => false))) {
+      this.park(docId, update);
+      return;
+    }
     // Transient bridge: hydrate from local CRDT, apply the delta, write, persist,
     // evict. seedFromFile:false — the server feed is the source for background docs.
     const bridge = await NoteBridge.open(this.io, { docId, path, seedFromFile: false });
@@ -730,12 +813,28 @@ export class VaultDocStore implements DocUpdateSink {
       const e = this.hot.get(lruId)!;
       this.hot.delete(lruId);
       // Keep the svCache entry so the manifest stays cheap after eviction.
-      void this.retire(e.bridge);
+      void this.retireHeld(lruId, e.bridge);
     }
   }
 
   /** Flush a bridge's pending write, then tear it down. Never throws, and always
    *  destroys — a failed flush must not leak the bridge's observers. */
+  /**
+   * Retire a bridge that just left the hot tier, holding the doc's cold chain
+   * until it is done. Between leaving `hot` and `whenPersisted` the bridge's
+   * last ops are in the file but not yet in the local CRDT store; a feed update
+   * (or a promote) for the doc in that window would open a second bridge from
+   * the store that lacks them, then either merge the file's copy of that text
+   * in again (a doubled edit) or egest over it (a lost one). Seen live
+   * 2026-11-22: an offline edit arrived twice when the reconnect's push
+   * demoted the note just as the backfill delivered a teammate's edit to it.
+   */
+  private retireHeld(docId: string, bridge: NoteBridge): Promise<void> {
+    const done = this.retire(bridge);
+    this.holdUntil(docId, done);
+    return done;
+  }
+
   private async retire(bridge: NoteBridge): Promise<void> {
     try {
       await bridge.flushEgest();

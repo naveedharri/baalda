@@ -237,10 +237,10 @@ describe("MCP server", () => {
       const adminToken = await tokenFor(admin, org);
 
       expect((await call(ownerToken, "get_access_default")).data.mode).toBe("private");
-      expect(
-        (await call(adminToken, "set_access_default", { mode: "readonly" })).data.mode,
-      ).toBe("readonly");
-      expect((await call(ownerToken, "get_access_default")).data.mode).toBe("readonly");
+      // New members always start on Only what's shared (2026-11-25).
+      expect(JSON.stringify(await call(adminToken, "set_access_default", { mode: "readonly" }))).toContain("join_default_fixed");
+      expect((await call(adminToken, "set_access_default", { mode: "private" })).data.mode).toBe("private");
+      expect((await call(ownerToken, "get_access_default")).data.mode).toBe("private");
 
       const listed = await call(ownerToken, "list_resource_access", {
         resourceType: "folder",
@@ -952,6 +952,27 @@ describe("MCP server", () => {
       await seedVaultGrant(org, "edit");
       token = await tokenFor(owner, org);
       registryBroadcasts.length = 0;
+    });
+
+    it("a move naming nothing to change is refused, never answered as done", async () => {
+      // An assistant wrote `newPath`; the note stayed put and the tool said ok.
+      const note = await call(token, "create_note", { vaultId: vault, relPath: "stay.md", title: "Stay" });
+      const docId = note.data.docId as string;
+      registryBroadcasts.length = 0;
+      const res = await call(token, "move_note", { docId, newPath: "Elsewhere/stay.md" });
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain("relPath");
+      expect(res.text).toContain("not recognised: newPath");
+      const folder = await call(token, "create_folder", { vaultId: vault, name: "F", path: "F" });
+      const fres = await call(token, "move_folder", { folderId: folder.data.folderId as string, to: "G" });
+      expect(fres.isError).toBe(true);
+      expect(fres.text).toContain("not recognised: to");
+      // A null that `optStr` drops is no change either.
+      expect((await call(token, "move_note", { docId, newPath: "x.md", relPath: null })).isError).toBe(true);
+      const { rows } = await pool.query("SELECT rel_path FROM notes WHERE id = $1", [docId]);
+      expect(rows[0].rel_path).toBe("stay.md");
+      // A real move (folderId null = the root, where it already is) still answers.
+      expect((await call(token, "move_note", { docId, folderId: null })).isError).toBe(false);
     });
 
     it("refuses moving a note or folder OUT to a frozen root (HTTP parity)", async () => {

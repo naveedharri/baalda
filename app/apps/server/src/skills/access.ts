@@ -20,6 +20,11 @@ import type {
  * the manifest (what installs), the catalog, a skill's page and versions, and
  * MCP. Owners and admins always see every skill to manage it, but their own
  * effective level still decides what installs on their computer.
+ *
+ * Access groups (migration 097, `skill_group_access`) only add: without a row
+ * of their own, a person gets the higher of the Everyone row and every group
+ * they are in (required > optional > none). A person's own row still wins
+ * either way, like a person's vault level beats their groups for notes.
  */
 
 export const LEVELS: readonly SkillAccessLevel[] = ["required", "optional", "none"];
@@ -35,10 +40,65 @@ export function everyoneLevel(row: { delivery: SkillDelivery; everyone_access: s
 }
 
 /** The caller's effective level, given `s` (skills) and the join below. */
-export const MY_LEVEL_SQL = `COALESCE(sma.level, CASE WHEN s.everyone_access = 'none' THEN 'none' ELSE s.delivery END)`;
+/** The Everyone row raised by the caller's groups (`sgl`, see {@link myLevelJoin}). */
+export const INHERITED_LEVEL_SQL = `CASE
+    WHEN (s.everyone_access <> 'none' AND s.delivery = 'required') OR sgl.level = 'required' THEN 'required'
+    WHEN s.everyone_access <> 'none' OR sgl.level = 'optional' THEN 'optional'
+    ELSE 'none' END`;
+export const MY_LEVEL_SQL = `COALESCE(sma.level, ${INHERITED_LEVEL_SQL})`;
 /** `param` names the user id placeholder; a null user matches no row. */
 export function myLevelJoin(param: string): string {
-  return `LEFT JOIN skill_member_access sma ON sma.skill_id = s.id AND sma.user_id = ${param}`;
+  return `LEFT JOIN skill_member_access sma ON sma.skill_id = s.id AND sma.user_id = ${param}
+  LEFT JOIN LATERAL (
+    SELECT CASE WHEN bool_or(sga.level = 'required') THEN 'required'
+                WHEN bool_or(sga.level = 'optional') THEN 'optional' END AS level
+      FROM skill_group_access sga
+      JOIN access_group_members agm ON agm.group_id = sga.group_id
+     WHERE sga.skill_id = s.id AND agm.user_id = ${param}
+  ) sgl ON TRUE`;
+}
+
+const RANK: Record<SkillAccessLevel, number> = { none: 0, optional: 1, required: 2 };
+export function maxLevel(a: SkillAccessLevel, b: SkillAccessLevel | undefined): SkillAccessLevel {
+  return b !== undefined && RANK[b] > RANK[a] ? b : a;
+}
+
+/** Group rows for these skills: skill id → group id → level. */
+export async function groupLevels(db: Db, skillIds: string[]): Promise<Map<string, Map<string, SkillAccessLevel>>> {
+  const out = new Map<string, Map<string, SkillAccessLevel>>();
+  if (skillIds.length === 0) return out;
+  const { rows } = await db.query<{ skill_id: string; group_id: string; level: SkillAccessLevel }>(
+    "SELECT skill_id, group_id, level FROM skill_group_access WHERE skill_id = ANY($1)",
+    [skillIds],
+  );
+  for (const r of rows) {
+    const m = out.get(r.skill_id) ?? new Map<string, SkillAccessLevel>();
+    m.set(r.group_id, r.level);
+    out.set(r.skill_id, m);
+  }
+  return out;
+}
+
+/** user id → their group ids, for the org. */
+export async function memberGroupMap(db: Db, orgId: string): Promise<Map<string, string[]>> {
+  const { rows } = await db.query<{ user_id: string; group_id: string }>(
+    "SELECT user_id, group_id FROM access_group_members WHERE organization_id = $1",
+    [orgId],
+  );
+  const out = new Map<string, string[]>();
+  for (const r of rows) out.set(r.user_id, [...(out.get(r.user_id) ?? []), r.group_id]);
+  return out;
+}
+
+/** Everyone row raised by the person's groups (no own row). */
+export function inheritedLevel(
+  everyone: SkillAccessLevel,
+  userGroups: string[] | undefined,
+  groups: Map<string, SkillAccessLevel> | undefined,
+): SkillAccessLevel {
+  let level = everyone;
+  for (const g of userGroups ?? []) level = maxLevel(level, groups?.get(g));
+  return level;
 }
 
 type Db = pg.Pool | pg.PoolClient;
@@ -85,8 +145,11 @@ export function audienceOf(
   everyone: SkillAccessLevel,
   members: OrgMember[],
   own: Map<string, SkillAccessLevel> | undefined,
+  groups?: { byUser: Map<string, string[]>; levels: Map<string, SkillAccessLevel> | undefined },
 ): SkillAudience {
-  const having = members.filter((m) => (own?.get(m.id) ?? everyone) !== "none");
+  const having = members.filter(
+    (m) => (own?.get(m.id) ?? inheritedLevel(everyone, groups?.byUser.get(m.id), groups?.levels)) !== "none",
+  );
   return {
     everyone: having.length === members.length,
     count: having.length,
@@ -113,15 +176,27 @@ export async function getSkillAccess(orgId: string, skillId: string, db: Db = po
   const everyone = everyoneLevel(row);
   const members = await orgMembers(db, orgId);
   const own = (await personalLevels(db, [skillId])).get(skillId);
+  const groups = (await groupLevels(db, [skillId])).get(skillId);
+  const byUser = await memberGroupMap(db, orgId);
+  const { rows: allGroups } = await db.query<{ id: string; name: string; color: string | null }>(
+    "SELECT id, name, color FROM access_groups WHERE organization_id = $1 ORDER BY lower(name), id",
+    [orgId],
+  );
   return {
     everyone,
+    groups: allGroups.map((g) => ({
+      groupId: g.id,
+      name: g.name,
+      color: g.color,
+      level: (groups?.get(g.id) ?? null) as "required" | "optional" | null,
+    })),
     people: members.map((m) => ({
       userId: m.id,
       name: m.name,
       email: m.email,
       image: m.image,
       role: m.role,
-      level: own?.get(m.id) ?? everyone,
+      level: own?.get(m.id) ?? inheritedLevel(everyone, byUser.get(m.id), groups),
       own: own?.has(m.id) ?? false,
     })),
   };
@@ -131,6 +206,8 @@ export type SkillAccessChange = {
   everyone?: SkillAccessLevel;
   /** `null` = back to the Everyone row. */
   people?: { userId: string; level: SkillAccessLevel | null }[];
+  /** A group's row: required/optional, or `null` to remove it. */
+  groups?: { groupId: string; level: "required" | "optional" | null }[];
 };
 
 /**
@@ -179,6 +256,29 @@ export async function setSkillAccess(
         }
       }
     }
+    const groups = change.groups ?? [];
+    if (groups.length > 0) {
+      const ids = [...new Set(groups.map((g) => g.groupId))];
+      const { rows } = await client.query<{ id: string }>(
+        // FOR SHARE: a group deleted at the same moment waits for this write
+        // (its cascade then removes these rows) or is already gone (refused).
+        "SELECT id FROM access_groups WHERE organization_id = $1 AND id = ANY($2) FOR SHARE",
+        [orgId, ids],
+      );
+      if (rows.length !== ids.length) throw new SkillError(400, { error: "group_not_found" });
+      for (const g of groups) {
+        if (g.level === null) {
+          await client.query("DELETE FROM skill_group_access WHERE skill_id = $1 AND group_id = $2", [skillId, g.groupId]);
+        } else {
+          await client.query(
+            `INSERT INTO skill_group_access (skill_id, group_id, level, set_by)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (skill_id, group_id) DO UPDATE SET level = EXCLUDED.level, set_by = EXCLUDED.set_by, set_at = now()`,
+            [skillId, g.groupId, g.level, actorId],
+          );
+        }
+      }
+    }
     const out = await getSkillAccess(orgId, skillId, client);
     await client.query("COMMIT");
     return out;
@@ -203,7 +303,9 @@ export async function memberSkillAccess(orgId: string, userId: string): Promise<
   }>(
     `SELECT s.id, s.name, coalesce(lv.description, s.draft_description) AS description, s.latest_version,
             ${MY_LEVEL_SQL} AS level, sma.level IS NOT NULL AS own,
-            CASE WHEN s.everyone_access = 'none' THEN 'none' ELSE s.delivery END AS everyone
+            -- What "Same as everyone" goes back to: the Everyone row raised by
+            -- this person's groups.
+            ${INHERITED_LEVEL_SQL} AS everyone
        FROM skills s
        LEFT JOIN skill_versions lv ON lv.skill_id = s.id AND lv.version = s.latest_version
        ${myLevelJoin("$2")}

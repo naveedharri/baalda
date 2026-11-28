@@ -39,6 +39,96 @@ function registry() {
   };
 }
 
+describe("VaultDocStore — updates held while a rename or delete is judged", () => {
+  it("never recreates the old path of a note renamed on disk, and lands at the new one", async () => {
+    // The person renamed old.md in Finder; inside the 2.5 s grace window a
+    // teammate's edit arrives. Writing it at old.md brought the old name back,
+    // so the drain paired nothing and the renamed file was left unsynced.
+    const server = serverDoc("hello");
+    const { io, fs } = makeHarness({ "new.md": "hello" });
+    const reg = registry();
+    reg.map("docR", "old.md");
+    let held = true;
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, holdUpdates: () => held });
+
+    await store.applyUpdate("docR", server.full());
+    await store.applyUpdate("docR", server.append(" world"));
+    expect(fs.get("old.md")).toBeUndefined();
+    expect(store.parkedDocs()).toEqual(["docR"]);
+
+    // A pull that completes mid-hold neither applies nor drops it.
+    await store.settleParked(store.parkMark());
+    expect(store.parkedDocs()).toEqual(["docR"]);
+
+    // The drain pairs the rename: the mapping moves, the hold ends.
+    reg.map("docR", "new.md");
+    held = false;
+    await store.settleParked(0);
+    expect(fs.get("old.md")).toBeUndefined();
+    expect(fs.get("new.md")).toBe("hello world");
+    expect(store.parkedDocs()).toEqual([]);
+  });
+});
+
+describe("VaultDocStore — a known note whose file left the disk", () => {
+  it("is not recreated at its old path by a background apply (folder renamed under it)", async () => {
+    const server = serverDoc("base");
+    const { io, fs } = makeHarness({ "A/n.md": "" });
+    const reg = registry();
+    reg.map("docF", "A/n.md");
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, fileMissing: async (p) => fs.get(p) === undefined });
+    await store.applyUpdate("docF", server.full());
+    expect(fs.get("A/n.md")).toBe("base");
+
+    // Finder renames A → B; the watcher has not reported it yet.
+    fs.externalWrite("B/n.md", fs.get("A/n.md")!);
+    fs.externalRemove("A/n.md");
+    await store.applyUpdate("docF", server.append(" + teammate"));
+    expect(fs.get("A/n.md")).toBeUndefined();
+    expect(store.parkedDocs()).toEqual(["docF"]);
+
+    // The drain pairs the folder move; the pull places the doc at B.
+    reg.map("docF", "B/n.md");
+    await store.settleParked(0);
+    expect(fs.get("A/n.md")).toBeUndefined();
+    expect(fs.get("B/n.md")).toBe("base + teammate");
+  });
+
+  it("holds a missing file's updates across pulls without dropping, growing or forcing a reconnect", async () => {
+    const server = serverDoc("base");
+    const { io, fs } = makeHarness({ "n.md": "" });
+    const reg = registry();
+    reg.map("docM", "n.md");
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, fileMissing: async (p) => fs.get(p) === undefined });
+    await store.applyUpdate("docM", server.full());
+    fs.externalRemove("n.md"); // deleted on disk; the drain will put it back
+    await store.applyUpdate("docM", server.append(" one"));
+    for (let i = 0; i < 4; i++) {
+      await store.applyUpdate("docM", server.append(` u${i}`));
+      await store.settleParked(store.parkMark()); // a pull that cannot place the file
+      expect(store.parkedDocs()).toEqual(["docM"]);
+      expect(fs.get("n.md")).toBeUndefined();
+    }
+    expect(store.takeOverflowed()).toEqual([]);
+    // The put-back recreates the file; the next settle lands every held edit.
+    fs.externalWrite("n.md", "base");
+    await store.settleParked(store.parkMark());
+    expect(store.parkedDocs()).toEqual([]);
+    expect(fs.get("n.md")).toBe("base one u0 u1 u2 u3");
+  });
+
+  it("still creates a brand-new arrival's file (no file yet is normal there)", async () => {
+    const server = serverDoc("fresh");
+    const { io, fs } = makeHarness({});
+    const reg = registry();
+    reg.map("docN", "new.md");
+    const store = new VaultDocStore({ io, resolvePath: reg.resolvePath, fileMissing: async (p) => fs.get(p) === undefined });
+    await store.applyUpdate("docN", server.full());
+    expect(store.parkedDocs()).toEqual([]);
+    expect(fs.get("new.md")).toBe("fresh");
+  });
+});
+
 describe("VaultDocStore — parked updates for unmapped docs", () => {
   it("parks a backfill that beats the registry pull, then writes it once the doc maps", async () => {
     const { io, fs } = makeHarness({ "n.md": "" }); // the pull's 0-byte placeholder

@@ -326,7 +326,7 @@ function useFailures(nonce: number): FailedEntry[] {
 
 
 /** Reconcile kinds that are notices with no durable source of their own. */
-const LOGGED_RECONCILE: ReadonlySet<ReconcileKind> = new Set(["restoredFromServer", "folderKept"]);
+const LOGGED_RECONCILE: ReadonlySet<ReconcileKind> = new Set(["restoredFromServer", "folderKept", "unsentRemoved"]);
 const HELD_ID = "h:bulk-delete";
 const NO_ACCESS: AccessEvent[] = [];
 

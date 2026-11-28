@@ -28,10 +28,13 @@ mod relaunch;
 pub mod skills_sync;
 mod state;
 pub mod stats;
+pub mod sync_rules;
 pub mod trash;
 pub mod tree;
 pub mod vault;
 mod watcher;
+#[cfg(windows)]
+mod webview_recovery;
 
 use state::AppState;
 use tauri::Manager;
@@ -201,6 +204,10 @@ pub fn run() {
                 // existing window decorations and titlebar behavior.
                 #[cfg(windows)]
                 win.set_decorations(false)?;
+                // A page Windows ended while Baalda sat in the background is
+                // brought back instead of leaving a blank window.
+                #[cfg(windows)]
+                webview_recovery::install(&win);
                 // While it is still hidden, so the first frame is already the
                 // right size — resizing after reveal would visibly jump.
                 fit_window_to_screen(&win);
@@ -239,7 +246,6 @@ pub fn run() {
             skills_sync::skills_read_folder,
             skills_sync::skills_read_zip,
             skills_sync::skills_export_zip,
-            skills_sync::skills_backups_dir,
             skills_sync::skills_scan_device,
             skills_sync::skills_read_device_skill_md,
             skills_sync::skills_list_device_skill_files,
@@ -269,6 +275,11 @@ pub fn run() {
             commands::create_vault,
             commands::is_vault,
             commands::list_tree,
+            commands::get_sync_rules,
+            commands::set_sync_rules,
+            commands::read_rules_file,
+            commands::write_rules_file,
+            commands::excluded_hashes,
             commands::list_children,
             commands::read_note,
             commands::note_exists,
@@ -276,6 +287,7 @@ pub fn run() {
             commands::write_trash_copy,
             commands::copy_to_trash,
             commands::rebind_note_id,
+            commands::heal_note_id,
             commands::write_note,
             commands::write_note_if_missing,
             commands::materialize_notes_batch,
@@ -284,6 +296,7 @@ pub fn run() {
             commands::create_folder,
             commands::ensure_folder,
             commands::rename_path,
+            commands::flush_deferred_links,
             commands::delete_path,
             commands::delete_file,
             commands::delete_files_batch,

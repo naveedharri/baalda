@@ -8,9 +8,12 @@
  * a device holding unseen work must recover it first.
  *
  * `ackedSv` is the per-doc Yjs state vector the server is known to cover: taken
- * from the doc when a Hocuspocus `synced` lands for it, when a batch push is
- * acknowledged, and after a backfill/bootstrap apply (at those moments the local
- * doc and the server agree on at least that much). It only ever grows — the
+ * from the doc when a Hocuspocus `synced` lands for it and when a batch push is
+ * acknowledged; for a backfill/bootstrap apply, from the SERVER'S UPDATE itself
+ * (`encodeStateVectorFromUpdate`), never from the local doc after it, because a
+ * server diff proves nothing about local ops but everything about its own.
+ * Without that, a teammate's edit received after this device's last ack read as
+ * this device's own unsent work when access went (2026-11-28). It only ever grows — the
  * server never forgets ops — so recording merges per-client clocks by max.
  */
 import * as Y from "yjs";
@@ -41,6 +44,19 @@ export function mergeSv(a: Uint8Array | null, b: Uint8Array): Uint8Array {
     if (clock > (out.get(client) ?? 0)) out.set(client, clock);
   }
   return encodeSvMap(out);
+}
+
+/**
+ * What a SERVER-SENT update proves the server holds: for every client in it,
+ * all ops up to the end of that client's run (`parseUpdateMeta(...).to`). The
+ * server's document is complete, so a delta carrying client c's ops up to clock
+ * `to` means it holds c's ops 0..to. Not `Y.encodeStateVectorFromUpdate`: that
+ * counts only clients whose run starts at clock 0, so a teammate typing on in
+ * one session (every later delta starts above 0) recorded nothing.
+ */
+export function ackSvFromServerUpdate(update: Uint8Array): Uint8Array {
+  const { to } = Y.parseUpdateMeta(update);
+  return encodeSvMap(to);
 }
 
 /** Encode a client→clock map as a Yjs state vector (varuint count, then pairs). */

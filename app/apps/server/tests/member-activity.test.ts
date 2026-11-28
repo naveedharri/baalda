@@ -197,4 +197,20 @@ describe("member activity", () => {
     expect(await feed(owner, orgId, m.userId)).toHaveLength(50);
     expect(await feed(owner, orgId, m.userId, 500)).toHaveLength(100);
   });
+
+  it("settings the access conversion wrote to keep what someone had are not shown as granted (2026-11-28)", async () => {
+    const { owner, orgId, vaultId } = await setup();
+    const m = await addMember(orgId, "conv@activity.test");
+    const folder = await seedFolder(vaultId, null, "Docs", "Docs");
+    const kept = await seedShare(orgId, "folder", folder, m.userId, "edit");
+    const real = await seedShare(orgId, "folder", await seedFolder(vaultId, null, "Real", "Real"), m.userId, "view");
+    await pool.query(
+      `INSERT INTO access_personal_conversion_rows (organization_id, share_id, action, resource_type, resource_id, principal_type, principal_id)
+       VALUES ($1, $2, 'inserted', 'folder', $3, 'user', $4)`,
+      [orgId, kept, folder, m.userId],
+    );
+    const granted = (await feed(owner, orgId, m.userId)).filter((e) => e.kind === "accessGranted");
+    expect(granted.map((e) => (e as { permission: string }).permission)).toEqual(["view"]);
+    expect(real).toBeTruthy();
+  });
 });

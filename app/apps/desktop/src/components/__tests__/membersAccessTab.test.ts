@@ -88,34 +88,13 @@ describe("Members and access tab", () => {
     expect(host.textContent).not.toContain("Stale Owner");
   });
 
-  it("shows no Everyone or New members value before the server answers", async () => {
-    const team = deferred<unknown>();
-    const joining = deferred<unknown>();
-    api.getTeamAccess.mockReturnValueOnce(team.promise);
-    api.getAccessDefault.mockReturnValueOnce(joining.promise);
-    await render();
-    const rows = () => host.querySelector(".members-access-rows");
-    expect(rows()).not.toBeNull();
-    expect(rows()!.querySelectorAll(".members-access-trigger")).toHaveLength(0);
-    expect(rows()!.textContent).not.toMatch(/Can edit|Can view|No access/);
-    await act(async () => {
-      team.resolve({ mode: "readonly", posture: "view", grantId: "g", overrides: [] });
-      joining.resolve({ mode: "private" });
-    });
-    await flush();
-    const triggers = rows()!.querySelectorAll(".members-access-trigger");
-    expect(triggers).toHaveLength(2);
-    expect(triggers[0].textContent).toContain("Can view");
-    expect(triggers[1].textContent).toContain("No access");
-  });
-
-  it("reads a never-shared vault as No access with the authorship note", async () => {
-    api.getTeamAccess.mockResolvedValueOnce({ mode: "private", posture: "none", grantId: null, overrides: [] });
+  it("has no Default access or New members row (2026-11-25)", async () => {
     await render();
     await flush();
-    const everyone = host.querySelector(".members-access-row");
-    expect(everyone?.textContent).toContain("No access");
-    expect(everyone?.textContent).toContain("Members keep notes they wrote");
+    expect(host.querySelector(".members-access-rows")).toBeNull();
+    expect(host.textContent).not.toContain("Default access");
+    expect(host.textContent).not.toContain("New members");
+    expect(host.querySelector(".members-access-intro")?.textContent).toContain("People you make admin start on Can edit everything");
   });
 
   it("lets an owner in a No access vault give themselves Can edit everything", async () => {
@@ -159,7 +138,7 @@ describe("Members and access tab", () => {
     expect(host.querySelector('[role="dialog"]')).toBeNull();
     expect(host.querySelector(".member-profile-name")?.textContent).toBe("Sara Khan");
     expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Personal info");
-    const back = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Members and access"))!;
+    const back = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("People and access"))!;
     await act(async () => back.click());
     expect(host.querySelector(".members-table")).not.toBeNull();
     // "Manage access…" in the row dropdown lands on the Access tab directly.
@@ -290,9 +269,23 @@ describe("Members and access tab", () => {
     expect(host.querySelector('[aria-label^="Actions for"]')).toBeNull();
     expect(host.textContent).toContain("Me (you)");
     expect(host.querySelector(".members-access-mcp-hint")).toBeNull();
-    // Rows still open a read-only profile: Personal info only, no Access or Activity tab (#301).
+    // Rows still open a read-only profile: the details alone, with no tab strip (no Access or Activity tab, #301).
     await act(async () => (host.querySelector('[aria-label="Open profile of Owner"] .members-table-name') as HTMLElement).click());
     expect(host.querySelector(".member-profile-name")?.textContent).toBe("Owner");
-    expect([...host.querySelectorAll('[role="tab"]')].map((t) => t.textContent)).toEqual(["Personal info"]);
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(0);
+    expect(host.querySelector(".member-profile-about")).not.toBeNull();
+  });
+
+  it("keeps where access comes from to the hover", async () => {
+    api.getTeamAccess.mockResolvedValue({ mode: "private", posture: "sealed", grantId: null, overrides: [] });
+    const own = { ...person("u2", "Sara Own"), access: { level: "view" as const, own: true } };
+    const plain = { ...person("u3", "Ali Shared"), access: { level: "custom" as const } };
+    api.getMembersOverview.mockResolvedValue(overview([person("u1", "Owner One", "owner"), own, plain]));
+    await render();
+    await flush();
+    const rowOf = (name: string) => [...host.querySelectorAll("tbody tr")].find((r) => r.textContent?.includes(name))!;
+    expect(host.querySelector(".members-access-source")).toBeNull();
+    expect(rowOf("Ali Shared").querySelector(".members-access-cell")?.getAttribute("title")).toBe("Some folders or notes are shared with them.");
+    expect(rowOf("Sara Own").querySelector(".members-access-cell")?.getAttribute("title")).toBe("Set just for them: Can view everything.");
   });
 });

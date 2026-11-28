@@ -799,7 +799,8 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     position: "relative",
     display: "flex",
     flexDirection: "column",
-    gap: "var(--sp-1)",
+    // Room between the title and the Add tags / property / date row below it.
+    gap: "10px",
   },
   // A real <input>, not a contenteditable: typing into one emits no
   // MutationRecord, so CodeMirror's DOMObserver never flushes the widget out
@@ -845,18 +846,18 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
   ".inline-title-add": {
     display: "inline-flex",
     alignItems: "center",
-    gap: "6px",
-    height: "28px",
-    padding: "0 10px",
+    gap: "5px",
+    height: "24px",
+    padding: "0 8px",
     border: "0",
-    borderRadius: "8px",
+    borderRadius: "7px",
     background: "var(--bg-subtle)",
     cursor: "pointer",
-    fontSize: "var(--fs-sm)",
+    fontSize: "12px",
     color: "var(--text-tertiary)",
     transition: "background 120ms ease, color 120ms ease",
   },
-  ".inline-title-add svg": { width: "14px", height: "14px", flex: "none" },
+  ".inline-title-add svg": { width: "12px", height: "12px", flex: "none" },
   ".inline-title-add:hover, .inline-title-add:focus-visible": {
     background: "var(--bg-hover)",
     color: "var(--text-primary)",

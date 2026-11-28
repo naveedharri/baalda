@@ -88,6 +88,21 @@ describe("search over extracted file text", () => {
     expect(hits[0].score).toBeGreaterThan(0);
   });
 
+  it("ranks Korean extracted text without revealing a private Korean attachment", async () => {
+    const publicFile = await seedFile(vault, teamFolder, "Team/korean.pdf");
+    const publicBlob = await seedBlob(vault, org, "Team/korean.pdf", { docId: publicFile });
+    await seedBlobText(publicBlob, vault, publicFile, "백업 복원 절차");
+    const privateFile = await seedFile(vault, secretFolder, "Board/korean.pdf");
+    const privateBlob = await seedBlob(vault, org, "Board/korean.pdf", { docId: privateFile });
+    await seedBlobText(privateBlob, vault, privateFile, "백업 복원 비공개기밀");
+    await seedShare(org, "folder", teamFolder, member, "view");
+    const hits = await search(member, vault, "백업 복원");
+    expect(hits[0]).toMatchObject({ kind: "file", docId: publicFile, blobId: publicBlob });
+    expect(hits[0].score).toBeGreaterThan(0);
+    expect(hits.map((hit) => hit.docId)).not.toContain(privateFile);
+    expect((await search(member, vault, "비공개기밀")).map((hit) => hit.docId)).not.toContain(privateFile);
+  });
+
   it("never lets an unreadable file's words reach the ranking (content oracle)", async () => {
     await seedShare(org, "folder", teamFolder, member, "view");
 

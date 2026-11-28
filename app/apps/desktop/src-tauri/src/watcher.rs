@@ -82,6 +82,18 @@ pub struct FileChanged {
 #[serde(rename_all = "camelCase")]
 pub struct FilesChanged {
     pub changes: Vec<FileChanged>,
+    /// Paths under the vault's sync rules (#401) that exist right now: an
+    /// excluded file or folder that appeared or changed. They are never indexed
+    /// and never in `changes`, so no existing consumer sees them; the sync
+    /// layer's delete drain reads them as the possible new half of a move INTO
+    /// a folder that doesn't sync, which must park the note rather than delete
+    /// it for everyone. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
+    /// The vault root's `.baaldaignore` changed (#401). A floor name, so it is
+    /// never in `changes`; the sync layer re-reads it. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rules_file: bool,
 }
 
 /// How many paths one index transaction may cover.
@@ -325,6 +337,11 @@ pub struct Plan {
     pub indexable_files: Vec<PathBuf>,
     /// The UI event payload, in a deterministic order.
     pub changes: Vec<PlannedChange>,
+    /// Excluded paths (#401) that exist on disk, sorted: see
+    /// `FilesChanged::ignored`.
+    pub ignored: Vec<String>,
+    /// The vault root's `.baaldaignore` was touched: see `FilesChanged::rules_file`.
+    pub rules_file: bool,
 }
 
 /// Turn a dirty set into a [`Plan`]: drop ignored paths, sort for determinism,
@@ -352,11 +369,34 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         };
     }
     let mut planned: Vec<PlannedChange> = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
+    let mut rules_file = false;
     for abs in batch {
         let Ok(rel) = rel_from_abs(vault, &abs) else {
             continue;
         };
+        if rel.eq_ignore_ascii_case(crate::sync_rules::RULES_FILE) {
+            rules_file = true;
+            continue;
+        }
         if rel.is_empty() || rel_path_is_ignored(&rel) {
+            continue;
+        }
+        // The vault's sync rules (#401): an excluded path is invisible here
+        // exactly like a dot folder. A path that is gone has no kind to ask
+        // about, so either reading drops it (dropping is the safe direction:
+        // nothing at an excluded path was ever in the index or the sync map).
+        let excluded = match std::fs::symlink_metadata(&abs) {
+            Ok(m) => {
+                let ex = crate::sync_rules::excludes(vault, &rel, m.is_dir());
+                if ex && !m.file_type().is_symlink() {
+                    ignored.push(rel.clone());
+                }
+                ex
+            }
+            Err(_) => crate::vault::is_excluded_any_kind(vault, &rel),
+        };
+        if excluded {
             continue;
         }
         // The whole note family, not just `.md` — `index.rs` indexes all of it,
@@ -411,11 +451,14 @@ pub fn plan_batch<I: IntoIterator<Item = PathBuf>>(vault: &Path, batch: I) -> Pl
         .filter(|c| c.kind == "tree" && !c.gone && is_indexable_file(&c.rel) && c.abs.is_file())
         .map(|c| c.abs.clone())
         .collect();
+    ignored.sort();
     Plan {
         modified,
         removed,
         indexable_files,
         changes: planned,
+        ignored,
+        rules_file,
     }
 }
 
@@ -429,6 +472,16 @@ fn process_batch(
 ) {
     let plan = plan_batch(vault, batch);
     if plan.changes.is_empty() {
+        if !plan.ignored.is_empty() || plan.rules_file {
+            let _ = app.emit(
+                "files-changed",
+                FilesChanged {
+                    changes: Vec::new(),
+                    ignored: plan.ignored,
+                    rules_file: plan.rules_file,
+                },
+            );
+        }
         return;
     }
 
@@ -501,14 +554,130 @@ fn process_batch(
     }
     queue.enqueue(pending);
 
+    reconcile_present_dirs(vault, index, &present_dirs(&plan), stop);
+
     // ONE event for the whole batch. The UI used to receive one `file-changed`
     // per path, so a bulk drop turned into a storm of tree refreshes.
     let _ = app.emit(
         "files-changed",
         FilesChanged {
             changes: mark_unchanged(plan.changes, &unchanged),
+            ignored: plan.ignored,
+            rules_file: plan.rules_file,
         },
     );
+}
+
+/// Folders the batch names that are still folders on disk, outermost only.
+///
+/// A directory renamed or moved as a whole is ONE event on macOS (FSEvents names
+/// the directory, never the files inside), so the files under a folder that is
+/// still there may now be other files: two folders swapped (`mv A t; mv B A;
+/// mv t B`), or a folder put in place of another. Nothing else re-reads them.
+pub(crate) fn present_dirs(plan: &Plan) -> Vec<PathBuf> {
+    let mut dirs: Vec<&PlannedChange> = plan
+        .changes
+        .iter()
+        .filter(|c| c.kind == "tree" && !c.gone && !c.rel.is_empty() && c.abs.is_dir())
+        .collect();
+    dirs.sort_by(|a, b| a.rel.len().cmp(&b.rel.len()));
+    let mut out: Vec<&PlannedChange> = Vec::new();
+    for d in dirs {
+        if out.iter().any(|o| d.rel.starts_with(&format!("{}/", o.rel))) {
+            continue;
+        }
+        out.push(d);
+    }
+    out.into_iter().map(|c| c.abs.clone()).collect()
+}
+
+/// Note files at or below `abs_dir`, walked with `Index::rebuild`'s rules:
+/// ignored names and excluded paths are not descended into; links are not
+/// followed.
+pub(crate) fn note_files_under(vault: &Path, abs_dir: &Path) -> Vec<PathBuf> {
+    let rules = crate::sync_rules::active(vault);
+    walkdir::WalkDir::new(abs_dir)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if crate::vault::is_ignored_name(&e.file_name().to_string_lossy()) {
+                return false;
+            }
+            match (&rules, rel_from_abs(vault, e.path())) {
+                (Some(r), Ok(rel)) => !r.excludes_entry(&rel, e.file_type().is_dir()),
+                (_, Ok(rel)) => !rel_path_is_ignored(&rel),
+                _ => false,
+            }
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file() && is_note_file(&e.file_name().to_string_lossy()))
+        .map(|e| e.into_path())
+        .collect()
+}
+
+/// Bring the index rows under each present folder in line with its files.
+///
+/// Files first: `index_one` follows a file's own identity, so a note that
+/// moved with its folder takes its old row along instead of a fresh id, and a
+/// path whose bytes changed is re-hashed. Then rows still naming a file that is
+/// gone are dropped. Without this a swapped pair of folders kept rows on paths
+/// that no longer existed and the OLD hashes on paths whose bytes changed, so
+/// the sync layer neither re-keyed the moved notes nor saw the changed ones
+/// (2026-11-28 five-app test). No event is added: the sync layer's own sweep
+/// reads the result once its folder-move drain has run.
+pub(crate) fn reconcile_present_dirs(
+    vault: &Path,
+    index: &Arc<Mutex<Index>>,
+    dirs: &[PathBuf],
+    stop: &AtomicBool,
+) {
+    for abs_dir in dirs {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(rel_dir) = rel_from_abs(vault, abs_dir) else {
+            continue;
+        };
+        let started = Instant::now();
+        let files = note_files_under(vault, abs_dir);
+        for slice in files.chunks(CHUNK) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let guard = index.lock().unwrap();
+            if let Ok(outcome) = guard.index_notes(vault, slice) {
+                for (path, err) in outcome.failures {
+                    eprintln!("[watcher] index failed for {}: {err}", path.display());
+                }
+            }
+            drop(guard);
+            std::thread::sleep(CHUNK_GAP);
+        }
+        let present: HashSet<String> = files.iter().filter_map(|p| rel_from_abs(vault, p).ok()).collect();
+        let rows = index.lock().unwrap().note_paths_under(&rel_dir).unwrap_or_default();
+        let stale: Vec<PathBuf> = rows
+            .iter()
+            .filter(|r| !present.contains(*r))
+            .filter(|r| !matches!(vault_path_state(vault, r), PathState::Regular))
+            .filter_map(|r| crate::vault::resolve_in_vault(vault, r).ok())
+            .collect();
+        for slice in stale.chunks(CHUNK) {
+            let guard = index.lock().unwrap();
+            if let Ok(failures) = guard.remove_notes(vault, slice) {
+                for (path, err) in failures {
+                    eprintln!("[watcher] remove failed for {}: {err}", path.display());
+                }
+            }
+        }
+        log::info!(
+            "[watcher] folder still present: {rel_dir} ({} notes checked, {} stale rows dropped, {} ms)",
+            files.len(),
+            stale.len(),
+            started.elapsed().as_millis()
+        );
+    }
 }
 
 /// Turn the plan into the emitted payload, flagging the `modified` entries the
@@ -543,6 +712,42 @@ mod tests {
             .iter()
             .map(|c| (c.rel.clone(), c.kind))
             .collect()
+    }
+
+    #[test]
+    fn a_swapped_pair_of_folders_rekeys_moved_notes_and_rehashes_changed_ones() {
+        // `mv A t; mv B A; mv t B`: FSEvents names the three directories only.
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().to_path_buf();
+        write_note(&v, "A/overview.md", "private A").unwrap();
+        write_note(&v, "A/a1.md", "a one").unwrap();
+        write_note(&v, "B/overview.md", "shared B").unwrap();
+        write_note(&v, "B/b1.md", "b one").unwrap();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        let id = |i: &Index, p: &str| i.get_note_meta(p).unwrap().map(|m| m.id);
+        let (oa, a1, ob, b1) = (id(&idx, "A/overview.md"), id(&idx, "A/a1.md"), id(&idx, "B/overview.md"), id(&idx, "B/b1.md"));
+        std::fs::rename(v.join("A"), v.join("t")).unwrap();
+        std::fs::rename(v.join("B"), v.join("A")).unwrap();
+        std::fs::rename(v.join("t"), v.join("B")).unwrap();
+
+        let index = Arc::new(Mutex::new(idx));
+        let plan = plan_batch(&v, [v.join("A"), v.join("B"), v.join("t")]);
+        reconcile_present_dirs(&v, &index, &present_dirs(&plan), &AtomicBool::new(false));
+
+        let idx = index.lock().unwrap();
+        // Moved with their folder: each keeps its OWN row, at the new path.
+        assert_eq!(id(&idx, "B/a1.md"), a1);
+        assert_eq!(id(&idx, "A/b1.md"), b1);
+        // No row is left on a path with no file.
+        assert_eq!(id(&idx, "A/a1.md"), None);
+        assert_eq!(id(&idx, "B/b1.md"), None);
+        // Same path, other bytes: the row of that path, re-hashed, so the sync
+        // layer's drift check sees the change.
+        let m = idx.get_note_meta("A/overview.md").unwrap().unwrap();
+        assert_eq!(Some(m.id), oa);
+        assert_eq!(m.sha256, crate::notefile::sha256_hex("shared B"));
+        assert_eq!(id(&idx, "B/overview.md"), ob);
     }
 
     #[test]

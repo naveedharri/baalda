@@ -261,6 +261,13 @@ describe("per-person vault level", () => {
     // Joins AFTER the content exists, under the default (Private) join snapshot.
     const late = await seedUser(`late-${randomUUID()}@test.dev`);
     await seedMember(f.org, late, "member");
+  // Joined before 2026-11-25 under New members = No access: the trigger took
+  // this snapshot then (migration 100 stopped taking new ones).
+  await pool.query(
+    `INSERT INTO member_access_snapshots (organization_id, user_id, mode, access_revision, snapshot_at)
+     VALUES ($1, $2, 'private', 0, now()) ON CONFLICT DO NOTHING`,
+    [f.org, late],
+  );
     expect(await allPaths(late, f.doc, f.org, "member")).toBe("none");
     expect(await listReadableDocsInVault(late, f.vault)).not.toContain(f.doc);
     await personVault(f.org, late, "edit");

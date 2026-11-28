@@ -31,6 +31,7 @@ import {
   writeItemColors,
 } from "./lib/appearance";
 import { lockBlocksCaller, lockScopesByPath } from "./lib/locks";
+import { createBlockReason } from "./lib/createGate";
 import { readItemOrder, renameInOrder, writeItemOrder, type ItemOrder } from "./lib/ordering";
 import { loadedFolderPaths, mergeChildren, nodeAt, setChildrenAt } from "./lib/tree/lazyTree";
 import { applyTitlePatch } from "./lib/tree/titles";
@@ -147,6 +148,7 @@ import {
 } from "./lib/vault/missingFolder";
 import { playJoinChime } from "./lib/celebrate/celebrate";
 import { dismissToast, toast } from "./lib/toast";
+import { renameRefusedMessage } from "./lib/renameGate";
 import { classifyLimitError, limitFromError, vaultLimitReason } from "./lib/billing";
 import { isEditorNote } from "./lib/notePath";
 import { isNoteExt } from "./lib/formats";
@@ -274,6 +276,8 @@ interface AppStore {
    * banner a couple of seconds after it appeared.
    */
   noteRemovedSynced: boolean;
+  /** The doc id the open note had when its file vanished (null when unsynced). */
+  noteRemovedDocId: string | null;
   /**
    * Set when the note that was open left because of a TEAMMATE (or an AI) and we
    * applied that locally. `deleted`: they deleted it, and `trashedTo` is the
@@ -343,6 +347,11 @@ interface AppStore {
   session: SessionInfo | null;
   serverUrl: string;
   authError: string | null;
+  /** Signed out only because the server could not be reached at launch: a
+   *  saved login is kept and retried (`scheduleAuthRetry`). */
+  authOffline: boolean;
+  /** Retry the session check now (the not-syncing banner's Try again). */
+  retryAuth: () => void;
   /**
    * A flow needs the sign-in dialog on screen NOW. Three of them:
    *   - "note-link": a shared link arrived while signed out, and the link is
@@ -786,7 +795,7 @@ interface AppStore {
   refreshBacklinks: () => Promise<void>;
   /** `synced` overrides the latch below with a value sampled earlier (the
    *  deferred open-note removal check samples it when the file vanished). */
-  setNoteRemoved: (removed: boolean, synced?: boolean) => void;
+  setNoteRemoved: (removed: boolean, synced?: boolean, docId?: string | null) => void;
   closeNote: () => void;
   /** Close one tab. Closing the active one activates its right-hand neighbour
    *  (left-hand when it was last); closing the only tab clears the editor. */
@@ -1924,13 +1933,31 @@ function sameVault(get: () => AppStore, epoch: number | null | undefined): boole
  * server enforces the same latch and is the authority. (A note written past it
  * would be permanently unsyncable: the server refuses to register it.)
  */
-function rootCreateBlocked(get: () => AppStore, dir: string): boolean {
-  if (dir !== "" || !get().rootFrozen) return false;
-  toast(
-    "This vault's root is frozen. Create this inside a folder instead.",
-    "error",
-  );
+/**
+ * Refuse a create the server would refuse (a frozen root, or a folder this
+ * person can only view; see `lib/createGate.ts`), saying why in a toast.
+ * Unknown access allows: the server stays the authority.
+ */
+function createBlocked(get: () => AppStore, dir: string): boolean {
+  const reason = createBlockReasonFor(get(), dir);
+  if (!reason) return false;
+  toast(reason, "error");
   return true;
+}
+
+/** {@link createBlockReason} from the store's own view of the vault. */
+export function createBlockReasonFor(
+  s: Pick<AppStore, "rootFrozen" | "syncEnabled" | "vaultVisibility" | "tree" | "locks" | "lifts" | "session">,
+  dir: string,
+): string | null {
+  return createBlockReason({
+    dir,
+    rootFrozen: s.rootFrozen,
+    syncEnabled: s.syncEnabled,
+    canCreateRoot: s.vaultVisibility?.canCreateRoot ?? null,
+    lockedForCaller: (path) =>
+      lockBlocksCaller(lockScopesByPath(s.tree, s.locks, s.session?.user.id, s.lifts), path),
+  });
 }
 
 /**
@@ -2145,6 +2172,42 @@ applyEditorFont(readEditorFont());
 syncManager.setVaultKeyGate?.(vaultKeysGate);
 syncManager.setEarlyVaultChannelCheck?.(vaultKeysEarlyChannel);
 
+/**
+ * The launch could not reach the server to check a saved login
+ * (`authManager.waitingForServer`): ask again, 3 s then doubling to 30 s, and
+ * at once when the network comes back or the window is focused. A launch
+ * before Wi-Fi connected used to stay "Signed out" until the person signed in
+ * again, though the token was valid all along. The retry re-runs `initAuth`,
+ * whose success path is the ordinary launch landing.
+ */
+const AUTH_RETRY_FIRST_MS = 3_000;
+const AUTH_RETRY_MAX_MS = 30_000;
+let authRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let authRetryDelay = AUTH_RETRY_FIRST_MS;
+let authRetryWired = false;
+
+function clearAuthRetry(reset = false): void {
+  if (authRetryTimer) clearTimeout(authRetryTimer);
+  authRetryTimer = null;
+  if (reset) authRetryDelay = AUTH_RETRY_FIRST_MS;
+}
+
+function scheduleAuthRetry(get: () => AppStore): void {
+  if (!authRetryWired && typeof window !== "undefined") {
+    authRetryWired = true;
+    const now = () => get().retryAuth();
+    window.addEventListener("online", now);
+    window.addEventListener("focus", now);
+  }
+  clearAuthRetry();
+  const delay = authRetryDelay;
+  authRetryDelay = Math.min(authRetryDelay * 2, AUTH_RETRY_MAX_MS);
+  authRetryTimer = setTimeout(() => {
+    authRetryTimer = null;
+    get().retryAuth();
+  }, delay);
+}
+
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
@@ -2162,6 +2225,7 @@ export const useStore = create<AppStore>((set, get) => ({
     }),
   noteRemoved: false,
   noteRemovedSynced: false,
+  noteRemovedDocId: null,
   noteRemovedByTeammate: null,
   accessEvents: [],
   structureNotice: { rootMissing: false, pendingDelete: null, closedAppChanges: false },
@@ -2237,6 +2301,12 @@ export const useStore = create<AppStore>((set, get) => ({
   session: null,
   serverUrl: authManager.getServerUrl(),
   authError: null,
+  authOffline: false,
+  retryAuth: () => {
+    if (!authManager.waitingForServer || get().authStatus === "signed-in") return;
+    clearAuthRetry();
+    void get().initAuth();
+  },
   authPrompt: null,
   setAuthPrompt: (prompt) => set({ authPrompt: prompt }),
   pendingServerLink: null,
@@ -2827,12 +2897,12 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   createNoteAt: async (dir, name) => {
-    if (rootCreateBlocked(get, dir)) return null;
+    if (createBlocked(get, dir)) return null;
     return finishNoteCreate(get, await ipc.createNote(dir, name));
   },
 
   createNoteIn: async (dir) => {
-    if (rootCreateBlocked(get, dir)) return null;
+    if (createBlocked(get, dir)) return null;
     for (let i = 0; i < 50; i++) {
       const candidate = i === 0 ? "Untitled" : `Untitled ${i}`;
       let path: string;
@@ -3064,16 +3134,15 @@ export const useStore = create<AppStore>((set, get) => ({
     }
   },
 
-  setNoteRemoved: (removed, synced) =>
-    set((s) => ({
+  setNoteRemoved: (removed, synced, docId) =>
+    set(() => ({
       noteRemoved: removed,
-      // Latched here: the sync layer drops the note's mapping when it propagates
-      // the disk delete, so `noteRemovedSynced` has to be sampled at the moment
-      // the file vanished rather than read off the map later — which is why a
-      // deferred caller passes the value it sampled then.
-      noteRemovedSynced: removed
-        ? (synced ?? !!s.docIdByPath[s.openNote?.path ?? ""])
-        : false,
+      // "Removed for the team" only once the server ACCEPTED the delete
+      // (`syncManager.wasDeletedForTeam`, then `setDeletedForTeamListener`):
+      // a member's delete or move of a teammate's or a view-only note is refused
+      // and put back, and the banner used to say it was removed for everyone.
+      noteRemovedSynced: removed ? synced === true : false,
+      noteRemovedDocId: removed ? (docId ?? null) : null,
     })),
 
   /**
@@ -3123,7 +3192,16 @@ export const useStore = create<AppStore>((set, get) => ({
     // The registry rename is what keeps `doc_id` stable across the move.
     // Skipping it forks the note into a second server-side note at the new path.
     try {
-      await syncManager.registry.renamePath(oldPath, newPath);
+      const res = await syncManager.registry.moveOnServer(oldPath, newPath);
+      if (!res.ok && res.refused && (await syncManager.registry.revertRefusedMove(oldPath, newPath))) {
+        // Refused (not the creator, view-only, …): the old name is back on
+        // disk, so the open note, tabs and order follow it back too.
+        get().setItemOrder(renameInOrder(get().itemOrder, newPath, oldPath));
+        get().followNoteRename(newPath, oldPath);
+        toast(renameRefusedMessage(oldPath, false, res.code, res.status), "error");
+        await get().refreshTree();
+        return false;
+      }
     } catch (e) {
       console.warn("[sync] renamePath failed", oldPath, e);
     }
@@ -3242,7 +3320,15 @@ export const useStore = create<AppStore>((set, get) => ({
         .map((s) => (s.permission === "readonly" ? { ...s, permission: "locked" as const } : s));
       const lifts = overlay.filter((s) => s.permission === "edit");
       const state = get();
-      const map = lockScopesByPath(state.tree, locks, state.session?.user.id, lifts);
+      // The registry's full id map, not the lazy sidebar tree: a padlock on a
+      // folder nobody expanded resolved to no path and the check said "editable".
+      const map = lockScopesByPath(
+        state.tree,
+        locks,
+        state.session?.user.id,
+        lifts,
+        syncManager.registry.idToPathIndex(),
+      );
       return (relPath) => lockBlocksCaller(map, relPath);
     });
     syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));
@@ -3280,6 +3366,10 @@ export const useStore = create<AppStore>((set, get) => ({
     syncManager.setAclListener(() => {
       void get().refreshLocks();
     });
+    syncManager.setDeletedForTeamListener((docId) => {
+      const s = get();
+      if (s.noteRemoved && s.noteRemovedDocId === docId) set({ noteRemovedSynced: true });
+    });
     // A teammate renamed/moved or deleted a note we have on disk, and the registry
     // has just applied that to the file. The open editor's bridge was destroyed
     // before the move, so the view MUST be re-pointed or closed — leaving
@@ -3315,6 +3405,20 @@ export const useStore = create<AppStore>((set, get) => ({
           get().closeNote();
           set({ noteRemovedByTeammate: { reason, trashedTo } });
         }
+      },
+    });
+    // The vault's sync rules changed (#401): the sidebar re-lists, and a note
+    // they now hide closes (its file stays on disk; it just stops syncing).
+    syncManager.setSyncRulesListeners({
+      onApplied: () => {
+        void get().refreshTree();
+        void get().refreshTitles();
+        const open = get().openNote;
+        if (open && syncManager.registry.isExcludedPath(open.path)) get().closeNote();
+      },
+      onNoteParked: (_docId, path) => {
+        get().pruneTabs([path]);
+        if (get().openNote?.path === path) get().closeNote();
       },
     });
     // A teammate joined the vault — refresh the roster live (no reload) and
@@ -3407,7 +3511,8 @@ export const useStore = create<AppStore>((set, get) => ({
       if (superseded()) return;
       set({ serverUrl: authManager.getServerUrl() });
       if (session) {
-        set({ session, authStatus: "signed-in", authError: null });
+        clearAuthRetry(true);
+        set({ session, authStatus: "signed-in", authError: null, authOffline: false });
         // Seamless keys F at launch: a remembered password refreshes the
         // account key's password wrap (or unlocks it). Background; never blocks.
         void launchPasswordUnlock(authManager.getServerUrl(), session.user.id, session.user.email);
@@ -3446,7 +3551,9 @@ export const useStore = create<AppStore>((set, get) => ({
         await consumeQueuedNoteLink(get);
       } else {
         if (superseded()) return;
-        set({ session: null, authStatus: "signed-out" });
+        const offline = authManager.waitingForServer;
+        set({ session: null, authStatus: "signed-out", authOffline: offline });
+        if (offline) scheduleAuthRetry(get);
         // Signed out: no note will ever get a provider, so nothing is waiting
         // for (see the open gate in `openNoteByPath`).
         resolveSyncGate();
@@ -3455,7 +3562,9 @@ export const useStore = create<AppStore>((set, get) => ({
       }
     } catch (e) {
       if (superseded()) return;
-      set({ authStatus: "signed-out", authError: errMsg(e) });
+      const offline = authManager.waitingForServer;
+      set({ authStatus: "signed-out", authError: errMsg(e), authOffline: offline });
+      if (offline) scheduleAuthRetry(get);
       resolveSyncGate();
       if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
       else if (hasPendingNoteLink()) promptSignInForQueuedLink(set);
@@ -4740,13 +4849,20 @@ export const useStore = create<AppStore>((set, get) => ({
     // the vault goes too. Wraps are deleted server-side; the account key stays.
     await forgetVaultKeysForOrg(userId, organizationId, keyHint);
 
+    let kept = 0;
     if (path) {
       // Rust refuses links, roots, the home and vaults folders, and any folder
       // whose own stamp names a different vault. Permanent: no Trash, and the
-      // CRDT store under `.context/` goes with it. Also drops it from recents.
-      await ipc.deleteDepartedVault(path, organizationId).catch((e: unknown) => {
-        console.warn("[vault] membership ended but the folder could not be deleted", path, e);
-      });
+      // CRDT store under `.context/` goes with it. Only files the vault never
+      // registered and could not sync (a local checkout's own files) stay (#401).
+      // Also drops it from recents.
+      kept = await ipc.deleteDepartedVault(path, organizationId).then(
+        (n) => (typeof n === "number" ? n : 0),
+        (e: unknown) => {
+          console.warn("[vault] membership ended but the folder could not be deleted", path, e);
+          return 0;
+        },
+      );
     }
 
     if (isOpen) {
@@ -4757,7 +4873,7 @@ export const useStore = create<AppStore>((set, get) => ({
           .catch((e: unknown) => console.warn("[vault] switch after membership loss failed", e));
       }
     }
-    const text = membershipLostNotice(name ?? path?.split(/[\\/]/).filter(Boolean).pop() ?? "", reason);
+    const text = membershipLostNotice(name ?? path?.split(/[\\/]/).filter(Boolean).pop() ?? "", reason, kept > 0 ? path : null);
     // The notice slot lives in the editor column; with no vault open (welcome
     // screen) the same line goes out as a toast instead, never both.
     if (get().vault) set({ membershipLost: { text, at: Date.now() } });

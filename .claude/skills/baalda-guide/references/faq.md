@@ -52,7 +52,12 @@ needed for sync between devices, team collaboration, and the hosted AI endpoint.
 
 ## Does it work offline?
 Yes. Everything local (editing, search, backlinks, graph) works with no connection. When you
-reconnect, your changes merge with everyone else's; there are no conflict dialogs.
+reconnect, your changes merge with everyone else's; there are no conflict dialogs. Opening the app
+with no connection does not sign you out: it says it can't reach the server and keeps trying, and
+syncs as soon as the connection is back. Files you delete while offline are deleted for the team
+once you reconnect (subject to the usual rule that a member can only delete what they created);
+a file deleted while the app is closed comes back instead, because Baalda can't tell that from a
+drive that isn't mounted yet.
 
 ## What happens if two people edit the same note at once?
 Both edits are kept and merged character by character, live, with visible cursors. The same is
@@ -81,11 +86,13 @@ install the app updates itself: it checks, downloads, installs and restarts at a
 verified with Baalda's own signing key, and then shows a short What's New for that version.
 
 ## How do I share notes with my team?
-Sign in, turn on sync for your vault, then open Vault Settings → **Members and access** →
-**Invite people**. Add email addresses, choose a role and an access level, or share the join code.
-New vaults are shared with the whole team by default. The **Everyone** row sets Can edit, Can view
-or No access for all members; each person can get their own level, which wins for them, and their
-profile's **Access** tab lets you pick folders one by one. Roles are owner, admin, member.
+Sign in, turn on sync for your vault, then open Vault Settings → **People and access** →
+**Invite people**. Add email addresses, choose a role and either an access level or access groups, or share the join
+code. In a new vault members start on **No access**: they see what you share with them or with
+their access groups. To give the whole team the same access, put everyone in one group (it can add
+new members automatically) and set what it opens on its Access board. Each person can also get
+their own level, and their profile's **Access** tab lets you pick folders one by one. Roles are
+owner, admin, member.
 
 ## Can I share a note with someone who does not use Baalda?
 Yes. "Copy link" on a note offers a public link: a read-only web page anyone with the link can
@@ -132,6 +139,9 @@ renaming, moving and deleting, keep Baalda open (or use the sidebar, or the AI t
 - With Baalda open, a note or a whole folder renamed or moved in Finder or by a script keeps its
   history, links and permissions.
 - Removing a lot of notes at once makes Baalda ask: delete them for everyone, or restore them.
+- Moving a note or folder to the top level of the vault needs the same right as creating there.
+  Someone who can edit only one folder can't move things out of it to the top; Baalda puts the
+  item back where it was and says so.
 - If you rename or move the vault folder itself, Baalda stops syncing it and asks you to reopen it
   from its new location.
 - Renames made while Baalda is closed are recognised on the next launch when the note's text is

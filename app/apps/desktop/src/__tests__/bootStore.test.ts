@@ -78,6 +78,7 @@ const sync = vi.hoisted(() => ({
   setActivityListeners: vi.fn(),
   setRegistryListener: vi.fn(),
   setAclListener: vi.fn(),
+  setDeletedForTeamListener: vi.fn(),
   setInboundListeners: vi.fn(),
   setMemberJoinedListener: vi.fn(),
   setMemberRemovedListener: vi.fn(),
@@ -88,6 +89,7 @@ const sync = vi.hoisted(() => ({
   setSyncProgressListener: vi.fn(),
   setDocStateListener: vi.fn(),
   setFileStateListener: vi.fn(),
+  setSyncRulesListeners: vi.fn(),
   setAttachmentEntitlementListener: vi.fn((listener: (blocked: boolean) => void) => {
     attachmentEntitlement.listener = listener;
   }),

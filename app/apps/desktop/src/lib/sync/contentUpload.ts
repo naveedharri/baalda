@@ -41,6 +41,8 @@ import { encodeStateAsUpdate, encodeStateVector } from "yjs";
 import type { NoteBridge } from "../bridge";
 import { UPLOAD_CONCURRENCY, runPool } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
+import { announceUnsendableEdit } from "./readOnlyRejections";
+import { sha256Hex } from "../bridge/adapter";
 
 /**
  * `DocPush.whenSynced` rejected because the doc reached a status no reconnect
@@ -100,6 +102,13 @@ export interface ContentUploadDeps {
    * short-circuit and the size ceiling.
    */
   readFile?(relPath: string): Promise<string>;
+  /**
+   * The sha256 this device last agreed the file held (`ipc.getDiskBase`), or
+   * null when none is recorded. Optional like `readFile`; when present, a
+   * view-only file still at its base is the team's newer text arriving, not an
+   * edit, and is replaced without a word.
+   */
+  diskBase?(docId: string): Promise<string | null>;
 }
 
 /**
@@ -657,10 +666,17 @@ export class ContentUploader {
       // file holds that the doc does not is about to be overwritten by the
       // flush below and is unsendable besides. Keep a copy and say so.
       if (push.readOnly) {
-        const safeToReplace = await this.keepUnsendableEdit(docId, relPath, bridge);
+        const verdict = await this.keepUnsendableEdit(docId, relPath, bridge);
+        const safeToReplace = verdict !== false;
         // Never merge the file into a doc this user cannot write; release the
         // pull wait, and let its deferred write go ahead only when it is safe.
         bridge.abandonPull(safeToReplace);
+        // The file holds an edit the server will never take: write the team's
+        // text back over it NOW. The pull usually brings nothing new for such a
+        // doc, so no egest was ever armed and the flush below wrote nothing —
+        // the unsendable edit used to stay on disk for good, visible only here.
+        // `writeThrough` keeps the empty-over-non-empty guard.
+        if (verdict === "replace") await bridge.writeThrough();
         if (!safeToReplace) {
           // The file is still the durable copy. Do not flush the Remote Vault's
           // state over it unless the differing bytes were preserved first.
@@ -765,7 +781,7 @@ export class ContentUploader {
     docId: string,
     relPath: string,
     bridge: NoteBridge,
-  ): Promise<boolean> {
+  ): Promise<"same" | "replace" | false> {
     const read = this.opts.deps.readFile;
     if (!read) return false;
     let fileText: string;
@@ -774,14 +790,28 @@ export class ContentUploader {
     } catch {
       return false; // nothing readable to compare or safely replace
     }
-    if (fileText === bridge.serialize()) return true; // converged — nothing to keep
+    if (fileText === bridge.serialize()) return "same"; // converged — nothing to keep
     // The registry created this file as an empty landing place for a remote
     // note. It is not a local delete/edit, and keeping a copy of zero bytes both
     // invents a warning and prevents the canonical pull from ever reaching
     // disk. The caller's provenance callback is deliberately stricter than
     // `fileText.length === 0`: a real user truncation must still be recovered.
-    if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return true;
-    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced.
+    if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return "replace";
+    // A file still at the text this device last agreed with the server was not
+    // edited here: the pull just brought a teammate's newer text (a view-only
+    // note re-checked after an access change, or retried). Nothing to report.
+    let base: string | null | undefined;
+    if (this.opts.deps.diskBase) {
+      const ask = this.opts.deps.diskBase;
+      const answer = await Promise.resolve().then(() => ask(docId)).catch(() => null);
+      base = typeof answer === "string" ? answer : null;
+      if (base !== null && (await sha256Hex(fileText)) === base) return "replace";
+    }
+    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced,
+    // and the person is told (the failure row alone reached no screen). Told
+    // only when the file provably left its base, or no base can be asked for.
+    console.info(`[upload] ${relPath} is view-only for you; your edit there is replaced by the team's text`);
+    if (base !== null) announceUnsendableEdit(docId, relPath);
     this.report({
       docId,
       relPath,
@@ -789,7 +819,7 @@ export class ContentUploader {
       permanent: true,
       kind: "no-write-access",
     });
-    return true;
+    return "replace";
   }
 
   /** Record a failure WITHOUT touching the progress counters or the streak —

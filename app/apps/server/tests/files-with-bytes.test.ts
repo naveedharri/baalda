@@ -158,6 +158,48 @@ describe("one-step file upload (files-with-bytes)", () => {
     expect(await fileRows(vault)).toEqual([{ id: docId, path: "logo.png", folder_id: null }]);
   });
 
+  it("an empty file registers at intent with nothing to upload, and downloads as zero bytes", async () => {
+    const { owner, vault } = await setup("onestep-empty");
+    const EMPTY = Buffer.alloc(0);
+    const emptyIntent = (docId: string, relPath: string) => ({
+      sha256: shaOf(EMPTY),
+      size: 0,
+      mime: "text/plain",
+      filename: relPath.split("/").pop(),
+      register: { docId, relPath, folderId: null },
+    });
+    const a = randomUUID();
+    const b = randomUUID();
+
+    const first = (await (await intent(owner, vault, emptyIntent(a, "__init__.py"))).json()) as IntentBody;
+    expect(first.deduped).toBe(true);
+    expect(first.upload).toBeUndefined();
+    expect(first.file).toMatchObject({ id: a, path: "__init__.py", status: "created" });
+    expect(first.blob?.docId).toBe(a);
+
+    // A second empty file is its own file with its own row, never the first's.
+    const second = (await (await intent(owner, vault, emptyIntent(b, "py.typed"))).json()) as IntentBody;
+    expect(second.file).toMatchObject({ id: b, status: "created" });
+    expect(second.blob?.docId).toBe(b);
+    expect(second.blob?.id).not.toBe(first.blob?.id);
+
+    expect((await fileRows(vault)).map((f) => f.id).sort()).toEqual([a, b].sort());
+    expect(await blobRows(vault)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "ready", doc_id: a }),
+        expect.objectContaining({ status: "ready", doc_id: b }),
+      ]),
+    );
+
+    const got = await app.fetch(
+      new Request(`http://local/api/blobs/${first.blob!.id}`, {
+        headers: { authorization: `Bearer ${owner.token}` },
+      }),
+    );
+    expect(got.status).toBe(200);
+    expect((await got.arrayBuffer()).byteLength).toBe(0);
+  });
+
   it("a Free vault is refused at intent and nothing is left behind", async () => {
     const { owner, vault } = await setup("onestep-free");
     process.env.POLAR_ACCESS_TOKEN = "test-token";

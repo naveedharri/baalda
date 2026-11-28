@@ -22,7 +22,15 @@ import { oauthConnectRoutes } from "./routes/oauth-connect.js";
 import { accountPageRoutes } from "./routes/account-pages.js";
 import { invitationRoutes } from "./routes/invitations.js";
 import { createMemberShareRoutes, memberRoutes } from "./routes/members.js";
+import { ACCESS_GROUPS_FEATURE, createGroupRoutes } from "./routes/groups.js";
 import { createAppearanceRoutes } from "./routes/appearance.js";
+import { createSyncRulesRoutes } from "./routes/sync-rules.js";
+import {
+  BAALDAIGNORE_FEATURE,
+  MORE_FILE_TYPES_FEATURE,
+  SYNC_FOLDER_SWITCHES_FEATURE,
+  SYNC_RULES_FEATURE,
+} from "../sync-rules/schema.js";
 import { createFontRoutes } from "./fonts.js";
 import { createSkillRoutes } from "./routes/skills.js";
 import { SKILL_ACCESS_FEATURE, SKILLS_FEATURE } from "../skills/feature.js";
@@ -31,8 +39,9 @@ import { openLinkRoutes, publicBaseUrl } from "./routes/open-link.js";
 import { esc } from "./pages.js";
 import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-links.js";
 import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
-import { blobRoutes, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
+import { blobRoutes, EMPTY_FILES_FEATURE, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
 import { setAttachmentCleanupNotifier } from "../blobs/attachment-cleanup.js";
+import { setBlobRefsNotifier } from "../blobs/refs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
@@ -339,13 +348,25 @@ export function createApp(deps: AppDeps): Hono {
         NOTES_WITH_STATE_FEATURE,
         BOOTSTRAP_ONLY_FEATURE,
         FILES_WITH_BYTES_FEATURE,
+        // `intent` takes 0-byte files (routes/blobs.ts).
+        EMPTY_FILES_FEATURE,
         ACCESS_BOARD_FEATURE,
+        // Access groups (migration 097, `routes/groups.ts`).
+        ACCESS_GROUPS_FEATURE,
         SKILLS_FEATURE,
         SKILL_ACCESS_FEATURE,
         // In-app messages (`/api/messages`, docs/MESSAGES.md).
         MESSAGES_FEATURE,
         // `DELETE /api/folders/:id?ifEmpty=1` (registry/tree-ops.ts).
         FOLDER_DELETE_IF_EMPTY_FEATURE,
+        // A setting just for a person decides over their groups; groups ask
+        // first and may be let decide (2026-11-27, migrations 101/102).
+        "personal-access",
+        // The vault's sync rules (`/api/orgs/:orgId/sync-rules`, #401).
+        SYNC_RULES_FEATURE,
+        MORE_FILE_TYPES_FEATURE,
+        SYNC_FOLDER_SWITCHES_FEATURE,
+        BAALDAIGNORE_FEATURE,
         // Client-held vault keys (W3), only while BAALDA_VAULT_KEYS is on.
         ...(vaultKeysEnabled() ? [VAULT_KEYS_FEATURE] : []),
       ],
@@ -467,6 +488,13 @@ export function createApp(deps: AppDeps): Hono {
     if (c.req.method !== "POST" || !c.req.path.startsWith("/api/auth/organization/")) {
       return auth.handler(c.req.raw);
     }
+    // Leaving goes through POST /api/orgs/:orgId/leave, which drops the
+    // leaver's own access rows and keys with the membership and refuses the
+    // owner. Better Auth's leave has no organization hook and did neither, so a
+    // member who left through it got every per-person row back on rejoining.
+    if (c.req.method === "POST" && c.req.path === "/api/auth/organization/leave") {
+      return c.json({ error: "leave_not_supported_here", message: "Leave a vault with POST /api/orgs/:orgId/leave." }, 403);
+    }
     const session = await getSession(c);
     const response = await auditRequestActor.run(session?.userId ?? null, () => auth.handler(c.req.raw));
     // Better Auth's leave endpoint bypasses its afterRemoveMember hook.
@@ -489,6 +517,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api", memberRoutes);
   app.route("/api", accessAuditRoutes);
   app.route("/api", createAppearanceRoutes(deps));
+  app.route("/api", createSyncRulesRoutes());
   app.route("/api", createSkillRoutes());
   app.route("/api", createMessageRoutes());
   // Client-held vault keys (W3): off unless BAALDA_VAULT_KEYS is on. The
@@ -500,6 +529,10 @@ export function createApp(deps: AppDeps): Hono {
   app.route(
     "/api",
     createMemberShareRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),
+  );
+  app.route(
+    "/api",
+    createGroupRoutes({ disconnectDoc: deps.disconnectDoc, onAclChanged: deps.onAclChanged }),
   );
   // Password reset request that reports sent / no account / failed (Better
   // Auth's own endpoint is neutral and swallows send errors).
@@ -547,6 +580,7 @@ export function createApp(deps: AppDeps): Hono {
   setAttachmentCleanupNotifier(
     deps.onRegistryChanged ? (vaultId) => deps.onRegistryChanged?.(vaultId, null) : null,
   );
+  setBlobRefsNotifier(deps.onRegistryChanged ? (vaultId) => deps.onRegistryChanged?.(vaultId, null) : null);
   app.route("/api", blobRoutes);
   app.route(
     "/api",

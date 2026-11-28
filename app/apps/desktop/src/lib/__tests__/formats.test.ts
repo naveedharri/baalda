@@ -49,7 +49,7 @@ describe("formatFor", () => {
   });
 
   it("does not know file types we never registered", () => {
-    expect(formatFor("archive.rar")).toBeUndefined();
+    expect(formatFor("disk.dmg")).toBeUndefined();
     expect(formatFor("app.exe")).toBeUndefined();
   });
 });
@@ -101,7 +101,7 @@ describe("mimeForPath / extForMime", () => {
   });
 
   it("falls back to octet-stream, and has no ext for an unknown MIME", () => {
-    expect(mimeForPath("thing.rar")).toBe(OCTET_STREAM);
+    expect(mimeForPath("thing.dmg")).toBe(OCTET_STREAM);
     expect(mimeForPath("Makefile")).toBe(OCTET_STREAM);
     expect(extForMime("application/x-nonsense")).toBeUndefined();
   });
@@ -133,6 +133,25 @@ describe("viewerFor", () => {
     expect(viewerFor("a.docx")).toBe("docx");
     expect(viewerFor("a.xlsx")).toBe("xlsx");
     expect(viewerFor("a.json")).toBe("code");
+  });
+
+  // #401: the optional groups. Off by default (not surfaced), always openable,
+  // and switched on per vault by the sync rules.
+  it("keeps optional types out of the default set until their group is on", async () => {
+    const { isSurfacedFormat, setEnabledOptIns } = await import("../formats");
+    const ts = formatFor("src/app.ts")!;
+    const font = formatFor("brand/logo.woff2")!;
+    expect(ts.optIn).toBe("code");
+    expect(font.optIn).toBe("extra");
+    expect(isSurfacedFormat(ts)).toBe(false);
+    setEnabledOptIns(["code"]);
+    expect(isSurfacedFormat(ts)).toBe(true);
+    expect(isSurfacedFormat(font)).toBe(false);
+    setEnabledOptIns([]);
+    expect(isSurfacedFormat(ts)).toBe(false);
+    expect(viewerFor("main.rb")).toBe("code");
+    expect(mimeForPath("main.ts")).toBe("text/x-typescript");
+    expect(viewerFor("logo.psd")).toBe("card");
   });
 
   it("gives an unknown type the card rather than a dead click", () => {

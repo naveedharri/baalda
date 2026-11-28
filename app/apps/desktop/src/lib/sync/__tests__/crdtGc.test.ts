@@ -10,6 +10,20 @@ import { collectCrdtGarbage } from "../crdtGc";
 const report = { docsRemoved: 0, updatesRemoved: 0, bytesReclaimed: 0 };
 
 describe("collectCrdtGarbage", () => {
+  it("hands the live set to onPruned only after a prune that succeeded", async () => {
+    const seen: string[][] = [];
+    await collectCrdtGarbage(
+      { registryDocIds: () => ["a"], localNotes: async () => [{ id: "b" }], prune: vi.fn().mockResolvedValue(report) },
+      { onPruned: (live) => seen.push([...live].sort()) },
+    );
+    expect(seen).toEqual([["a", "b"]]);
+    await collectCrdtGarbage(
+      { registryDocIds: () => ["a"], localNotes: async () => [], prune: vi.fn().mockRejectedValue(new Error("busy")) },
+      { onPruned: (live) => seen.push([...live]) },
+    );
+    expect(seen).toHaveLength(1);
+  });
+
   it("passes the union of BOTH live id spaces", async () => {
     // A local CRDT can be keyed by the registry's server docId or by the local
     // index's notes.id. They are the same value in a vault registered from a

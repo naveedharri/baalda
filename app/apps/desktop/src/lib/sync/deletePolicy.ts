@@ -20,6 +20,9 @@ export const NOT_CREATOR_MESSAGE = "Only the person who created this, or an admi
 /** `ReconcileItem.detail` marker for a disk delete the server refused on this rule. */
 export const NOT_CREATOR_DETAIL = "delete-not-creator";
 
+/** `ReconcileItem.detail` marker for a disk delete refused on view-only access. */
+export const VIEW_ONLY_DELETE_DETAIL = "delete-view-only";
+
 export function isNotCreatorCode(code: string | null | undefined): boolean {
   return !!code && NOT_CREATOR_CODES.has(code);
 }
@@ -33,6 +36,31 @@ export function notCreatorCodeOf(err: unknown): string | null {
       ? (body as { code?: unknown }).code
       : null;
   return typeof code === "string" && NOT_CREATOR_CODES.has(code) ? code : null;
+}
+
+/** Code of a delete refused because the caller can only view the note (older
+ *  servers send the same 403 with no code). */
+export const NO_EDIT_DELETE_CODE = "no_edit_permission";
+
+/** The sentence for a disk delete refused on view-only access. */
+export const VIEW_ONLY_DELETE_MESSAGE = "You can only view this, so it can't be deleted";
+
+/**
+ * A delete the server refused because the caller cannot edit the note:
+ * `DELETE /api/notes/:id`'s 403 `no_edit_permission` (or no code at all from a
+ * server before it had one), or a batch item's `denied`. Like the creator rule,
+ * the delete did not happen, so the file is put back rather than left gone on
+ * this device only (a member's delete of a view-only note used to stay gone here
+ * until some later pull).
+ */
+export function isNoEditDeleteRefusal(err: unknown): boolean {
+  if (!(err instanceof ApiError) || err.status !== 403) return false;
+  const body = err.body;
+  const code =
+    body && typeof body === "object" && "code" in body
+      ? (body as { code?: unknown }).code
+      : null;
+  return code == null || code === NO_EDIT_DELETE_CODE;
 }
 
 /** Owners and admins delete anything; anyone else only what they created. */

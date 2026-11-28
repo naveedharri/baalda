@@ -1,6 +1,15 @@
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { memberAccessSnapshot, personalVaultLevel, type PersonalVaultLevel, vaultBaseline } from "./resolver.js";
+import {
+  memberAccessSnapshot,
+  memberGroupIds,
+  personalVaultLevel,
+  type PersonalVaultLevel,
+  vaultBaseline,
+  createResolverCache,
+  effectivePermission,
+  raiseMarksFor,
+} from "./resolver.js";
 
 type Queryable = Pick<pg.Pool, "query">;
 
@@ -56,6 +65,15 @@ export async function vaultAccess(
   role: string | null;
   vaultWide: boolean;
   personal: PersonalVaultLevel;
+  /** The access groups whose grants apply to this person: their groups while
+   *  they are a member with no vault level of their own, else none ([[resolver]]
+   *  `rowsGroupGrant` — a person's own level ignores groups). */
+  groupIds: string[];
+  /** One of `groupIds` holds a grant on the whole vault. */
+  groupVault: boolean;
+  /** One of `groupIds` holds a grant on the whole vault AND no No access row
+   *  anywhere in it, so it reaches every doc ([[resolver]] `rowsGroupGrant`). */
+  groupWhole: boolean;
 } | null> {
   const org = await db.query<{ organization_id: string; role: string | null }>(
     `SELECT v.organization_id, m.role
@@ -69,7 +87,29 @@ export async function vaultAccess(
   if (!row) return null;
   const personal = await personalVaultLevel(db, row.organization_id, userId);
   const base = { organizationId: row.organization_id, role: row.role, personal };
-  if (personal !== null) return { ...base, vaultWide: personal !== "denied" };
+  if (personal !== null) {
+    return { ...base, vaultWide: personal !== "denied", groupIds: [], groupVault: false, groupWhole: false };
+  }
+  const groupIds = row.role !== null ? await memberGroupIds(db, row.organization_id, userId) : [];
+  const groupVaultRows =
+    groupIds.length > 0
+      ? (
+          await db.query<{ whole: boolean }>(
+            `SELECT NOT EXISTS (
+                     SELECT 1 FROM shares d
+                      WHERE d.principal_type = 'group' AND d.principal_id = s.principal_id
+                        AND d.permission = 'denied'
+                   ) AS whole
+               FROM shares s
+              WHERE s.resource_type = 'vault' AND s.resource_id = $1
+                AND s.principal_type = 'group' AND s.principal_id = ANY($2::text[])
+                AND s.permission IN ('view', 'edit')`,
+            [row.organization_id, groupIds],
+          )
+        ).rows
+      : [];
+  const groupVault = groupVaultRows.length > 0;
+  const groupWhole = groupVaultRows.some((r) => r.whole);
   const orgClause = row.role !== null ? "principal_type = 'org' OR" : "";
   const grant = await db.query(
     `SELECT 1 FROM shares
@@ -79,7 +119,7 @@ export async function vaultAccess(
       LIMIT 1`,
     [row.organization_id, userId],
   );
-  return { ...base, vaultWide: (grant.rowCount ?? 0) > 0 };
+  return { ...base, vaultWide: groupWhole || (grant.rowCount ?? 0) > 0, groupIds, groupVault, groupWhole };
 }
 
 /**
@@ -343,16 +383,142 @@ function shareRead<T>(shared: SharedVaultReads | undefined, key: string, read: (
   return p;
 }
 
+
+/**
+ * What a person's access GROUPS reach in one collection, folded exactly as
+ * [[resolver]] `rowsGroupGrant` decides one item: for each group the deepest of
+ * its rows wins (a file row, else the nearest folder row, else the vault row),
+ * a group's `denied` stops only that group, groups combine highest-wins, and a
+ * join snapshot skips group GRANTS at or below its revision for content that
+ * existed at the join (a `denied` row is never skipped).
+ *
+ * `docs` = readable notes (+ files, live only); `folders` = folders a group
+ * reaches itself (the tree's seeds). Empty when the person has no group rows.
+ */
+export async function groupReachInVault(
+  db: Queryable,
+  organizationId: string,
+  vaultId: string,
+  groupIds: readonly string[],
+  snapshot: Awaited<ReturnType<typeof memberAccessSnapshot>> | null,
+  opts: { deleted: boolean; vaultRowSeedsFolders?: boolean } = { deleted: false },
+): Promise<{ docs: Set<string>; folders: Set<string> }> {
+  // Reach is about READING, and an Open or Read-only join snapshot already
+  // gives the person the existing content (the resolver's snapshot branch), so
+  // skipping the team's older group rows only changes anything under a Private
+  // snapshot. Ignoring the others keeps empty pre-join folders in their tree.
+  if (snapshot && snapshot.mode !== "private") snapshot = null;
+  const out = { docs: new Set<string>(), folders: new Set<string>() };
+  if (groupIds.length === 0) return out;
+  const { rows: grows } = await db.query<{
+    resource_type: string; resource_id: string; principal_id: string; permission: string; access_revision: string | number;
+    legacy_team_grant: boolean;
+  }>(
+    `SELECT resource_type, resource_id, principal_id, permission, access_revision, legacy_team_grant FROM shares
+      WHERE principal_type = 'group' AND principal_id = ANY($1::text[])
+        AND permission IN ('view', 'edit', 'denied')
+        AND ((resource_type = 'vault' AND resource_id = $2)
+          OR (resource_type = 'folder' AND resource_id IN (SELECT id FROM folders WHERE vault_id = $3))
+          OR resource_type = 'file')`,
+    [[...groupIds], organizationId, vaultId],
+  );
+  if (grows.length === 0) return out;
+  const live = opts.deleted ? "deleted_at IS NOT NULL" : "deleted_at IS NULL";
+  const [{ rows: folders }, { rows: docs }] = await Promise.all([
+    db.query<{ id: string; parent_id: string | null; created_at: Date }>(
+      `SELECT id, parent_id, created_at FROM folders WHERE vault_id = $1`,
+      [vaultId],
+    ),
+    db.query<{ id: string; folder_id: string | null; created_at: Date }>(
+      opts.deleted
+        ? `SELECT id, folder_id, created_at FROM notes WHERE vault_id = $1 AND ${live}`
+        : `SELECT id, folder_id, created_at FROM notes WHERE vault_id = $1 AND ${live}
+           UNION ALL
+           SELECT id, folder_id, created_at FROM files fi
+            WHERE vault_id = $1 AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = fi.id AND n.vault_id = $1 AND n.deleted_at IS NULL)`,
+      [vaultId],
+    ),
+  ]);
+  type P = "edit" | "view" | "denied";
+  const rank = (p: P | undefined) => (p === "edit" ? 2 : p === "view" ? 1 : 0);
+  const parent = new Map(folders.map((f) => [f.id, f.parent_id]));
+  const atJoin = (at: Date | undefined) => !!snapshot && !!at && at <= snapshot.snapshotAt;
+  // Per group, per variant (all rows / rows a snapshot does not skip): row maps.
+  const byGroup = new Map<string, { all: Map<string, P>; fresh: Map<string, P> }>();
+  // Groups whose vault row stands for the old team posture (migration 101).
+  const legacyVault = new Set<string>();
+  for (const r of grows) {
+    const g = byGroup.get(r.principal_id) ?? { all: new Map(), fresh: new Map() };
+    byGroup.set(r.principal_id, g);
+    const key = `${r.resource_type}:${r.resource_id}`;
+    const p = r.permission as P;
+    g.all.set(key, p);
+    if (r.legacy_team_grant && r.resource_type === "vault") legacyVault.add(r.principal_id);
+    // Only the converted Everyone groups' rows are skipped by a snapshot (see
+    // resolver `rowsGroupGrant`); any other group gives what it opens.
+    if (p === "denied" || !snapshot || !r.legacy_team_grant || Number(r.access_revision) > snapshot.accessRevision) g.fresh.set(key, p);
+  }
+  // The deepest row of one group on a folder chain (folder itself first).
+  const folderDecision = (rowsOf: Map<string, P>, folderId: string | null, memo: Map<string | null, P | undefined>): P | undefined => {
+    const seen: Array<string | null> = [];
+    let cur = folderId;
+    let found: P | undefined;
+    for (let guard = 0; guard < 10_000; guard++) {
+      if (memo.has(cur)) { found = memo.get(cur); break; }
+      seen.push(cur);
+      if (cur === null) { found = rowsOf.get(`vault:${organizationId}`); break; }
+      const own = rowsOf.get(`folder:${cur}`);
+      if (own) { found = own; break; }
+      cur = parent.get(cur) ?? null;
+    }
+    for (const s of seen) memo.set(s, found);
+    return found;
+  };
+  const memos = new Map<string, { all: Map<string | null, P | undefined>; fresh: Map<string | null, P | undefined> }>();
+  for (const g of byGroup.keys()) memos.set(g, { all: new Map(), fresh: new Map() });
+  const best = (fileKey: string | null, folderId: string | null, existing: boolean): number => {
+    let top = 0;
+    for (const [g, maps] of byGroup) {
+      const rowsOf = existing ? maps.fresh : maps.all;
+      const memo = existing ? memos.get(g)!.fresh : memos.get(g)!.all;
+      const own = fileKey ? rowsOf.get(fileKey) : undefined;
+      const p = own ?? folderDecision(rowsOf, folderId, memo);
+      top = Math.max(top, rank(p));
+      if (top === 2) break;
+    }
+    return top;
+  };
+  for (const d of docs) if (best(`file:${d.id}`, d.folder_id, atJoin(d.created_at)) > 0) out.docs.add(d.id);
+  // Under a Private join snapshot the team's whole-vault grant never put EMPTY
+  // folders in the tree (only folder rows and readable notes did), so for those
+  // people the converted Everyone group's vault row does not seed folders either.
+  if (opts.vaultRowSeedsFolders === false) {
+    for (const [g, maps] of byGroup) {
+      if (!legacyVault.has(g)) continue;
+      maps.all.delete(`vault:${organizationId}`);
+      maps.fresh.delete(`vault:${organizationId}`);
+    }
+    for (const m of memos.values()) { m.all.clear(); m.fresh.clear(); }
+  }
+  for (const f of folders) if (best(null, f.id, atJoin(f.created_at)) > 0) out.folders.add(f.id);
+  return out;
+}
+
 async function listDocsInVault(
   userId: string,
   vaultId: string,
   db: Queryable,
-  opts: { deleted: boolean },
+  opts: { deleted: boolean; reach?: Promise<{ docs: Set<string>; folders: Set<string> }> },
   shared?: SharedVaultReads,
 ): Promise<Set<string>> {
   const access = await vaultAccess(db, userId, vaultId);
   if (!access) return new Set(); // unknown vault
-  const { organizationId, role, vaultWide, personal } = access;
+  const { organizationId, role, vaultWide, personal, groupIds } = access;
+  // Groups are folded in TypeScript ({@link groupReachInVault}) because a
+  // group's No access row decides by depth, which these set queries cannot
+  // express. Tombstones keep the plain SQL lift (their folder may be gone, and
+  // the only cost is naming a deleted id the person never held).
+  const sqlGroupIds = opts.deleted ? groupIds : [];
 
   // The ONLY difference between the two sets. `files` has no `deleted_at`
   // column, so a tombstone can never be a file — the UNIONs below drop out.
@@ -447,7 +613,7 @@ async function listDocsInVault(
   // authorship no longer keeps a doc, so the "reaches it personally" set is
   // per-user shares ONLY. The normal call keeps it — a member still reads the
   // notes they wrote.
-  const scopedDocs = async (orgGrants: boolean, creatorCounts = true): Promise<Set<string>> => {
+  const scopedDocs = async (orgGrants: boolean, creatorCounts = true, withGroups = true): Promise<Set<string>> => {
     const { rows } = await db.query<{ id: string }>(
       `WITH RECURSIVE shared_folders AS (
           SELECT resource_id AS id FROM shares
@@ -455,6 +621,7 @@ async function listDocsInVault(
              AND (
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
+               OR (principal_type = 'group' AND principal_id = ANY($7::text[]))
              )
        ),
        subtree AS (
@@ -468,6 +635,7 @@ async function listDocsInVault(
              AND (
                (principal_type = 'user' AND principal_id = $1)
                OR ($4 AND $5 AND principal_type = 'org' AND principal_id = $3)
+               OR (principal_type = 'group' AND principal_id = ANY($7::text[]))
              )
        ),
        -- A per-USER grant on the VAULT resource, which reaches every doc in it.
@@ -479,11 +647,16 @@ async function listDocsInVault(
        --
        -- Deliberately per-user only: the ORG-principal vault grant is the vault
        -- posture, which vaultAccess has already answered as vaultWide.
+       --
+       -- A group's vault grant reaches every doc the same way (groups are a
+       -- named set of people: they rescue from item-Private like a per-user
+       -- grant does). $7 is empty when groups do not apply to this person.
        user_vault_grant AS (
           SELECT 1 FROM shares
            WHERE resource_type = 'vault' AND resource_id = $3
              AND permission IN ('view', 'edit', 'readonly')
-             AND principal_type = 'user' AND principal_id = $1
+             AND ((principal_type = 'user' AND principal_id = $1)
+               OR (principal_type = 'group' AND principal_id = ANY($7::text[])))
        )${deadFolderCte}
        SELECT n.id FROM notes n
          WHERE n.vault_id = $2 AND n.${livePredicate}
@@ -495,7 +668,7 @@ async function listDocsInVault(
              ${deadFolderPredicate}
            )
        ${filesUnion}`,
-      [userId, vaultId, organizationId, isMember, orgGrants, creatorCounts],
+      [userId, vaultId, organizationId, isMember, orgGrants, creatorCounts, withGroups ? sqlGroupIds : []],
     );
     return new Set(rows.map((r) => r.id));
   };
@@ -567,14 +740,18 @@ async function listDocsInVault(
     if (snapshot.mode === "private") {
       for (const id of existing) reachable.delete(id);
 
-      // Personal grants always survive the initial snapshot. Team grants only
-      // survive when their ACL revision is newer than the one captured at join.
+      // Personal and group grants always survive the initial snapshot, except
+      // the converted Everyone groups' (`legacy_team_grant`), which stand for
+      // the team: team grants only survive when their ACL revision is newer
+      // than the one captured at join.
       const allowed = await db.query<{ id: string }>(
         `WITH RECURSIVE allowed_folders AS (
            SELECT resource_id AS id FROM shares
             WHERE resource_type = 'folder'
               AND permission IN ('view', 'edit', 'readonly')
               AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'group' AND principal_id = ANY($6::text[])
+                    AND (access_revision > $4 OR NOT legacy_team_grant))
                 OR (principal_type = 'org' AND principal_id = $3
                     AND access_revision > $4))
          ), subtree AS (
@@ -586,6 +763,8 @@ async function listDocsInVault(
             WHERE resource_type = 'file'
               AND permission IN ('view', 'edit', 'readonly')
               AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'group' AND principal_id = ANY($6::text[])
+                    AND (access_revision > $4 OR NOT legacy_team_grant))
                 OR (principal_type = 'org' AND principal_id = $3
                     AND access_revision > $4))
          ), vault_grant AS (
@@ -593,6 +772,8 @@ async function listDocsInVault(
             WHERE resource_type = 'vault' AND resource_id = $3
               AND permission IN ('view', 'edit', 'readonly')
               AND ((principal_type = 'user' AND principal_id = $1)
+                OR (principal_type = 'group' AND principal_id = ANY($6::text[])
+                    AND (access_revision > $4 OR NOT legacy_team_grant))
                 OR (principal_type = 'org' AND principal_id = $3
                     AND access_revision > $4))
          )
@@ -611,7 +792,7 @@ async function listDocsInVault(
                      OR f.id IN (SELECT id FROM allowed_files)
                      OR EXISTS (SELECT 1 FROM vault_grant))`
          }`,
-        [userId, vaultId, organizationId, snapshot.accessRevision, snapshot.snapshotAt],
+        [userId, vaultId, organizationId, snapshot.accessRevision, snapshot.snapshotAt, sqlGroupIds],
       );
       for (const row of allowed.rows) reachable.add(row.id);
     } else {
@@ -619,11 +800,39 @@ async function listDocsInVault(
     }
   }
 
+  // What the person's groups reach: they lift through an item set Private and
+  // past a join snapshot (minus the grants it accounts for), like a grant does.
+  // Skipped when it cannot add anything: a whole-vault group already made the
+  // set everything, and nothing below removes from it.
+  // Tombstones: the SQL lift above already counts groups, but it cannot see a
+  // group's own No access rows, so inside an item the team cannot reach only
+  // this fold (which can) rescues a tombstone for the person's groups.
+  const needGroups = groupIds.length > 0 &&
+    (opts.deleted ? orgDenied.size > 0 : !vaultWide || orgDenied.size > 0 || snapshot?.mode === "private");
+  const groupDocs = needGroups
+    ? (await (opts.reach ?? groupReachInVault(db, organizationId, vaultId, groupIds, snapshot, { deleted: opts.deleted }))).docs
+    : new Set<string>();
   if (orgDenied.size > 0) {
-    const personal = await scopedDocs(false, false);
-    for (const id of orgDenied) if (!personal.has(id)) reachable.delete(id);
+    const personal = await scopedDocs(false, false, false);
+    for (const id of orgDenied) if (!personal.has(id) && !groupDocs.has(id)) reachable.delete(id);
   }
-  return subtract(reachable, userDenied);
+  for (const id of groupDocs) reachable.add(id);
+  const result = subtract(reachable, userDenied);
+  // "Sales may raise Sam here" marks can lift a doc a setting just for the
+  // person keeps from them (resolver `RaiseMark`). Rare, so resolve those
+  // candidates one by one through the enforcer rather than in SQL.
+  if (!opts.deleted && role !== null && (await raiseMarksFor(db, organizationId, userId)).length > 0) {
+    const { rows } = await db.query<{ id: string }>(
+      `SELECT id FROM notes WHERE vault_id = $1 AND deleted_at IS NULL
+       UNION SELECT id FROM files WHERE vault_id = $1`,
+      [vaultId],
+    );
+    const candidates = rows.map((r) => r.id).filter((id) => !result.has(id));
+    const cache = createResolverCache();
+    await cache.prefetch(db, candidates);
+    for (const id of candidates) if ((await effectivePermission(userId, id, db, cache)) !== "none") result.add(id);
+  }
+  return result;
 }
 
 /** `a` minus `b`, in place on `a`. */
@@ -717,13 +926,31 @@ export async function listVisibleFolders(
   // user created themselves stays visible either way (that's "only you").
   const userDenied = await deniedFolderIds(db, "user", userId, vaultId);
   const orgDenied = await deniedFolderIds(db, "org", access.organizationId, vaultId);
+  // A person's own vault level replaces the join snapshot (see `listDocsInVault`).
+  const snapshot = access.personal !== null ? null : await memberAccessSnapshot(db, access.organizationId, userId);
+  // Folders the person's groups reach, folded by depth ({@link groupReachInVault}).
+  // Worked out once and handed to the readable set below, which needs the same.
+  const reach = groupReachInVault(db, access.organizationId, vaultId, access.groupIds, snapshot);
+  const groupFolders =
+    snapshot?.mode === "private"
+      ? (await groupReachInVault(db, access.organizationId, vaultId, access.groupIds, snapshot, {
+          deleted: false,
+          vaultRowSeedsFolders: false,
+        })).folders
+      : (await reach).folders;
+  let readableOnce: Promise<Set<string>> | null = null;
+  const readableHereOnce = () =>
+    (readableOnce ??= listDocsInVault(userId, vaultId, db, { deleted: false, reach }));
   // Item Private withdraws the team grant, but explicit per-user grants still
   // reach their subtree, exactly as they do for notes. Empty folders have no
   // readable note to bring them into the tree, so this must be folder-based.
   if (orgDenied.size > 0) {
+    // A group's whole-vault grant rescues like a personal one ([[resolver]]
+    // `rowsGroupGrant` applies on an item set Private).
     if (access.personal === "edit" || access.personal === "view") {
       orgDenied.clear();
     } else {
+      for (const id of groupFolders) orgDenied.delete(id);
       const { rows: personalFolders } = await db.query<{ id: string }>(
         `WITH RECURSIVE granted AS (
            SELECT f.id FROM folders f JOIN shares s ON s.resource_id = f.id
@@ -747,7 +974,7 @@ export async function listVisibleFolders(
   // lifted — the path to that note. Only read when such a deny exists.
   const liftedHomes = new Set<string>();
   if (userDenied.size > 0 || orgDenied.size > 0) {
-    const readableHere = await listReadableDocsInVault(userId, vaultId, db);
+    const readableHere = await readableHereOnce();
     const { rows: homes } = await db.query<{ folder_id: string }>(
       `SELECT DISTINCT folder_id FROM notes
         WHERE vault_id = $1 AND deleted_at IS NULL AND folder_id = ANY($2::text[]) AND id = ANY($3::text[])
@@ -778,13 +1005,11 @@ export async function listVisibleFolders(
     }
     return all.rows.filter((f) => ids.has(f.id));
   };
-  // A person's own vault level replaces the join snapshot (see `listDocsInVault`).
-  const snapshot = access.personal !== null ? null : await memberAccessSnapshot(db, access.organizationId, userId);
   if (access.vaultWide && snapshot?.mode !== "private") {
     return finish(all.rows.filter((f) => !hidden(f.id)));
   }
 
-  const readable = await listReadableDocsInVault(userId, vaultId, db);
+  const readable = await readableHereOnce();
   // A personal `denied` drops org item grants, so team folder shares seed nothing.
   const isMember = access.role !== null && access.personal !== "denied";
   // Authorship seeds the tree everywhere EXCEPT in a SEALED vault, which drops
@@ -802,6 +1027,7 @@ export async function listVisibleFolders(
            AND (
              (principal_type = 'user' AND principal_id = $1)
              OR ($4 AND principal_type = 'org' AND principal_id = $3)
+             OR (principal_type = 'group' AND principal_id = ANY($7::text[]))
            )
      ),
      down AS (
@@ -822,9 +1048,10 @@ export async function listVisibleFolders(
         SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id AND f.vault_id = $2
      )
      SELECT DISTINCT id FROM up`,
-    [userId, vaultId, access.organizationId, isMember, [...readable], authorSeeds],
+    [userId, vaultId, access.organizationId, isMember, [...readable], authorSeeds, []],
   );
   const visible = new Set(visibleIds.map((r) => r.id));
+  for (const id of groupFolders) visible.add(id);
   if (snapshot?.mode === "private") {
     const { rows: snapshotVisible } = await db.query<{ id: string }>(
       `WITH RECURSIVE granted AS (
@@ -832,6 +1059,7 @@ export async function listVisibleFolders(
           WHERE resource_type = 'folder'
             AND permission IN ('view', 'edit', 'readonly')
             AND ((principal_type = 'user' AND principal_id = $1)
+              OR (principal_type = 'group' AND principal_id = ANY($6::text[]))
               OR (principal_type = 'org' AND principal_id = $3
                   AND access_revision > $4))
        ), down AS (
@@ -854,9 +1082,10 @@ export async function listVisibleFolders(
          SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id AND f.vault_id = $2
        )
        SELECT id FROM up`,
-      [userId, vaultId, access.organizationId, snapshot.accessRevision, [...readable]],
+      [userId, vaultId, access.organizationId, snapshot.accessRevision, [...readable], []],
     );
     const admitted = new Set(snapshotVisible.map((row) => row.id));
+    for (const id of groupFolders) admitted.add(id);
     for (const folder of all.rows) {
       if (folder.created_at <= snapshot.snapshotAt && !admitted.has(folder.id)) {
         visible.delete(folder.id);

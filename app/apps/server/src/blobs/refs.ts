@@ -36,13 +36,25 @@ type Queryable = Pick<pg.Pool, "query">;
  *  `ensure_attachment_rel`, and the blob routes' own `safeAttachmentRelPath`). */
 const ATTACHMENT_DIR = "attachments";
 
-/** `![alt](src)` — an image embed. Mirrors `render/note-html.ts`'s own rule. */
-const IMAGE_RE = /!\[[^\]\n]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
+/**
+ * A link destination as CommonMark reads it: `<…>` (the form a path with
+ * spaces takes, title allowed after it), or a bare run holding at most one
+ * level of balanced parentheses (`pic(1).png`). Group 1 or group 2.
+ * Missing any of these left a picture a note shows unrecorded, and the purge
+ * of ANOTHER note embedding it the plain way deleted it for everyone.
+ */
+const DEST = String.raw`\s*(?:<([^<>\n]+)>|((?:[^()\s]|\([^()\s]*\))+))(?:\s+[^)]*)?\)`;
+
+/** `![alt](src)` — an image embed. */
+const IMAGE_RE = new RegExp(String.raw`!\[[^\]\n]*\]\(` + DEST, "g");
 
 /** `[text](src)` — a plain link. Every attachment that is not an image (a PDF,
  *  a docx, a zip) is embedded as one of these by the desktop, so a reference
  *  extractor that only read images would call every one of them an orphan. */
-const LINK_RE = /\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
+const LINK_RE = new RegExp(String.raw`\[[^\]\n]+\]\(` + DEST, "g");
+
+/** `[label]: src` — the definition a reference-style `![alt][label]` uses. */
+const REFDEF_RE = /^[ ]{0,3}\[[^\]\n]+\]:[ \t]*(?:<([^<>\n]+)>|(\S+))/gm;
 
 /** `![[target]]` / `[[target|alias]]` — the wiki form Obsidian vaults (and
  *  notes written by AI tools) use. Missing it left every such note referencing
@@ -50,7 +62,7 @@ const LINK_RE = /\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
 const WIKI_RE = /\[\[([^\]\n|#^]+)(?:[|#^][^\]\n]*)?\]\]/g;
 
 /** `<img src="…">` and friends in inline HTML. */
-const SRC_RE = /\b(?:src|href)\s*=\s*["']([^"'\s>]+)["']/gi;
+const SRC_RE = /\b(?:src|href)\s*=\s*(?:"([^"\n>]+)"|'([^'\n>]+)')/gi;
 
 /**
  * The attachment paths a note's markdown references, lowercased and deduped.
@@ -72,7 +84,7 @@ export function assetRefsFromMarkdown(markdown: string): string[] {
     // `../attachments/x.png` from a note in a folder: attachments live at the
     // root, so leading parent steps are dropped (a superset, which is the safe
     // direction for a reference).
-    const rel = relAssetPath(raw.trim().replace(/^(?:\.\.\/)+/, ""));
+    const rel = relAssetPath(raw.trim().replace(/^(?:\.\.?\/)+/, ""));
     if (rel === null) return;
     const segments = rel.split("/");
     if (segments.length < 2 || segments[0].toLowerCase() !== ATTACHMENT_DIR) return;
@@ -87,9 +99,10 @@ export function assetRefsFromMarkdown(markdown: string): string[] {
 
   // Images first; the link pattern would otherwise also match `![](…)`'s tail,
   // but both funnel into the same set, so an overlap costs nothing.
-  for (const m of markdown.matchAll(IMAGE_RE)) take(m[1]);
-  for (const m of markdown.matchAll(LINK_RE)) take(m[1]);
-  for (const m of markdown.matchAll(SRC_RE)) take(m[1]);
+  for (const m of markdown.matchAll(IMAGE_RE)) take(m[1] ?? m[2]);
+  for (const m of markdown.matchAll(LINK_RE)) take(m[1] ?? m[2]);
+  for (const m of markdown.matchAll(REFDEF_RE)) take(m[1] ?? m[2]);
+  for (const m of markdown.matchAll(SRC_RE)) take(m[1] ?? m[2]);
   for (const m of markdown.matchAll(WIKI_RE)) {
     const target = m[1].trim();
     if (target.includes("/")) {
@@ -125,22 +138,86 @@ export async function replaceBlobRefs(
   vaultId: string,
   markdown: string,
   db: Queryable = defaultPool,
+  opts: { announce?: boolean } = {},
 ): Promise<number> {
   const paths = assetRefsFromMarkdown(markdown);
-  await db.query(
+  const { rows: moved } = await db.query<{ rel_path: string }>(
     `WITH incoming AS (
        SELECT DISTINCT unnest($3::text[]) AS rel_path
      ), del AS (
        DELETE FROM blob_refs
         WHERE doc_id = $1
           AND (vault_id <> $2 OR rel_path NOT IN (SELECT rel_path FROM incoming))
+       RETURNING rel_path
+     ), ins AS (
+       INSERT INTO blob_refs (vault_id, rel_path, doc_id)
+       SELECT $2, i.rel_path, $1 FROM incoming i
+       ON CONFLICT (vault_id, rel_path, doc_id) DO NOTHING
+       RETURNING rel_path
      )
-     INSERT INTO blob_refs (vault_id, rel_path, doc_id)
-     SELECT $2, i.rel_path, $1 FROM incoming i
-     ON CONFLICT (vault_id, rel_path, doc_id) DO NOTHING`,
+     SELECT rel_path FROM ins UNION ALL SELECT rel_path FROM del`,
     [docId, vaultId, paths],
   );
+  // Gained OR lost: either can change which drops a member sees through this
+  // note (a lost one leaves their disk, #408), and neither says so otherwise.
+  if (opts.announce && moved.length > 0) await announceGainedRefs(vaultId, moved.map((r) => r.rel_path), db);
   return paths.length;
+}
+
+// ── telling the vault a note now shows a picture that is already there ──
+
+let refsNotifier: ((vaultId: string) => void) | null = null;
+/** Who tells a vault's devices to list attachments again (`registry-changed`). */
+export function setBlobRefsNotifier(fn: ((vaultId: string) => void) | null): void {
+  refsNotifier = fn;
+}
+
+/** Frames for one vault within this window go out as one. */
+const ANNOUNCE_COALESCE_MS = 1_500;
+const announceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * A note just started (or stopped) embedding an `attachments/` drop the server
+ * already holds. A member who reads that note but not the whole vault may see the
+ * drop only from now on, and nothing else says so: the upload's own frame went
+ * out when its bytes landed, usually BEFORE the edit embedding it was indexed,
+ * so their list then did not include it and their device never asked again
+ * (an embed added to an existing shared note stayed missing for them). One
+ * frame per vault per {@link ANNOUNCE_COALESCE_MS}; a failure only costs the
+ * shortcut.
+ */
+async function announceGainedRefs(vaultId: string, added: string[], db: Queryable): Promise<void> {
+  if (!refsNotifier || announceTimers.has(vaultId)) return;
+  try {
+    const { rows } = await db.query(
+      `SELECT 1 FROM blobs
+        WHERE vault_id = $1 AND status = 'ready' AND doc_id IS NULL AND lower(rel_path) = ANY($2::text[])
+        LIMIT 1`,
+      [vaultId, added],
+    );
+    if (rows.length === 0 || announceTimers.has(vaultId)) return;
+    const t = setTimeout(() => {
+      announceTimers.delete(vaultId);
+      try {
+        refsNotifier?.(vaultId);
+      } catch (err) {
+        console.warn(`[blob-refs] vault=${vaultId} broadcast failed:`, err);
+      }
+    }, ANNOUNCE_COALESCE_MS);
+    if (typeof t.unref === "function") t.unref();
+    announceTimers.set(vaultId, t);
+  } catch (err) {
+    console.warn(`[blob-refs] vault=${vaultId} checking new references failed:`, (err as Error).message);
+  }
+}
+
+/** Test hook: send every pending frame now. */
+export function flushBlobRefsAnnouncements(): void {
+  for (const [vaultId, t] of announceTimers) {
+    clearTimeout(t);
+    announceTimers.delete(vaultId);
+    refsNotifier?.(vaultId);
+  }
 }
 
 /** Drop the references of docs that no longer exist. Paired with

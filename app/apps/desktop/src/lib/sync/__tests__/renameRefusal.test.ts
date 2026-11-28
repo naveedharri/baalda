@@ -214,3 +214,76 @@ describe("VaultRegistry.renamePath — a move into a brand-new folder (#410)", (
     expect(reg.getMapping("Docs/done/old/a.md")?.docId).toBe("srv-Docs/a.md");
   });
 });
+
+describe("VaultRegistry.renamePath — a folder rename racing a teammate's move of its parent", () => {
+  it("renames under the parent's CURRENT server path", async () => {
+    const mismatch = () =>
+      new ApiError(400, 'Folder path "Docs/Specs2" is not inside its parent "Moved"', {
+        error: 'Folder path "Docs/Specs2" is not inside its parent "Moved"',
+        code: "path_folder_mismatch",
+      });
+    const { reg, api, updateFolder } = await registered(mismatch);
+    updateFolder.mockReset().mockRejectedValueOnce(mismatch()).mockResolvedValue({} as never);
+    vi.mocked(api.listFolderRegistry).mockResolvedValue({
+      folders: [{ id: "folder-Docs", path: "Moved" }] as never,
+      tombstones: [],
+    });
+    expect(await reg.renamePath("Docs/Specs", "Docs/Specs2")).toBe(true);
+    expect(updateFolder).toHaveBeenLastCalledWith("folder-Docs/Specs", {
+      name: "Specs2",
+      path: "Moved/Specs2",
+      parentId: "folder-Docs",
+    });
+    expect(reg.hasFailures()).toBe(false);
+  });
+});
+
+describe("VaultRegistry.renamePath — a rename racing a teammate's folder move", () => {
+  const mismatch = () =>
+    new ApiError(400, '"Docs/b.md" is not inside folder "Moved"', {
+      error: '"Docs/b.md" is not inside folder "Moved"',
+      code: "path_folder_mismatch",
+    });
+
+  it("renames under the folder's CURRENT server path, keeping the new name", async () => {
+    const { reg, api, updateNote } = await registered(mismatch);
+    updateNote.mockReset().mockRejectedValueOnce(mismatch()).mockResolvedValue({} as never);
+    vi.mocked(api.listFolderRegistry).mockResolvedValue({
+      folders: [{ id: "folder-Docs", path: "Moved" }] as never,
+      tombstones: [],
+    });
+
+    expect(await reg.renamePath("Docs/a.md", "Docs/b.md")).toBe(true);
+
+    expect(updateNote).toHaveBeenLastCalledWith("srv-Docs/a.md", {
+      relPath: "Moved/b.md",
+      folderId: "folder-Docs",
+    });
+    expect(reg.hasFailures()).toBe(false);
+    // Locally the file is still under the old directory until the pull follows
+    // the folder move, so the map names where it is on THIS disk.
+    expect(reg.getMapping("Docs/b.md")?.docId).toBe("srv-Docs/a.md");
+  });
+
+  it("a move to ANOTHER folder is not retried (the mismatch is about the destination)", async () => {
+    const { reg, api, updateNote } = await registered(mismatch);
+    updateNote.mockClear();
+    vi.mocked(api.listFolderRegistry).mockClear();
+    await reg.renamePath("Docs/a.md", "Docs/Specs/a.md");
+    expect(updateNote).toHaveBeenCalledTimes(1);
+    expect(api.listFolderRegistry).not.toHaveBeenCalled();
+    expect(reg.failures()).toContainEqual(expect.objectContaining({ code: "path_folder_mismatch" }));
+  });
+
+  it("a folder that did not move is not retried either", async () => {
+    const { reg, api, updateNote } = await registered(mismatch);
+    updateNote.mockClear();
+    vi.mocked(api.listFolderRegistry).mockResolvedValue({
+      folders: [{ id: "folder-Docs", path: "Docs" }] as never,
+      tombstones: [],
+    });
+    await reg.renamePath("Docs/a.md", "Docs/b.md");
+    expect(updateNote).toHaveBeenCalledTimes(1);
+    expect(reg.failures()).toContainEqual(expect.objectContaining({ code: "path_folder_mismatch" }));
+  });
+});

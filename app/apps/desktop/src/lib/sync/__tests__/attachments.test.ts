@@ -4,6 +4,7 @@ import {
   AttachmentSync,
   CHANGED_DURING_UPLOAD,
   UPLOAD_QUIET_MS,
+  TRANSIENT_RETRY_MS,
   diffAttachments,
   isSafeAttachmentRelPath,
   mimeForPath,
@@ -184,6 +185,54 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(local.has("Team/guide.pdf")).toBe(true);
   });
 
+  it("a file skipped for an open delete window is owed a pass when that window closes", async () => {
+    // A teammate's move lands the file here (the watcher opens a window on the
+    // arrival path) and their edit arrives inside it: the replacement is
+    // skipped, and nothing asked again until an unrelated change.
+    const bytes = new Uint8Array([5, 5, 5]);
+    const { deps } = makeDeps([], [{ id: "srv1", relPath: "Team/sheet.csv", bytes }]);
+    deps.isDeletePending = () => true;
+    const sync = new AttachmentSync(deps);
+    const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+    sync.deleteWindowClosed();
+    expect(again).not.toHaveBeenCalled(); // nothing was skipped yet
+
+    await sync.reconcile();
+    sync.deleteWindowClosed();
+    expect(again).toHaveBeenCalledTimes(1);
+    sync.deleteWindowClosed();
+    expect(again).toHaveBeenCalledTimes(1); // owed once, not on every window
+  });
+
+  it("a teammate's edit skipped inside an open window is replaced once that window closes", async () => {
+    // The live case: the file is here at the path a teammate's move brought
+    // it to, and their edit arrived inside the window that arrival opened.
+    const old = new Uint8Array([1, 1]);
+    const theirs = new Uint8Array([2, 2]);
+    const { deps, local } = makeDeps([{ relPath: "Team/sheet.csv", bytes: old }], [
+      { id: "blob-new", relPath: "Team/sheet.csv", bytes: theirs },
+    ]);
+    const listServer = deps.listServer;
+    deps.listServer = async () => (await listServer()).map((b) => ({ ...b, docId: "file-1" }));
+    const bases = new Map<string, string>([["file-1", "sha-1.1"]]);
+    deps.fileBase = (id) => bases.get(id) ?? null;
+    deps.setFileBase = (id, sha) => void bases.set(id, sha);
+    deps.knownFileId = (p) => (p === "Team/sheet.csv" ? "file-1" : null);
+    deps.writeTreeLocal = async (relPath, b) => void local.set(relPath, b);
+    let pending = true;
+    deps.isDeletePending = () => pending;
+    const sync = new AttachmentSync(deps);
+    const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(Array.from(local.get("Team/sheet.csv")!)).toEqual([1, 1]);
+    pending = false;
+    sync.deleteWindowClosed();
+    expect(again).toHaveBeenCalledTimes(1);
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+    expect(Array.from(local.get("Team/sheet.csv")!)).toEqual([2, 2]);
+  });
+
   it("keeps syncing embeds after a standalone-file plan refusal", async () => {
     const { deps, local, server } = makeDeps(
       [{ relPath: "standalone.pdf", bytes: new Uint8Array([1]) },
@@ -287,6 +336,37 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
     expect(onEntitlementBlocked).toHaveBeenCalledWith(true);
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("a pass cut off by the network asks again on its own, backing off until one succeeds", async () => {
+    const { deps } = makeDeps();
+    let fail = true;
+    const listServer = deps.listServer;
+    const delays: number[] = [];
+    const timers: Array<() => void> = [];
+    const setTimeoutImpl = ((cb: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      timers.push(cb);
+      return timers.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    const sync = new AttachmentSync(
+      { ...deps, listServer: () => (fail ? Promise.reject(new TypeError("Load failed")) : listServer()) },
+      400,
+      setTimeoutImpl,
+      (() => {}) as unknown as typeof clearTimeout,
+    );
+    await sync.reconcile();
+    expect(delays).toEqual([TRANSIENT_RETRY_MS]);
+    await sync.reconcile(); // another failing pass while the retry waits
+    expect(delays).toEqual([TRANSIENT_RETRY_MS]); // one retry timer at a time
+    timers[0]!(); // the retry timer fires → a debounced pass is armed
+    expect(delays).toEqual([TRANSIENT_RETRY_MS, 400]);
+    await sync.reconcile(); // the retry fails too: twice as long
+    expect(delays[delays.length - 1]).toBe(TRANSIENT_RETRY_MS * 2);
+    fail = false;
+    const n = delays.length;
+    await sync.reconcile(); // back online: no further retry
+    expect(delays.length).toBe(n);
   });
 
   it("scheduleReconcile debounces a burst into a single pass", () => {
@@ -913,9 +993,9 @@ describe("AttachmentSync per-file state (store.fileSyncState)", () => {
     expect(last()["Media/huge.mp4"]).toBe("error");
   });
 
-  it("settles an empty file without registering or announcing it", async () => {
-    // The server refuses a 0-byte blob (`invalid_size`); asking anyway used to
-    // mint a `files` row, fail, and leave the file `syncing` on every pass.
+  it("keeps an empty file local on a server without empty-files, never green", async () => {
+    // An older server refuses a 0-byte blob (`invalid_size`); asking anyway used
+    // to mint a `files` row, fail, and leave the file `syncing` on every pass.
     const registered: string[] = [];
     const { deps, log, last } = withStates(
       [
@@ -942,7 +1022,78 @@ describe("AttachmentSync per-file state (store.fileSyncState)", () => {
     expect(log.intents.map((i) => i.relPath)).not.toContain("Code/pkg/__init__.py");
     expect(registered).toContain("Code/pkg/main.py");
     expect(registered).not.toContain("Code/pkg/__init__.py");
-    expect(last()["Code/pkg/__init__.py"]).toBe("synced");
+    // The server does not hold it, so it is not "synced": it is local only
+    // (it used to read synced and turn every folder above it green).
+    expect(last()["Code/pkg/__init__.py"]).toBeUndefined();
+    expect(sync.localOnlyPaths()).toContainEqual(["Code/pkg/__init__.py", "unsynced"]);
+  });
+
+  it("sends an empty file like any other when the server takes them (empty-files)", async () => {
+    const { deps, log } = withStates(
+      [{ relPath: "Code/pkg/__init__.py", bytes: new Uint8Array([]) }],
+      () => SINGLE_INTENT,
+      {
+        emptyFiles: async () => true,
+        registerFile: async ({ id }) => id,
+        localFileIds: async () => new Map([["Code/pkg/__init__.py", "local-init"]]),
+      },
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    const asked = log.intents.filter((i) => i.relPath === "Code/pkg/__init__.py");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ size: 0 });
+  });
+
+  it("sends a file whose registration was refused at most once, never in a loop", async () => {
+    const { deps, log } = withStates(
+      [{ relPath: "Team/locked.pdf", bytes: new Uint8Array([9]) }],
+      () => serverError(400, "invalid_rel_path"),
+      {
+        registerFile: async () => {
+          throw serverError(403, "no_write_access");
+        },
+        localFileIds: async () => new Map([["Team/locked.pdf", "local-locked"]]),
+      },
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    await sync.reconcile();
+    await sync.reconcile();
+    expect(log.intents.filter((i) => i.relPath === "Team/locked.pdf").length).toBeLessThanOrEqual(1);
+  });
+
+  it("asks again for bytes refused for access once access changes", async () => {
+    // A short No access: every upload in that window is answered 403. Those
+    // answers are about access, so after it comes back an empty file (whose
+    // bytes every empty file shares) must not stay skipped until a relaunch.
+    let refuse = true;
+    const { deps, log } = withStates(
+      [{ relPath: "Code/new.py", bytes: new Uint8Array([3]) }],
+      () => (refuse ? serverError(403, "no_write_access") : SINGLE_INTENT),
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    await sync.reconcile();
+    const asked = () => log.intents.filter((i) => i.relPath === "Code/new.py").length;
+    expect(asked()).toBe(1);
+
+    refuse = false;
+    sync.forgetAccessRefusals();
+    await sync.reconcile();
+    expect(asked()).toBe(2);
+  });
+
+  it("marks a file green only when the server holds its bytes at that path", async () => {
+    const { deps, last } = withStates(
+      [{ relPath: "Docs/kept.pdf", bytes: new Uint8Array([7]) }],
+      () => SINGLE_INTENT,
+    );
+    const sync = new AttachmentSync(deps);
+    await sync.reconcile();
+    // Uploaded this pass ⇒ the server holds it.
+    expect(last()["Docs/kept.pdf"]).toBe("synced");
+    expect(sync.localOnlyPaths()).toEqual([]);
   });
 
   it.each([
@@ -1611,5 +1762,41 @@ describe("tree binaries a download can never settle", () => {
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
     fail = false;
     expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+  });
+});
+
+describe("transfer order", () => {
+  const sizes = { "attachments/big.mp4": 40, "attachments/tiny.png": 1, "attachments/mid.pdf": 8 };
+  const bytesOf = (n: number) => new Uint8Array(n).fill(n);
+
+  it("downloads the smallest files first, so a big video never holds the rest back", async () => {
+    const seed = Object.entries(sizes).map(([relPath, n], i) => ({ id: `s${i}`, relPath, bytes: bytesOf(n) }));
+    const { deps, local, server } = makeDeps([], seed);
+    const order: string[] = [];
+    const sync = new AttachmentSync({
+      ...deps,
+      listServer: async () => (await deps.listServer()).map((b) => ({ ...b, size: server.get(b.id)!.bytes.byteLength })),
+      downloadServer: async (id) => {
+        order.push(server.get(id)!.relPath);
+        return deps.downloadServer(id);
+      },
+    });
+    await sync.reconcile();
+    expect(order).toEqual(["attachments/tiny.png", "attachments/mid.pdf", "attachments/big.mp4"]);
+    expect(local.size).toBe(3);
+  });
+
+  it("uploads the smallest files first", async () => {
+    const seed = Object.entries(sizes).map(([relPath, n]) => ({ relPath, bytes: bytesOf(n) }));
+    const { deps } = makeDeps(seed, []);
+    const order: string[] = [];
+    await new AttachmentSync({
+      ...deps,
+      uploadServer: async (...args: Parameters<AttachmentSyncDeps["uploadServer"]>) => {
+        order.push(args[0]);
+        return deps.uploadServer(...args);
+      },
+    }).reconcile();
+    expect(order).toEqual(["attachments/tiny.png", "attachments/mid.pdf", "attachments/big.mp4"]);
   });
 });

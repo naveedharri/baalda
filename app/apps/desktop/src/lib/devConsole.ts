@@ -1,14 +1,15 @@
 // Dev-only: mirror the webview console into the Tauri process's stdout via the
 // log plugin (its Stdout target is configured in src-tauri/src/lib.rs), so sync
 // diagnostics can be read from the `tauri dev` terminal instead of only from the
-// Web Inspector. A no-op in production builds.
+// Web Inspector. A no-op in production builds, unless the build was made with
+// VITE_CONSOLE_MIRROR=1 (local multi-app tests read their sync logs this way).
 
 import { attachEarlySink } from "./perf";
 
 type Sink = (message: string) => Promise<void>;
 
 export function mirrorConsoleToTerminal(): void {
-  if (!import.meta.env.DEV) return;
+  if (!import.meta.env.DEV && import.meta.env.VITE_CONSOLE_MIRROR !== "1") return;
   // Imported inside the DEV guard so the log plugin is not part of the
   // production startup chunk, which nothing there would ever call.
   void import("@tauri-apps/plugin-log").then(({ error, info, warn }) => {

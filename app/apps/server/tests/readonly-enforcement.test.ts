@@ -584,27 +584,14 @@ describe("live sync: a read-only connection cannot change a doc", () => {
 // ═══ 2. Revocation ═══════════════════════════════════════════════════════════
 
 describe("revocation: narrowing to read-only reaches live sockets", () => {
-  it("PUT /team-access {mode:'readonly'} force-closes every doc socket", async () => {
-    const f = await fixture();
-    await seedVaultGrant(f.orgId, "edit");
-
-    const res = await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, {
-      mode: "readonly",
-    });
-    expect(res.status).toBe(200);
-
-    const kicked = rec.disconnected.map((d) => d.docId);
-    expect(kicked).toContain(f.note);
-    expect(kicked).toContain(f.rootNote);
-    expect(kicked).toContain(f.memberNote);
-  });
-
   it("a RECONNECT after the switch mints a read-only token", async () => {
     const f = await fixture();
     await seedVaultGrant(f.orgId, "edit");
     expect((await mint(f.member, f.note)).readOnly).toBe(false);
 
-    await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "readonly" });
+    // The vault narrows to Can view (written directly: the API no longer
+    // changes Default access, but a person's or group's level can narrow too).
+    await pool.query("UPDATE shares SET permission = 'view' WHERE resource_type = 'vault' AND resource_id = $1 AND principal_type = 'org'", [f.orgId]);
 
     const after = await mint(f.member, f.note);
     expect(after.status).toBe(200);
@@ -624,7 +611,9 @@ describe("revocation: narrowing to read-only reaches live sockets", () => {
     expect(stale.readOnly).toBe(false);
 
     await seedDocText(f.vault, f.note, "canonical");
-    await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "readonly" });
+    // The vault narrows to Can view (written directly: the API no longer
+    // changes Default access, but a person's or group's level can narrow too).
+    await pool.query("UPDATE shares SET permission = 'view' WHERE resource_type = 'vault' AND resource_id = $1 AND principal_type = 'org'", [f.orgId]);
 
     // A fresh mint is correctly read-only…
     expect((await mint(f.member, f.note)).readOnly).toBe(true);
@@ -648,7 +637,7 @@ describe("revocation: narrowing to read-only reaches live sockets", () => {
 
     // Access revoked entirely: the vault goes Private, so a plain member has no
     // grant left on a note they did not create.
-    await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "private" });
+    await sealVault(f.orgId);
     expect((await mint(f.member, f.note)).status).toBe(403);
 
     await expectAuthRejected(f.vault, f.note, stale.token!);
@@ -721,18 +710,40 @@ describe("MCP write tools refuse a read-only caller", () => {
     expect((await mcpCall(token, "update_note", { docId: f.note, content: "ok" })).isError).toBe(
       false,
     );
+    const created = await mcpCall(token, "create_note", { vaultId: f.vault, relPath: "Docs/New.md" });
+    expect(created.isError).toBe(false);
+    // Rename/move is creator-only for a plain member (like delete): their own
+    // note moves, the owner's note does not.
+    const ownId = (JSON.parse(created.text) as { docId: string }).docId;
     expect(
-      (await mcpCall(token, "create_note", { vaultId: f.vault, relPath: "Docs/New.md" })).isError,
+      (await mcpCall(token, "move_note", { docId: ownId, relPath: "Docs/Renamed.md" })).isError,
     ).toBe(false);
-    expect(
-      (await mcpCall(token, "move_note", { docId: f.note, relPath: "Docs/Renamed.md" })).isError,
-    ).toBe(false);
+    const others = await mcpCall(token, "move_note", { docId: f.note, relPath: "Docs/Theirs.md" });
+    expect(others.isError).toBe(true);
+    expect(others.text).toMatch(/created this/);
   });
 });
 
 // ═══ 4. HTTP structural routes ═══════════════════════════════════════════════
 
 describe("HTTP registry: structural writes require edit, not membership", () => {
+  it("rename/move is creator-only for a plain member, like delete; owners rename anything", async () => {
+    const f = await fixture();
+    await seedVaultGrant(f.orgId, "edit");
+    const theirs = await req(f.member, "PATCH", `/api/notes/${f.note}`, { relPath: "Docs/Theirs.md" });
+    expect(theirs.status).toBe(403);
+    expect(((await theirs.json()) as { code?: string }).code).toBe("rename_not_creator");
+    const folder = await req(f.member, "PATCH", `/api/folders/${f.folder}`, { path: "Docs2", name: "Docs2" });
+    expect(folder.status).toBe(403);
+    expect(((await folder.json()) as { code?: string }).code).toBe("rename_not_creator");
+    // Their own note: allowed.
+    const mine = await req(f.member, "PATCH", `/api/notes/${f.memberNote}`, { relPath: "Docs/Mine2.md" });
+    expect(mine.status).toBe(200);
+    // The owner renames the member's note and the folder.
+    expect((await req(f.owner, "PATCH", `/api/notes/${f.memberNote}`, { relPath: "Docs/Mine3.md" })).status).toBe(200);
+    expect((await req(f.owner, "PATCH", `/api/folders/${f.folder}`, { path: "Docs2", name: "Docs2" })).status).toBe(200);
+  });
+
   it("(1) a team lock refuses every structural mutation, for member and owner", async () => {
     const f = await fixture();
     await withLock(f);
@@ -780,10 +791,6 @@ describe("HTTP registry: structural writes require edit, not membership", () => 
     for (const r of await rootCreateAttempts(f.owner, f)) {
       expect(r.status, `${r.what} must be refused for the owner`).toBe(403);
     }
-    // …and the owner can still flip the vault back.
-    const back = await req(f.owner, "PUT", `/api/orgs/${f.orgId}/team-access`, { mode: "open" });
-    expect(back.status).toBe(200);
-    expect((await rootCreateAttempts(f.owner, f))[0].status).toBe(201);
   });
 
   it("(3) a per-user vault-scoped edit grant lifts one person out of Read-only", async () => {

@@ -39,6 +39,7 @@
 // it.
 
 import { pathKey } from "../pathIdentity";
+import { renameRefusedMessage } from "../renameGate";
 import { IPC_CONCURRENCY, REGISTRY_CONCURRENCY, runPool } from "./pool";
 
 /** How long a vanished binary waits before it is believed. Same window the
@@ -89,6 +90,8 @@ export interface RemoteBlob {
   id: string;
   sha256: string;
   relPath: string | null;
+  /** The `files` row these bytes are (null for an `attachments/` drop). */
+  docId?: string | null;
 }
 
 /** Injected I/O, so the queue runs under vitest without Tauri or a server. */
@@ -96,11 +99,23 @@ export interface BinaryDeleteDeps {
   /** Is the vault this queue belongs to still the open one? */
   isCurrent(): boolean;
   /**
+   * Did these bytes move INTO a folder the vault's sync rules hide (#401)?
+   * True parks the file (the caller did it); nothing is deleted on the server.
+   */
+  movedIntoHidden?(relPath: string, sha256: string): Promise<boolean>;
+  /**
    * Is the session live enough to believe a missing file? The same gate the
    * note queue's `liveSince` is: at startup a file that isn't there yet means
    * the disk (or the pull) hasn't caught up, not that anyone deleted it.
    */
   isLive(): boolean;
+  /**
+   * Has the server connection dropped since it was last up? A vanished file is
+   * then kept pending (and so never re-downloaded) without spending its
+   * retries, until `resume()` after reconnecting. Before, three failed
+   * listings while offline gave up and the deleted file came back.
+   */
+  isOffline?(): boolean;
   /**
    * Is the file at this path on disk right now (`ipc.binaryExists`)?
    *
@@ -109,12 +124,39 @@ export interface BinaryDeleteDeps {
    * `false` here is the first step toward deleting the server's copy.
    */
   exists(relPath: string): Promise<boolean>;
+  /**
+   * The note side's say on a vanished binary (`docSession.binaryBesideNoteDeletes`).
+   * `wait`: a note delete window is still being decided, so this one waits
+   * for another window; `held`: notes beside it were just held or refused
+   * over the cap, so the folder is coming back and this file is not deleted on
+   * the server either. Before, a folder deleted on disk came back with its
+   * notes and without its files, which were already gone for everyone.
+   */
+  noteDeleteVerdict?(relPath: string): "wait" | "held" | null;
   /** Every local binary — the rename hunt and the blast-radius cap read it. */
   listLocal(): Promise<LocalBinary[]>;
   /** Every blob the server holds for this vault. */
   listServer(): Promise<RemoteBlob[]>;
   /** The server `files` id this device registered for a path, if any. */
   fileId(relPath: string): string | null;
+  /**
+   * Did the app remove this path from disk ITSELF moments ago (a revocation, a
+   * teammate's delete, a hidden embed; `registry.isOwnRemoval`)? Such a path
+   * is never a user delete, however many watcher events report it.
+   */
+  isOwnRemoval?: (relPath: string) => boolean;
+  /**
+   * Did the registry move a file AWAY from this path itself (a teammate's move
+   * or folder move followed here, a refused rename put back;
+   * `registry.isOwnMoveSource`)? The file still exists, under its new name and
+   * the same `files` id: the old name vanishing is never a delete. Unchecked,
+   * a pass that learned the old path again from a listing read mid-move
+   * deleted the moved file for everyone.
+   */
+  isOwnMoveSource?: (relPath: string) => boolean;
+  /** Drop only this path's id mapping: the same id lives on at another path
+   *  (a move), so what this device knows about its bytes stays. */
+  forgetStalePath?: (relPath: string) => void;
   /** Forget a registration whose file is gone. */
   forgetFileId(relPath: string): void;
   /** Move one to the path its bytes turned up at. */
@@ -126,6 +168,12 @@ export interface BinaryDeleteDeps {
   /** Re-register the SAME files id at a new path; the server treats it as a
    *  move (`POST /api/files`, the by-id branch). */
   moveFile(input: { id: string; relPath: string }): Promise<void>;
+  /**
+   * Put a rename the server refused back on disk (`registry.revertRefusedMove`):
+   * the person can only view the file, didn't create it, … True when the old
+   * name is back. Without it a refusal keeps today's retry.
+   */
+  revertMove?: (from: string, to: string) => Promise<boolean>;
   /** Tell the user about the one thing they can act on: a refused bulk batch. */
   notify?: (text: string, tone?: "error" | "neutral" | "success") => void;
   /**
@@ -136,6 +184,14 @@ export interface BinaryDeleteDeps {
    * second, partial emission from here.
    */
   onServerChanged?: () => void;
+  /**
+   * A window just closed: its paths are no longer `isPending`. The mirror
+   * skips downloads into an open window, and nothing else asked again for a
+   * path that turned out to be a save or a teammate's move landing here, so a
+   * teammate's edit that arrived inside the window waited for an unrelated
+   * change or a restart (2026-11-28 five-app test).
+   */
+  onDrained?: () => void;
   /**
    * The server refused to delete a file because this person did not create it
    * (403 `delete_not_creator`, the creator-only rule). The server copy stays,
@@ -152,6 +208,13 @@ interface Pending {
   seenAt: number;
   /** How many windows this candidate has spent on a listing that failed. */
   attempts: number;
+}
+
+/** The server's `code` an api error carries, when it carries one. */
+function errCode(e: unknown): string | null {
+  const body = e && typeof e === "object" ? (e as { body?: unknown }).body : null;
+  const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+  return typeof code === "string" ? code : null;
 }
 
 /** The HTTP status an api/transport error carries, when it carries one. */
@@ -238,6 +301,14 @@ export class BinaryDeleteQueue {
     // Our own removal echoing back. Consumed, so the SECOND event for the path
     // (a file the user later re-creates and deletes for real) is ordinary again.
     if (this.suppressed.delete(key(relPath))) return;
+    // A repeat report of the same removal (the claim above is spent by the
+    // first event): still ours, still not a delete.
+    if (this.deps.isOwnRemoval?.(relPath)) return;
+    // The name an own move took a file FROM is NOT dropped here: the event may
+    // be that move's echo (the drain finds the path gone and skips it, below),
+    // or the person moving the file straight back, whose arrival must be in the
+    // window to pair with the other name's removal. Dropping it here sent that
+    // move out as a delete and the file came back under a new id (2026-11-28).
     // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
@@ -320,11 +391,18 @@ export class BinaryDeleteQueue {
    * Public because the timer is not the only caller that matters: the tests
    * drive it directly, and nothing about it assumes the timer fired.
    */
+  /** The server is reachable again: drain whatever waited for it. */
+  resume(): void {
+    if (this.pending.size > 0 && this.deps.isCurrent()) this.arm();
+  }
+
   async drain(): Promise<void> {
     if (this.draining) return;
     if (!this.deps.isCurrent()) return;
     const batch = [...this.pending.values()];
     if (batch.length === 0) return;
+    // Offline: everything stays pending, uncounted, for `resume()`.
+    if (this.deps.isOffline?.()) return;
     this.draining = true;
     try {
       if (!this.deps.isLive()) {
@@ -359,7 +437,10 @@ export class BinaryDeleteQueue {
       if (switched || !this.deps.isCurrent()) return;
       const gone: Pending[] = [];
       const present: string[] = [];
-      batch.forEach((item, i) => (missing[i] ? gone.push(item) : present.push(item.relPath)));
+      batch.forEach((item, i) => {
+        if (!missing[i]) present.push(item.relPath);
+        else if (!this.deps.isOwnRemoval?.(item.relPath) && !this.deps.isOwnMoveSource?.(item.relPath)) gone.push(item);
+      });
       if (gone.length === 0) return;
 
       let local: LocalBinary[];
@@ -413,6 +494,9 @@ export class BinaryDeleteQueue {
 
       const blobByPath = new Map<string, RemoteBlob>();
       for (const b of server) if (b.relPath) blobByPath.set(key(b.relPath), b);
+      /** Where the server holds each `files` id now. */
+      const pathById = new Map<string, string>();
+      for (const b of server) if (b.docId && b.relPath) pathById.set(b.docId, b.relPath);
       const localBySha = new Map<string, LocalBinary[]>();
       for (const a of local) {
         const list = localBySha.get(a.sha256);
@@ -426,8 +510,28 @@ export class BinaryDeleteQueue {
       // `blob: null` ⇒ a registered `files` row the server never received bytes
       // for (see below): only the row is removed.
       const deletes: Array<{ relPath: string; blob: RemoteBlob | null }> = [];
+      let followedElsewhere = false;
       for (const item of gone) {
         const blob = blobByPath.get(key(item.relPath));
+        // The id this name maps to lives on at ANOTHER path on the server: the
+        // file moved (a teammate's move this device followed), and this name is
+        // a stale mapping left by a pass that read its listings mid-move. A
+        // delete by id here removed the moved file for everyone.
+        const mappedId = this.deps.fileId(item.relPath);
+        const livesAt = mappedId ? pathById.get(mappedId) : undefined;
+        if (!blob && livesAt && key(livesAt) !== key(item.relPath)) {
+          console.info(
+            `[attachments] ${item.relPath} moved to ${livesAt} on the server — not a delete`,
+          );
+          this.deps.forgetStalePath?.(item.relPath);
+          // The mirror owes a pass: whatever this device holds of that file now
+          // (a rename made here as the teammate's move landed, carried into the
+          // moved folder) pairs with the server's row only in a pass, and none
+          // was coming (five-app test, 2026-11-28: it waited for an unrelated
+          // change). Asked once, after the loop.
+          followedElsewhere = true;
+          continue;
+        }
         if (!blob) {
           // The server never held these bytes: nothing that could ever come
           // back down, and so no copy to protect. The note queue's `isPushed`
@@ -466,8 +570,13 @@ export class BinaryDeleteQueue {
           }
           continue;
         }
+        if (await this.deps.movedIntoHidden?.(item.relPath, blob.sha256)) {
+          if (!this.deps.isCurrent()) return;
+          continue;
+        }
         deletes.push({ relPath: item.relPath, blob });
       }
+      if (followedElsewhere) this.deps.onServerChanged?.();
       if (deletes.length === 0) return;
 
       // 3. Blast radius, against the vault as it stands: the survivors are gone
@@ -484,6 +593,26 @@ export class BinaryDeleteQueue {
           "error",
         );
         return;
+      }
+
+      // 3b. The notes beside these files. A folder deleted on disk removes both,
+      //     and over the notes' cap the folder comes back: its files stay too.
+      if (this.deps.noteDeleteVerdict) {
+        const verdicts = deletes.map((d) => this.deps.noteDeleteVerdict!(d.relPath));
+        if (verdicts.some((v) => v === "wait")) {
+          for (const d of deletes) this.retained.add(key(d.relPath));
+          this.arm();
+          return;
+        }
+        const keptBack = deletes.filter((_, i) => verdicts[i] === "held");
+        if (keptBack.length > 0) {
+          console.info(
+            `[attachments] ${keptBack.length} files vanished beside notes held for the team — not removed from the server`,
+            keptBack.slice(0, 10).map((d) => d.relPath),
+          );
+          for (let i = deletes.length - 1; i >= 0; i--) if (verdicts[i] === "held") deletes.splice(i, 1);
+          if (deletes.length === 0) return;
+        }
       }
 
       // 4. Tell the server. A tree file goes through its `files` row, which
@@ -546,6 +675,11 @@ export class BinaryDeleteQueue {
         if (this.retained.delete(key(item.relPath))) continue;
         if (this.pending.get(key(item.relPath)) === item) this.pending.delete(key(item.relPath));
       }
+      // A path noted while this drain ran had its timer fire into
+      // `if (this.draining) return` and would stay pending, blocking its
+      // downloads, until some later event touched the queue.
+      if (this.pending.size > 0 && !this.timer && this.deps.isCurrent()) this.arm();
+      if (this.deps.isCurrent()) this.deps.onDrained?.();
     }
   }
 
@@ -580,6 +714,16 @@ export class BinaryDeleteQueue {
     try {
       await this.deps.moveFile({ id, relPath: to });
     } catch (e) {
+      // A REFUSAL (not the creator, view-only, …) will be refused again: put
+      // the old name back, so the disk agrees with the server for everyone.
+      const status = errStatus(e);
+      if (status !== null && [400, 402, 403, 409, 429].includes(status) && this.deps.revertMove) {
+        if (await this.deps.revertMove(from, to)) {
+          const code = errCode(e);
+          this.deps.notify?.(renameRefusedMessage(from, false, code, status), "error");
+          return true;
+        }
+      }
       // The row stayed where it was. Nothing was deleted, which is the safe
       // half — but the new path is now an unregistered one, and the mirror
       // registering it would fork the file across two doc_ids. Answering

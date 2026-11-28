@@ -170,6 +170,7 @@ fn ensure_tree_binary_rel(rel: &str) -> AppResult<()> {
 /// different accepted set.
 pub fn write_tree_binary(vault: &Path, rel: &str, bytes: &[u8]) -> AppResult<()> {
     ensure_tree_binary_rel(rel)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     write_bytes_atomic(vault, rel, bytes)
 }
 
@@ -335,7 +336,12 @@ fn hash_listing(
             Some(sha) => sha,
             None => {
                 hashed += 1;
-                sha256_file(&abs)?
+                match sha256_file(&abs) {
+                    Ok(sha) => sha,
+                    // Gone between the walk and its hash: not in the listing.
+                    Err(_) if !abs.exists() => continue,
+                    Err(e) => return Err(e.into()),
+                }
             }
         };
         cache.insert(
@@ -368,22 +374,47 @@ fn walk(
     keep: &dyn Fn(&str) -> bool,
     out: &mut Vec<(String, PathBuf, u64, i64)>,
 ) -> AppResult<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    // A file or folder that disappears while the walk runs (a move, a download's
+    // rename, an editor's save) is simply not in the listing: it is gone. Failing
+    // the whole walk instead stopped every pass that needed it, folder-move
+    // pairing included, for as long as anything in the vault kept changing.
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && dir != vault => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         let name = entry.file_name().to_string_lossy().to_string();
         if is_ignored_name(&name) {
             continue; // skip dotfiles / .context / .git / node_modules and our .*.tmp writes
         }
         let path = entry.path();
-        let file_type = entry.file_type()?;
+        let file_type = match entry.file_type() {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         if file_type.is_dir() {
+            // The vault's sync rules (#401): never walked, never uploaded.
+            if crate::sync_rules::excludes(vault, &rel_from(vault, &path), true) {
+                continue;
+            }
             walk(vault, &path, keep, out)?;
         } else if file_type.is_file() {
             let rel = rel_from(vault, &path);
-            if !keep(&rel) {
+            if !keep(&rel) || crate::sync_rules::excludes(vault, &rel, false) {
                 continue;
             }
-            let meta = entry.metadata()?;
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             out.push((rel, path, meta.len(), mtime_ns(&meta)));
         }
     }
@@ -572,6 +603,10 @@ struct VerifyingReader<R> {
     hasher: Sha256,
     expected_sha256: Option<String>,
     mismatch: Arc<Mutex<Option<String>>>,
+    /// Set once the read that completes the body passed its checks. A 2xx
+    /// is only success with this set: a server may answer before the body
+    /// reached its end, and then nothing was ever verified.
+    verified: Arc<std::sync::atomic::AtomicBool>,
     done: bool,
 }
 
@@ -581,6 +616,7 @@ impl<R> VerifyingReader<R> {
         len: u64,
         expected_sha256: Option<String>,
         mismatch: Arc<Mutex<Option<String>>>,
+        verified: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             inner,
@@ -589,6 +625,7 @@ impl<R> VerifyingReader<R> {
             hasher: Sha256::new(),
             expected_sha256: expected_sha256.map(|s| s.to_ascii_lowercase()),
             mismatch,
+            verified,
             done: false,
         }
     }
@@ -640,6 +677,7 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for VerifyingReader<R
                         buf.set_filled(before);
                         return Poll::Ready(Err(this.fail(why)));
                     }
+                    this.verified.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 Poll::Ready(Ok(()))
             }
@@ -707,7 +745,18 @@ pub async fn upload_file(
     // a part is verified for length (its sha is not knowable here).
     let mismatch: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let expect_sha = if range.is_none() { expected_sha256.map(str::to_owned) } else { None };
-    let reader = VerifyingReader::new(file.take(len), len, expect_sha, mismatch.clone());
+    // An empty body may never be polled at all, so it is judged here.
+    let verified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if len == 0 {
+        if let Some(want) = expect_sha.as_deref() {
+            let empty = format!("{:x}", Sha256::new().finalize());
+            if !want.eq_ignore_ascii_case(&empty) {
+                return Err(changed_error(rel, &format!("file is empty, intent declared {want}")));
+            }
+        }
+        verified.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let reader = VerifyingReader::new(file.take(len), len, expect_sha, mismatch.clone(), verified.clone());
     let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader));
 
     let mut req = client()?
@@ -729,6 +778,13 @@ pub async fn upload_file(
     }
     let res = sent.map_err(|e| AppError::new(format!("upload failed: {e}")))?;
     let status = res.status().as_u16();
+    // A 2xx that arrived before the body reached its end proves nothing about
+    // the bytes: the sha check never ran. Never report that as success.
+    if (200..300).contains(&status) && !verified.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(AppError::new(format!(
+            "upload failed: the server answered before all {len} bytes of {rel} were sent"
+        )));
+    }
     let etag = res
         .headers()
         .get(reqwest::header::ETAG)
@@ -768,6 +824,8 @@ pub async fn download_file(
 ) -> AppResult<DownloadOutcome> {
     if tree {
         ensure_tree_binary_rel(rel)?;
+        // Not a permanent failure on purpose: lifting the rule makes it valid.
+        crate::vault::refuse_excluded(vault, rel, false)?;
     } else {
         ensure_attachment_rel(rel)?;
     }
@@ -852,6 +910,29 @@ mod tests {
             .build()
             .unwrap()
             .block_on(f)
+    }
+
+    #[test]
+    fn a_file_gone_between_walk_and_hash_is_left_out_of_the_listing() {
+        // A folder moved (or a download renamed into place) while the walk ran:
+        // the file the walk saw is not there to hash. It used to fail the whole
+        // listing, and with it every folder-move pairing in the vault.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("Docs")).unwrap();
+        std::fs::write(tmp.path().join("Docs/kept.pdf"), b"%PDF-1").unwrap();
+        let found = vec![
+            ("Docs/gone.pdf".to_string(), tmp.path().join("Docs/gone.pdf"), 6, 1),
+            ("Docs/kept.pdf".to_string(), tmp.path().join("Docs/kept.pdf"), 6, 1),
+        ];
+        let listing = hash_listing(found, &HashMap::new()).unwrap();
+        let paths: Vec<_> = listing.items.iter().map(|i| i.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["Docs/kept.pdf"]);
+        // A whole subfolder gone mid-walk is skipped the same way.
+        let mut out = Vec::new();
+        walk(tmp.path(), &tmp.path().join("Moved away"), &|_| true, &mut out).unwrap();
+        assert!(out.is_empty());
+        // The vault root itself missing is still an error.
+        assert!(walk(&tmp.path().join("nope"), &tmp.path().join("nope"), &|_| true, &mut out).is_err());
     }
 
     #[test]
@@ -1186,6 +1267,7 @@ mod tests {
             len,
             sha.map(str::to_owned),
             mismatch.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         let mut out = Vec::new();
         let res = block_on(r.read_to_end(&mut out)).map(|_| out);
@@ -1257,9 +1339,14 @@ mod tests {
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             if let Ok((mut sock, _)) = listener.accept() {
+                // Read the WHOLE request (until the client stops sending or
+                // gives up) before answering, as a real store does. Replying
+                // after the first read raced the client's body stream: under
+                // a busy test run the 200 could land before the body reached
+                // its end, where the sha check runs, and the test failed.
                 let mut buf = [0u8; 4096];
                 let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
-                let _ = sock.read(&mut buf);
+                while matches!(sock.read(&mut buf), Ok(n) if n > 0) {}
                 let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
             }
         });
@@ -1277,6 +1364,40 @@ mod tests {
         ));
         let err = res.expect_err("mismatched bytes must not report success");
         assert!(err.to_string().starts_with(CHANGED_DURING_UPLOAD), "{err}");
+    }
+
+    /// A server that answers 200 before the body reached its end (so the sha
+    /// check never ran) must not make wrong bytes look uploaded. This is the
+    /// race the old version of the test above lost under a busy test run.
+    #[test]
+    fn an_early_200_is_never_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = vec![5u8; 8 * 1024 * 1024];
+        write_binary_file(tmp.path(), "attachments/big.bin", &big).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf); // headers only, then answer at once
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let headers = HashMap::new();
+        let declared = sha256_bytes(&[6u8; 16]); // never the file's sha
+        let res = block_on(upload_file(
+            tmp.path(),
+            "attachments/big.bin",
+            &format!("http://{addr}/put"),
+            "PUT",
+            &headers,
+            None,
+            Some(&declared),
+            Some(big.len() as u64),
+        ));
+        assert!(res.is_err(), "an early 200 reported success: {res:?}");
     }
 
     /// The client is built lazily on the FIRST transfer, and with

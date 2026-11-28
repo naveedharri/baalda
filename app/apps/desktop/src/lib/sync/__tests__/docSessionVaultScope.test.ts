@@ -18,6 +18,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // plain `const` here would be initialized.
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
+    // Sync rules (#401): these fixtures have none.
+    isParked: () => false,
+    filterBlobListing: <T,>(b: T[]) => b,
+    isFrozenPath: () => false,
+    isExcludedPath: () => false,
+    frozenFilePaths: () => [] as string[],
+    setSyncRules: () => {},
+    syncRules: () => ({ source: "", types: { code: false, extra: false }, isEmpty: true, sameAs: () => true }),
+    parkedCount: () => ({ notes: 0, files: 0 }),
     vaultId: null as string | null,
     // Phase A of `enable`: the local prime. False here — this suite is about the
     // reconcile-and-teardown path, and a prime that adopts nothing is exactly

@@ -390,6 +390,14 @@ describe("syncBadgeHold", () => {
   it("ignores a brake on a vault whose sync is off", () => {
     expect(syncBadgeHold({ enabled: false, pause: { until: null }, now })).toBeNull();
   });
+
+  it("never reads Synced while this computer waits for the vault's key", () => {
+    const hold = syncBadgeHold({ enabled: true, keyLocked: true, now });
+    expect(hold).toMatchObject({ tone: "connecting", label: "Sync paused" });
+    expect(hold?.title).toContain("key");
+    // Sync off: nothing to hold.
+    expect(syncBadgeHold({ enabled: false, keyLocked: true, now })).toBeNull();
+  });
 });
 
 // Held create refusals and a failing registry pull have their own surfaces

@@ -282,3 +282,4 @@ export function moveMessage(who: string, self: boolean, what: string, mode: Team
   if (mode === "readonly") return `${subject} can now view ${what}.`;
   return `${subject} can no longer open ${what}.`;
 }
+

@@ -874,16 +874,20 @@ describe("invitePrewarning", () => {
   it("warns the owner with Add seats when every seat is taken", () => {
     const w = invitePrewarning(team(19, 17, 2), "Sara", true);
     expect(w?.action).toBe("add-seats");
-    expect(w?.text).toContain("All 19 seats are in use.");
-    expect(w?.text).toContain("2 reserved");
+    expect(w?.title).toBe("All 19 seats are in use");
+    expect(w?.text).toBe("Someone new needs another seat. 2 are held for pending invitations. Anyone already on your account joins without one.");
   });
   it("tells an admin whom to ask, with no action", () => {
-    expect(invitePrewarning(team(3, 3, 0), "Sara", false)).toEqual({ text: "All 3 seats are in use. Ask Sara to add seats.", action: null });
+    expect(invitePrewarning(team(3, 3, 0), "Sara", false)).toEqual({
+      title: "All 3 seats are in use",
+      text: "Someone new needs another seat. Ask Sara to add one. Anyone already on your account joins without one.",
+      action: null,
+    });
   });
   it("Free at 2 people: owner gets Upgrade, admin is told to ask", () => {
     const free = { plan: "free" as const, seats: { purchased: null, used: 1, reserved: 1 } };
     expect(invitePrewarning(free, "Sara", true)?.action).toBe("upgrade");
-    expect(invitePrewarning(free, null, false)?.text).toBe("Free includes 2 people. Ask the vault owner to upgrade to Team.");
+    expect(invitePrewarning(free, null, false)).toEqual({ title: "Free includes 2 people", text: "Ask the vault owner to upgrade to Team.", action: null });
     expect(invitePrewarning({ ...free, seats: { purchased: null, used: 1, reserved: 0 } }, "Sara", true)).toBeNull();
   });
 });
@@ -892,7 +896,7 @@ describe("grandfathered Free limit in the copy", () => {
   const free3 = { plan: "free" as const, seats: { purchased: null, used: 3, reserved: 0 }, limits: { people: 3 } };
   it("reads the account's own limit", () => {
     expect(membersSeatLine(free3, "Sara")).toBe("Free includes 3 people on this account (3 of 3 used)");
-    expect(invitePrewarning(free3, "Sara", true)).toEqual({ text: "Free includes 3 people. Upgrade to Team to add more.", action: "upgrade" });
+    expect(invitePrewarning(free3, "Sara", true)).toEqual({ title: "Free includes 3 people", text: "Upgrade to Team to invite more people.", action: "upgrade" });
     expect(invitePrewarning({ ...free3, seats: { purchased: null, used: 2, reserved: 0 } }, "Sara", true)).toBeNull();
     expect(freePeopleCopy(3)).toBe("Free includes 3 people. Upgrade to Team to add more.");
   });

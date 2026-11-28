@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Simulation, ForceLink } from "d3-force";
 import type { Graph } from "../lib/graph/buildGraph";
 import { beginBloom, bloomStep, seedByCluster, type BloomJob } from "../lib/graph/formation";
-import { saveLayout, takeLayout } from "../lib/graph/prelayout";
+import { layoutPending, saveLayout, takeLayout } from "../lib/graph/prelayout";
 import {
   createSimulation,
   configureForces,
@@ -34,6 +34,7 @@ import {
   clampPitch,
   faceRotation,
   facing,
+  easeFrame,
   frameOf,
   toSphere,
   yawToward,
@@ -137,29 +138,14 @@ const WEBGL_ENABLED = true;
  * computed styles.
  */
 type GraphTheme = Parameters<WebGLGraphRenderer["setTheme"]>[0];
-let graphThemeCache: { key: string; value: GraphTheme } | null = null;
-function graphTheme(): GraphTheme {
-  const key = document.documentElement.dataset.theme ?? "light";
-  if (graphThemeCache?.key === key) return graphThemeCache.value;
-  const dark = key === "dark";
-  const value: GraphTheme = dark
-    ? {
-        core: [0.106, 0.1, 0.094], // #1b1a18
-        mid: [0.09, 0.086, 0.078],
-        rim: [0.071, 0.067, 0.062],
-        line: [1, 0.97, 0.925, 0.3],
-        hl: [0.65, 0.59, 1, 0.85],
-      }
-    : {
-        core: [1, 1, 1],
-        mid: [0.992, 0.984, 0.969],
-        rim: [0.976, 0.965, 0.945],
-        line: [0.043, 0.039, 0.063, 0.38],
-        hl: [0.486, 0.361, 1, 0.75],
-      };
-  graphThemeCache = { key, value };
-  return value;
-}
+// The graph is dark in every app theme, so these never follow the page.
+const GRAPH_THEME: GraphTheme = {
+  core: [0.106, 0.1, 0.094], // #1b1a18
+  mid: [0.09, 0.086, 0.078],
+  rim: [0.071, 0.067, 0.062],
+  line: [1, 0.97, 0.925, 0.3],
+  hl: [0.65, 0.59, 1, 0.85],
+};
 
 // Links thin out as their number grows. Every line at one fixed opacity piles
 // up: a few hundred read as crisp threads, ten thousand as a grey haze that
@@ -172,7 +158,7 @@ function edgeDensityScale(edges: number): number {
 }
 let densityThemeCache: { base: GraphTheme; edges: number; value: GraphTheme } | null = null;
 function themeForEdges(edges: number): GraphTheme {
-  const base = graphTheme();
+  const base = GRAPH_THEME;
   if (densityThemeCache?.base === base && densityThemeCache.edges === edges) {
     return densityThemeCache.value;
   }
@@ -342,6 +328,9 @@ const GLOBE_SPIN_REST_MS = 3500;
 const GLOBE_DRAG_TURN = 0.006;
 /** The sphere is drawn at this share of the flat layout's radius. */
 const GLOBE_SCALE = 0.92;
+/** How far the globe zooms out from, and in on, its fitted size. */
+const GLOBE_ZOOM_MIN = 0.4;
+const GLOBE_ZOOM_MAX = 8;
 
 interface Camera {
   x: number;
@@ -371,12 +360,9 @@ function readColors(el: Element): Colors {
     edgeHighlight: get("--accent") || FALLBACK_ACCENT,
     nodeFallback: get("--text-tertiary") || "#9a9aa5",
     accent: get("--accent") || FALLBACK_ACCENT,
-    // Labels sit on the always-dark void, so they use fixed light-on-dark tones
-    // (not theme text vars, which are dark in light mode → invisible). Resting
-    // labels stay muted; the open/hover label brightens to full.
-    // Redesign: the canvas follows the theme now (cream in light), so labels do too.
-    label: document.documentElement.dataset.theme === "dark" ? "rgba(231, 226, 217, 0.55)" : "rgba(26, 25, 32, 0.55)",
-    labelActive: document.documentElement.dataset.theme === "dark" ? "#f3eee6" : "#1a1920",
+    // Labels sit on the always-dark canvas, so they use fixed light-on-dark tones.
+    label: "rgba(231, 226, 217, 0.55)",
+    labelActive: "#f3eee6",
   };
 }
 
@@ -632,10 +618,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // Globe view: rotation, an eased turn toward a note, the smoothed frame the
     // flat layout is unfolded in, and when the person last touched it.
     globe: {
-      rot: { yaw: 0.35, pitch: -0.22 } as GlobeRotation,
+      rot: { yaw: 0, pitch: 0 } as GlobeRotation,
       target: null as GlobeRotation | null,
       frame: null as GlobeFrame | null,
       lastTouch: 0,
+      // Zoom on top of the fit. The globe has no camera of its own to steer, so
+      // nothing can move it off the middle of the window.
+      zoom: 1,
       lastT: 0,
       on: false,
     },
@@ -686,8 +675,16 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       workerRef.current = null;
     }
   }
-  // Tear the worker down for good on final unmount.
-  useEffect(() => () => workerRef.current?.dispose(), []);
+  // Tear the worker down for good on final unmount. Deferred a tick because
+  // StrictMode unmounts and remounts every effect in dev: disposing straight
+  // away leaves this ref on a dead worker, and the settle never reports back.
+  const workerDisposeRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    window.clearTimeout(workerDisposeRef.current);
+    return () => {
+      workerDisposeRef.current = window.setTimeout(() => workerRef.current?.dispose(), 0);
+    };
+  }, []);
 
   // Recompute visible nodes/edges from the latest graph + filter settings, feed
   // them to the simulation, refresh colors, and reheat. Called on data change
@@ -761,13 +758,29 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     // first jolt, then the loop blooms it live, one tick per frame. Not for the
     // worker path (8k+ notes), which settles off-thread instead (see
     // `worker.init(..., first)` below).
+    let finished: Float32Array | undefined;
     if ((first || reseeded) && visNodes.length > 0) {
       const willUseWorker =
         !openNode && workerRef.current !== null && visNodes.length > WORKER_THRESHOLD;
       const ready =
-        !willUseWorker && !openNode && vaultPathRef.current
-          ? takeLayout(vaultPathRef.current, g, s)
+        !openNode && vaultPathRef.current ? takeLayout(vaultPathRef.current, g, s) : null;
+      // Opened while the background layout is still going: wait for it, so a big
+      // vault opens into the same finished shape instead of starting a second
+      // layout from scratch. The loop must not tick this many notes meanwhile.
+      const pending =
+        first && willUseWorker && !ready && vaultPathRef.current
+          ? layoutPending(vaultPathRef.current, g, s)
           : null;
+      if (pending) {
+        S.useWorker = true;
+        S.workerActive = false;
+        setSettling(true);
+        setCounts({ nodes: visNodes.length, edges: links.length, total: g.nodes.length });
+        void pending.then(() => {
+          if (hubLayerRef.current) rebuild();
+        });
+        return;
+      }
       const covered = ready ? visNodes.filter((n) => ready.has(n.id)).length : 0;
       if (ready && covered >= visNodes.length * 0.95) {
         // The background layout is finished: open straight into it.
@@ -782,6 +795,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         sim.alpha(IDLE_ALPHA);
         S.bloom = null;
         S.assemble = { t0: performance.now(), nodes: visNodes, to };
+        finished = to;
+        setSettling(false);
       } else if (!willUseWorker) {
         S.bloom = beginBloom(sim, S.bloom);
       }
@@ -820,15 +835,15 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           return { source: S.indexById.get(sid)!, target: S.indexById.get(tid)! };
         })
         .filter((l) => l.source !== undefined && l.target !== undefined);
-      S.workerGen = worker.init(nodeSpec, linkSpec, s, 1200, 800, first);
-      S.workerActive = true;
+      S.workerGen = worker.init(nodeSpec, linkSpec, s, 1200, 800, first, finished);
+      S.workerActive = !finished;
       // A pre-settle is impossible here — blocking the thread for an 8k+ node
       // layout is exactly the freeze the worker exists to avoid. So the reveal
       // waits instead: hold the graph hidden through the FIRST settle and fade
       // it in cool, rather than showing a huge field rearranging itself. Only
       // the first build; later refreshes are small warm nudges (REHEAT_REFRESH)
       // that must not blank a graph the user is already looking at.
-      if (first) setSettling(true);
+      if (first && !finished) setSettling(true);
     } else if (worker) {
       // Switched to local or a small enough set: park the worker.
       worker.stop();
@@ -1036,7 +1051,6 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       if (webgl) webgl.resize(width, height, dpr);
       requestDraw();
     }
-
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
     resize();
@@ -1219,6 +1233,11 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       );
     }
 
+    /** True while the frame is still easing onto a layout that may have stopped. */
+    function globeEasing(): boolean {
+      return S.globe.on && !sphereCache.landed;
+    }
+
     let frameXs = new Float32Array(0);
     let frameYs = new Float32Array(0);
     const unit: SpherePoint = { x: 0, y: 0, z: 0 };
@@ -1243,7 +1262,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // a plain spin only re-rotates.
       const cache = sphereCache;
       const fresh =
-        cache.nodes === nodes && cache.rev === S.layoutRev && g.frame != null && cache.frame === g.frame;
+        cache.landed && cache.nodes === nodes && cache.rev === S.layoutRev && cache.frame === g.frame;
       if (!fresh) unfoldOntoSphere(nodes);
       const fr = g.frame!;
       const R = fr.r * GLOBE_SCALE;
@@ -1268,6 +1287,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       nodes: null as SimNode[] | null,
       rev: -1,
       frame: null as GlobeFrame | null,
+      // False until the smoothed frame reaches the latest layout. It has to keep
+      // easing after the layout stops, or notes past a stale outline pile up.
+      landed: false,
       x: new Float32Array(0),
       y: new Float32Array(0),
       z: new Float32Array(0),
@@ -1300,14 +1322,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         f = frameOf(frameXs, frameYs, nodes.length);
       }
       if (!g.frame || S.assemble) g.frame = f;
-      else {
-        // Ease toward the new frame, and land on it once close: an endless
-        // asymptote would count as a change every frame and defeat the cache.
-        const fr = g.frame;
-        const d = Math.abs(f.cx - fr.cx) + Math.abs(f.cy - fr.cy) + Math.abs(f.r - fr.r);
-        if (d < 0.5) g.frame = f;
-        else g.frame = { cx: fr.cx + (f.cx - fr.cx) * 0.05, cy: fr.cy + (f.cy - fr.cy) * 0.05, r: fr.r + (f.r - fr.r) * 0.05 };
-      }
+      else g.frame = easeFrame(g.frame, f);
       const fr = g.frame;
       const c = sphereCache;
       if (c.x.length !== nodes.length) {
@@ -1324,6 +1339,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       c.nodes = nodes;
       c.rev = S.layoutRev;
       c.frame = fr;
+      c.landed = fr === f;
     }
 
     /** Turn the globe so this note faces the viewer. */
@@ -1398,13 +1414,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       ctx!.globalCompositeOperation = "source-over";
       const edgeWidth = s.edgeThickness / k;
       {
-        const L = graphTheme().line!;
+        const L = GRAPH_THEME.line!;
         ctx!.strokeStyle = `rgb(${Math.round(L[0] * 255)},${Math.round(L[1] * 255)},${Math.round(L[2] * 255)})`;
       }
       // Matched to the GPU path's edge alpha so the WebGL-unavailable fallback
       // doesn't look like a different, dimmer product.
       ctx!.globalAlpha =
-        (hovered ? 0.3 : 1) * graphTheme().line![3] * edgeDensityScale(S.visEdges.length) * (0.5 + 0.5 * introEase);
+        (hovered ? 0.3 : 1) * GRAPH_THEME.line![3] * edgeDensityScale(S.visEdges.length) * (0.5 + 0.5 * introEase);
       ctx!.lineWidth = edgeWidth;
       ctx!.beginPath();
       for (const e of S.visEdges) {
@@ -1578,7 +1594,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       const R = fr.r * GLOBE_SCALE * cam.k * (0.88 + 0.12 * appear);
       const cx = width / 2 + cam.x + fr.cx * cam.k;
       const cy = height / 2 + cam.y + fr.cy * cam.k;
-      const bg = graphTheme().mid ?? [1, 1, 1];
+      const bg = GRAPH_THEME.mid ?? [1, 1, 1];
       const dark = bg[0] * 0.3 + bg[1] * 0.59 + bg[2] * 0.11 < 0.5;
       // The sphere does not change as the globe turns: repaint only when the
       // camera, the size, the canvas or the theme does.
@@ -1679,7 +1695,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
           hoveredId && graphRef.current ? neighborhoodIds(graphRef.current, hoveredId, 1) : null;
       }
       const hlSet = hoverCache.set;
-      const bg = graphTheme().mid ?? [1, 1, 1];
+      const bg = GRAPH_THEME.mid ?? [1, 1, 1];
       const view = viewWanted();
       if (view !== S.view) {
         // Only a change between two drawn frames glides; the first frame just lands.
@@ -1747,7 +1763,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // shows as faded notes alone, which is what reads as a sphere.
       // Radial and Ring bend each link toward the middle (Ring bundles the
       // links between folders across it).
-      const moving = morphing() || S.assemble != null;
+      const moving = morphing() || S.assemble != null || globeEasing();
       const nextEdgeKey = onGlobe
         ? `g${S.layoutRev}:${S.globe.rot.yaw}:${S.globe.rot.pitch}:${moving ? performance.now() : 0}`
         : `${view}${S.layoutRev}:${edges.length}:${moving ? performance.now() : 0}:${curved ? S.template?.pos.length : 0}`;
@@ -1803,7 +1819,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // One-shot: fit the shared camera to the graph. After that the user's
       // pan/zoom (which mutates S.camera via the 2D handlers) drives the view.
       const refitting = performance.now() < S.fitUntil;
-      if ((webglNeedsFitRef.current || refitting) && webglNodes.length > 0) {
+      if ((webglNeedsFitRef.current || refitting || onGlobe) && webglNodes.length > 0) {
         // Keep the graph framed as the layout expands during settle; the flag is
         // cleared the moment the user pans/zooms (in the interaction handlers).
         // While it assembles, frame the finished shape so it grows into view.
@@ -1837,7 +1853,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         const bh = Math.max(1, maxY - minY);
         // Ease toward the fit rather than snapping: as the clusters bloom the
         // box grows every frame, and a snap turns that into a jittery zoom.
-        const k = Math.min((width - 80) / bw, (height - 80) / bh);
+        const fit = Math.min((width - 80) / bw, (height - 80) / bh);
+        const k = onGlobe ? clamp(fit * S.globe.zoom, MIN_SCALE, MAX_SCALE) : fit;
         const x = -((minX + maxX) / 2) * k;
         const y = -((minY + maxY) / 2) * k;
         const ease = !S.cameraFitted ? 1 : refitting ? 0.12 : CAMERA_EASE;
@@ -1931,7 +1948,8 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       // worker streams positions in and flips S.workerActive; we just repaint.
       let active: boolean;
       if (S.useWorker) {
-        active = S.workerActive || introActive;
+        const assembling = S.assemble != null && stepAssemble();
+        active = assembling || S.workerActive || introActive;
       } else {
         // The inline sim is never idle. The flow force means there is always
         // new motion to integrate, so we tick (and therefore repaint) every
@@ -1951,8 +1969,9 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         S.restFrames = settled ? (S.restFrames ?? 0) + 1 : 0;
         active = S.restFrames < 45;
         // Resting also ends the camera's auto-fit, or a later wake would re-fit
-        // and nudge the whole view.
-        if (!active) webglNeedsFitRef.current = false;
+        // and nudge the whole view. The globe's frame keeps easing after that, so
+        // its fit runs until the person moves the camera.
+        if (!active && !S.globe.on) webglNeedsFitRef.current = false;
         if (active && !assembling) {
           sim.tick();
           S.layoutRev++;
@@ -1960,13 +1979,13 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // Once the layout stops visibly moving into place, stop chasing it with
         // the camera — otherwise the drift breathes the bounding box and the
         // auto-fit turns that into a wobble of the whole view.
-        if (!forming && webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
+        if (!forming && !S.globe.on && webglNeedsFitRef.current && sim.alpha() <= FIT_LOCK_ALPHA) {
           webglNeedsFitRef.current = false;
         }
       }
       // The globe keeps turning after the layout rests. That costs drawing only:
       // the physics stays asleep, so an idle spin never re-runs the layout.
-      const spinning = globeMoving() || morphing();
+      const spinning = globeMoving() || globeEasing() || morphing();
       // The idle spin alone is slow enough to draw at 30 fps; anything else
       // (settling, a turn, a morph, a hover) draws every frame.
       const idleSpinOnly =
@@ -1994,7 +2013,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         // a reheat (data refresh, rearrange) that didn't come with a draw request.
         window.clearTimeout(S.idleTimer);
         S.idleTimer = window.setTimeout(() => {
-          if (S.rafId == null && (sim.alpha() > REST_ALPHA || S.drag || globeMoving() || morphing())) {
+          if (S.rafId == null && (sim.alpha() > REST_ALPHA || S.drag || globeMoving() || globeEasing() || morphing())) {
             S.restFrames = 0;
             S.rafId = requestAnimationFrame(loop);
           } else if (S.rafId == null) {
@@ -2020,6 +2039,12 @@ export function GraphView({ onClose }: { onClose: () => void }) {
       e.preventDefault();
       webglNeedsFitRef.current = false; // user is driving the camera now
       clearHoverTips();
+      if (S.globe.on) {
+        S.globe.zoom = clamp(S.globe.zoom * Math.exp(-e.deltaY * 0.0015), GLOBE_ZOOM_MIN, GLOBE_ZOOM_MAX);
+        S.cameraFitted = false; // lands on the new zoom at once, like the flat view
+        requestDraw();
+        return;
+      }
       const rect = canvas!.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -2283,7 +2308,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
     emptyRetriesRef.current >= 3;
 
   return (
-    <div className="graph-view" ref={wrapRef}>
+    <div className="graph-view" data-theme="dark" ref={wrapRef}>
       {/* No title bar: the canvas runs to the top edge. A strip along it keeps
           the window draggable where the OS chrome would be (macOS traffic-light
           row, Windows caption row; zero height on Linux, whose native title bar
@@ -2383,6 +2408,7 @@ export function GraphView({ onClose }: { onClose: () => void }) {
         )}
         <div
           ref={hubLayerRef}
+          className="graph-hub-layer"
           aria-hidden="true"
           style={{
             position: "absolute",

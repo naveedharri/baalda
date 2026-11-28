@@ -226,14 +226,14 @@ access in two views, switched by a small segmented icon toggle at its top-right 
 device (localStorage `context.memberAccess.view`). **List** is the checkbox tree above
 with the "Across the vault" level. **Board**, the default, shows three columns (Can edit / Can view / No access),
 rows moved by drag-and-drop or arrow buttons, grey ancestor rows that show only the path (up to five
-levels deep), a "Set everything to" menu that includes Reset to vault default, Add all / Remove all
+levels deep), a "Set everything to" menu that includes Reset to groups only, Add all / Remove all
 per column. It issues the same bulk-access writes as List, one resource per write. Moving a single
 row applies immediately with no confirm and no undo; the standard toast states the result ("Sara
 can now view X.").
 
 Confirmation dialogs appear **only for destructive changes**, meaning the target level is No access
 (`private`): the Everyone row, a person's vault-wide level, a per-row or per-note change in List,
-the board's Set everything to → No access, Remove all and Reset to vault default. Making something
+the board's Set everything to → No access, Remove all and Reset to groups only. Making something
 Can view or Can edit, Add all, Set everything to → Can view and the New members row never confirm.
 Access levels are colour-coded everywhere they appear (pills in List and the Members table, the
 board's column headers, its drag highlight and landing pulse): Can edit green, Can view amber, No

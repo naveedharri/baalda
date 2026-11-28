@@ -3,6 +3,10 @@ import {
   buildTreeSyncIndex,
   FolderWaveTracker,
   folderSyncTitle,
+  LOCAL_FILE_TITLE,
+  LOCAL_KEPT_TITLE,
+  localOnlyEntry,
+  LOCAL_ONLY_TITLE,
   rowSyncMark,
   sidebarMarksVisible,
   type TreeSyncIndex,
@@ -334,8 +338,10 @@ describe("rowSyncMark", () => {
 
   it("drops every wave the moment the run ends — no stuck 0/N", () => {
     // THE bug: a run ended with leftovers (a failed note, two never reached)
-    // and the folder sat at an amber "0/3" forever. With no run moving, every
-    // row with an indicator is the green dot.
+    // and the folder sat at an amber "0/3" forever. With no run moving there is
+    // never a counter: in-flight and failed rows are the green dot, and only a
+    // note the server never got (d) wears the hollow ring. Its folder stays
+    // green (the rest is synced) and says how many are not on the server.
     const index = indexOf({ "A/a.md": "synced", "A/b.md": "error", "A/c.md": "queued" }, [
       "A/d.md",
     ]);
@@ -343,10 +349,22 @@ describe("rowSyncMark", () => {
     waves.apply(index);
     expect(rowSyncMark(dir("A"), index, true)!.progress).toEqual({ done: 0, total: 2 });
 
-    for (const row of [dir("A"), dir(""), file("A/b.md"), file("A/c.md"), file("A/d.md")]) {
+    for (const row of [file("A/b.md"), file("A/c.md")]) {
       expect(rowSyncMark(row, index, false)).toMatchObject({ state: "synced", progress: null });
     }
-    expect(rowSyncMark(dir("A"), index, false)!.title).toBe("All 4 files synced");
+    expect(rowSyncMark(file("A/d.md"), index, false)).toMatchObject({ state: "unsynced", progress: null });
+    for (const row of [dir("A"), dir("")]) {
+      expect(rowSyncMark(row, index, false)).toMatchObject({ state: "synced", progress: null });
+    }
+    expect(rowSyncMark(dir("A"), index, false)!.title).toBe("1 of 4 files not on the server yet");
+    // A folder where NOTHING reached the server wears the ring itself.
+    const none = indexOf({}, ["B/x.md", "B/y.md"]);
+    expect(rowSyncMark(dir("B"), none, false)).toMatchObject({ state: "unsynced", progress: null });
+    expect(rowSyncMark(dir("B"), none, false)!.title).toBe("2 of 2 files not on the server yet");
+    // Once d is on the server the settled folder is green again.
+    const done = indexOf({ "A/a.md": "synced", "A/b.md": "error", "A/c.md": "queued", "A/d.md": "synced" });
+    expect(rowSyncMark(dir("A"), done, false)).toMatchObject({ state: "synced", progress: null });
+    expect(rowSyncMark(dir("A"), done, false)!.title).toBe("All 4 files synced");
   });
 
   it("reads the run flag off the index when the caller does not pass one", () => {
@@ -354,6 +372,32 @@ describe("rowSyncMark", () => {
     expect(rowSyncMark(dir("A"), index)!.progress).toBeNull();
     index.runActive = true;
     expect(rowSyncMark(dir("A"), index)!.progress).toEqual({ done: 0, total: 1 });
+  });
+
+  it("marks a note or folder the server refused to create as on this computer only (#414)", () => {
+    const index = buildTreeSyncIndex({
+      docIdByPath: { "Kitchen/Team note.md": "d1" },
+      docSyncState: { d1: "synced" },
+      localNotePaths: ["Kitchen/Team note.md", "Kitchen/Untitled.md", "Kitchen/New/a.md"],
+      serverSettled: true,
+      failuresAsSynced: true,
+      localOnly: ["kitchen/untitled.md", "Kitchen/New"],
+    });
+    for (const runActive of [true, false]) {
+      // Case-insensitive, like every path comparison in the registry.
+      expect(rowSyncMark(file("Kitchen/Untitled.md"), index, runActive)).toEqual({
+        state: "unsynced",
+        progress: null,
+        title: LOCAL_ONLY_TITLE,
+      });
+      expect(rowSyncMark(dir("Kitchen/New"), index, runActive)!.state).toBe("unsynced");
+      // Its neighbours keep their own state: only the refused rows change.
+      expect(rowSyncMark(file("Kitchen/Team note.md"), index, runActive)!.state).toBe("synced");
+    }
+    // Not refused but not on the server either: the same hollow ring, in the
+    // words of a note nothing has sent yet (it used to read green).
+    const before = indexOf({ "Kitchen/Team note.md": "synced" }, ["Kitchen/Untitled.md"]);
+    expect(rowSyncMark(file("Kitchen/Untitled.md"), before, false)!.state).toBe("unsynced");
   });
 
   it("never draws an error tone anywhere in the sidebar", () => {
@@ -508,5 +552,30 @@ describe("sidebarMarksVisible", () => {
     expect(sidebarMarksVisible("read-only")).toBe(true);
     expect(sidebarMarksVisible("deleted")).toBe(true);
     expect(sidebarMarksVisible("too-large")).toBe(true);
+  });
+});
+
+describe("local-only rows say why", () => {
+  it("decodes each reason to its own tooltip", () => {
+    expect(localOnlyEntry("a/b.md")).toEqual(["a/b.md", LOCAL_ONLY_TITLE]);
+    expect(localOnlyEntry("a/b.md\u0001refused")).toEqual(["a/b.md", LOCAL_ONLY_TITLE]);
+    expect(localOnlyEntry("code/__init__.py\u0001unsynced")).toEqual(["code/__init__.py", LOCAL_FILE_TITLE]);
+    expect(localOnlyEntry("projects\u0001kept")).toEqual(["projects", LOCAL_KEPT_TITLE]);
+  });
+  it("a kept folder wears Local with its reason, not a green dot", () => {
+    const index = buildTreeSyncIndex({
+      docIdByPath: {},
+      docSyncState: {},
+      localNotePaths: [],
+      fileSyncState: {},
+      serverSettled: true,
+      failuresAsSynced: true,
+      localOnly: [localOnlyEntry("projects\u0001kept")],
+    });
+    expect(rowSyncMark({ path: "projects", isDir: true }, index, false)).toEqual({
+      state: "unsynced",
+      progress: null,
+      title: LOCAL_KEPT_TITLE,
+    });
   });
 });

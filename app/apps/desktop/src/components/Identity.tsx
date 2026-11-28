@@ -259,15 +259,20 @@ function vaultWideTone(vaultStatus: string | undefined): string {
  *   the fix.
  * - The server's shrink burst brake holds our writes (#252): amber, not red —
  *   nothing is lost, and it ends on its own or when an owner releases it.
+ * - The vault is keyed and this computer does not hold its key yet: nothing
+ *   reaches the server until a teammate shares it. It used to read "Synced"
+ *   over hundreds of files that never left the computer.
  */
 export function syncBadgeHold(args: {
   rootMissing?: boolean;
   /** Sync turned on for this vault; the brake only means something then. */
   enabled?: boolean;
   pause?: Pick<SyncPause, "until"> | null;
+  /** The open vault waits for its key on this computer (`useVaultKeyBlocked`). */
+  keyLocked?: boolean;
   now: number;
 }): { tone: "offline" | "connecting"; label: string; title: string } | null {
-  const { rootMissing, enabled, pause, now } = args;
+  const { rootMissing, enabled, pause, keyLocked, now } = args;
   if (rootMissing) {
     return {
       tone: "offline",
@@ -284,6 +289,13 @@ export function syncBadgeHold(args: {
         "Many notes were emptied at once, so the server paused your sync. Your edits are safe " +
         `on this device and sync when the pause ends${remaining ? ` (in ${remaining})` : ""} ` +
         "or a vault owner or admin releases it.",
+    };
+  }
+  if (enabled && keyLocked) {
+    return {
+      tone: "connecting",
+      label: "Sync paused",
+      title: "This computer is waiting for the vault's key from a teammate. Nothing syncs until then; your files here are safe.",
     };
   }
   return null;
@@ -309,6 +321,7 @@ export function SyncBadge({
   vaultStatus,
   rootMissing,
   pause,
+  keyLocked,
 }: {
   status: string;
   enabled?: boolean;
@@ -328,6 +341,8 @@ export function SyncBadge({
   rootMissing?: boolean;
   /** The server's shrink brake (`store.syncPause`) — see {@link syncBadgeHold}. */
   pause?: SyncPause | null;
+  /** The vault waits for its key here — see {@link syncBadgeHold}. */
+  keyLocked?: boolean;
 }) {
   // A run that just appeared is held back briefly so the pill never flickers
   // amber for a burst that settles at once; past the hold its counts show.
@@ -394,7 +409,7 @@ export function SyncBadge({
       <span className="sync-badge-label">{label}</span>
     </>
   );
-  const hold = syncBadgeHold({ rootMissing, enabled, pause, now: Date.now() });
+  const hold = syncBadgeHold({ rootMissing, enabled, pause, keyLocked, now: Date.now() });
   if (hold) {
     return (
       <span className={`sync-badge ${hold.tone}`} title={hold.title}>

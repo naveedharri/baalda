@@ -7,6 +7,7 @@ vi.mock("../db/pool.js", () => ({ pool: { query: state.query } }));
 vi.mock("../billing/note-quota.js", () => ({ NOTE_LIMIT_MESSAGE: "Upgrade to sync more notes", noteLimitMessage: () => "Upgrade to sync more notes", withNoteQuota: async (_v: unknown, db: unknown, work: Function) => work(db, state.remaining) }));
 vi.mock("../permissions/http-gates.js", () => ({ canCreateIn: async () => true, canEditDoc: async () => true }));
 vi.mock("../permissions/resolver.js", () => ({ createResolverCache: () => ({}) }));
+vi.mock("../permissions/vault-docs.js", () => ({ readsWholeVault: async () => true, listReadableDocsInVault: async () => new Set(), listVisibleFolders: async () => [] }));
 beforeEach(() => {
   vi.resetAllMocks(); state.remaining = 1; state.existing = false;
   state.query.mockImplementation(async (sql: string, args: unknown[]) => {

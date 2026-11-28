@@ -5,6 +5,8 @@ import {
   notesForVersion,
   releaseNoteLines,
   releaseNoteItems,
+  releaseNoteVideo,
+  youtubeVideoId,
 } from "../releaseNotes";
 
 /** A body shaped like docs/RELEASE_NOTES.md: comment header, newest-first sections. */
@@ -180,5 +182,56 @@ describe("releaseNoteItems", () => {
       { title: "Safer and steadier", detail: "with security fixes." },
       { title: "", detail: "Plain line with bold inside." },
     ]);
+  });
+});
+
+describe("release video", () => {
+  const SECTION = [
+    'video: https://youtu.be/AbC123xyz_0 "Access groups in two minutes"',
+    "",
+    "- **Access groups.** One place for a whole team's access.",
+  ].join("\n");
+
+  it("reads the link and the quoted title", () => {
+    expect(releaseNoteVideo(SECTION)).toEqual({
+      id: "AbC123xyz_0",
+      url: "https://www.youtube.com/watch?v=AbC123xyz_0",
+      title: "Access groups in two minutes",
+    });
+  });
+
+  it("is never listed as a note", () => {
+    expect(releaseNoteLines(SECTION)).toEqual(["Access groups. One place for a whole team's access."]);
+    expect(releaseNoteItems(SECTION)).toEqual([
+      { title: "Access groups", detail: "One place for a whole team's access." },
+    ]);
+  });
+
+  it("takes every common YouTube link shape and refuses the rest", () => {
+    for (const url of [
+      "https://youtu.be/AbC123xyz_0?si=x",
+      "https://www.youtube.com/watch?v=AbC123xyz_0&t=4",
+      "https://m.youtube.com/watch?v=AbC123xyz_0",
+      "https://youtube.com/shorts/AbC123xyz_0",
+      "https://www.youtube-nocookie.com/embed/AbC123xyz_0",
+      "https://www.youtube.com/live/AbC123xyz_0",
+    ]) expect(youtubeVideoId(url)).toBe("AbC123xyz_0");
+    for (const url of [
+      "https://vimeo.com/123",
+      "https://youtube.com.evil.example/watch?v=AbC123xyz_0",
+      "javascript:alert(1)",
+      "https://youtu.be/short",
+      "not a url",
+    ]) expect(youtubeVideoId(url)).toBeNull();
+  });
+
+  it("a video without a title, and a non-YouTube line, read as expected", () => {
+    expect(releaseNoteVideo("video: https://youtu.be/AbC123xyz_0")?.title).toBe("");
+    expect(releaseNoteVideo("video: https://vimeo.com/123 \"x\"")).toBeNull();
+  });
+
+  it("a section with only a video still opens What's New", () => {
+    expect(isSilentRelease("## 0.1.115\nvideo: https://youtu.be/AbC123xyz_0", "0.1.115")).toBe(false);
+    expect(isSilentRelease("## 0.1.115\n", "0.1.115")).toBe(true);
   });
 });

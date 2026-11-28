@@ -372,6 +372,12 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
     // stream vault files (e.g. `<img src>` in notes) via convertFileSrc.
     let _ = app.asset_protocol_scope().allow_directory(&path, true);
 
+    // The vault's sync rules (#401) BEFORE anything walks it: the rebuild below,
+    // the watcher and the first tree listing must all see the same excluded
+    // paths, and the network has not answered yet — the cached copy is the
+    // last set the vault's owners/admins wrote (empty: today's behaviour).
+    crate::sync_rules::load_and_install(&path);
+
     let opened_at = std::time::Instant::now();
     let index = Arc::new(Mutex::new(Index::open(&path)?));
     let index_open_ms = opened_at.elapsed().as_millis() as u64;
@@ -493,6 +499,22 @@ fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> A
     };
 
     let publish_ms = publish_started.elapsed().as_millis() as u64;
+
+    // Temp files a killed or crashed run left mid-write (a download, a save):
+    // invisible to the tree and sync, but they kept their bytes forever.
+    {
+        let sweep_root = path.clone();
+        std::thread::spawn(move || {
+            let n = crate::notefile::sweep_stale_temp_files(
+                &sweep_root,
+                std::process::id(),
+                crate::notefile::STALE_TEMP_AGE,
+            );
+            if n > 0 {
+                log::info!("[temp-sweep] removed {n} unfinished temp file(s) in {}", sweep_root.display());
+            }
+        });
+    }
 
     let config_started = std::time::Instant::now();
     let mut info = vault_info(&path, epoch);
@@ -841,7 +863,7 @@ pub async fn delete_departed_vault(
     state: State<'_, AppState>,
     path: String,
     organization_id: String,
-) -> AppResult<()> {
+) -> AppResult<usize> {
     let vaults_root = read_config(&app, &state)
         .vaults_root
         .map(PathBuf::from)
@@ -864,13 +886,143 @@ pub async fn delete_departed_vault(
     };
     drop(watcher);
     drop(index);
-    std::fs::remove_dir_all(&target).map_err(io_ctx("delete the vault folder", &target))?;
+    let kept = remove_departed_contents(&target)?;
+    if kept > 0 {
+        log::info!(
+            "[vault] membership ended: kept {kept} item(s) that never synced in {}",
+            target.display()
+        );
+    }
     let mut cfg = read_config(&app, &state);
     cfg.recent_vaults.retain(|r| r.path != path);
     if cfg.last_vault.as_deref() == Some(path.as_str()) {
         cfg.last_vault = None;
     }
-    write_config(&app, &state, &cfg)
+    write_config(&app, &state, &cfg)?;
+    Ok(kept)
+}
+
+/// Membership ended: remove the vault's content and keep only what never
+/// belonged to it (#401). A person's own work kept in the vault folder under a
+/// "Don't sync" rule, a dot or build folder, a `.git`, or a file type Baalda
+/// does not sync existed only on this computer, and deleting it here would be
+/// the one place a sync rule loses data.
+///
+/// "Belonged to the vault" is judged by the folder's own `.context/config.json`
+/// (read before `.context` goes): every path it registered — `docs`, `files`,
+/// `folders`, and the `parked` items a rule hid after they synced — is the
+/// team's and is removed wherever it sits, hidden or not. Every file the vault
+/// would sync under its cached rules (`.context/sync-rules.json`; none means
+/// today's defaults) is removed too, as is OS bookkeeping. Kept: files never
+/// registered that could not sync, and symlinks (never followed). Emptied
+/// folders go, and the vault folder itself when nothing is kept. Returns how
+/// many entries were kept (a wholly kept folder counts once).
+pub fn remove_departed_contents(target: &Path) -> AppResult<usize> {
+    use std::collections::HashSet;
+    let rules = crate::sync_rules::read_cached(target)
+        .and_then(|doc| crate::sync_rules::SyncRules::compile(doc).ok())
+        .unwrap_or_default();
+    let groups = rules.doc().opt_in_groups();
+    let registered: HashSet<String> = registered_paths(target);
+    struct Ctx<'a> {
+        rules: &'a crate::sync_rules::SyncRules,
+        groups: u8,
+        registered: &'a HashSet<String>,
+    }
+    impl Ctx<'_> {
+        fn is_registered(&self, rel: &str) -> bool {
+            self.registered.contains(&rel.to_lowercase())
+        }
+        fn holds_registered(&self, dir_rel: &str) -> bool {
+            let prefix = format!("{}/", dir_rel.to_lowercase());
+            self.registered.iter().any(|p| p.starts_with(&prefix))
+        }
+    }
+    fn junk(name: &str) -> bool {
+        name.starts_with("._") || crate::vault::OS_JUNK.iter().any(|j| name.eq_ignore_ascii_case(j))
+    }
+    fn walk(dir: &Path, rel: &str, hidden_above: bool, cx: &Ctx, kept: &mut usize) -> AppResult<()> {
+        let entries = std::fs::read_dir(dir).map_err(io_ctx("read the vault folder", dir))?;
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let path = entry.path();
+            let ft = std::fs::symlink_metadata(&path)?.file_type();
+            if rel.is_empty() && name == ".context" && ft.is_dir() {
+                continue; // removed last, after everything it describes
+            }
+            // The vault's sync rules: the team's text, written here by sync.
+            if rel.is_empty() && name == crate::sync_rules::RULES_FILE && ft.is_file() {
+                std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
+                continue;
+            }
+            if ft.is_symlink() {
+                *kept += 1;
+                continue;
+            }
+            let hidden = hidden_above
+                || crate::vault::is_ignored_name_with(&name, cx.groups)
+                || cx.rules.excludes_entry(&child_rel, ft.is_dir());
+            if ft.is_dir() {
+                // A hidden folder the vault never registered anything in is
+                // wholly the person's own (a checkout, node_modules): keep it
+                // without walking it.
+                if hidden && !cx.is_registered(&child_rel) && !cx.holds_registered(&child_rel) {
+                    *kept += 1;
+                    continue;
+                }
+                walk(&path, &child_rel, hidden, cx, kept)?;
+                // Only an emptied folder goes; one still holding kept work stays.
+                let _ = std::fs::remove_dir(&path);
+            } else if cx.is_registered(&child_rel)
+                || junk(&name)
+                || (!hidden && crate::vault::is_allowed_with(&name, cx.groups))
+            {
+                std::fs::remove_file(&path).map_err(io_ctx("delete a file", &path))?;
+            } else {
+                *kept += 1;
+            }
+        }
+        Ok(())
+    }
+    let cx = Ctx { rules: &rules, groups, registered: &registered };
+    let mut kept = 0usize;
+    walk(target, "", false, &cx, &mut kept)?;
+    let ctx = target.join(".context");
+    if ctx.is_dir() {
+        std::fs::remove_dir_all(&ctx).map_err(io_ctx("delete the vault's sync data", &ctx))?;
+    }
+    if kept == 0 {
+        std::fs::remove_dir(target).map_err(io_ctx("delete the vault folder", target))?;
+    }
+    Ok(kept)
+}
+
+/// Every vault-relative path (lowercased) the folder's sync config registered:
+/// `docs`/`files`/`folders` keys and the `parked` values. Unreadable config ⇒
+/// none, so only the syncable-file rule applies.
+fn registered_paths(target: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(bytes) = std::fs::read(target.join(".context").join("config.json")) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return out;
+    };
+    for key in ["docs", "files", "folders"] {
+        if let Some(map) = v.get(key).and_then(|m| m.as_object()) {
+            out.extend(map.keys().map(|k| k.to_lowercase()));
+        }
+    }
+    if let Some(parked) = v.get("parked").and_then(|m| m.as_object()) {
+        for group in parked.values() {
+            if let Some(map) = group.as_object() {
+                out.extend(map.values().filter_map(|p| p.as_str()).map(|p| p.to_lowercase()));
+            }
+        }
+    }
+    out
 }
 
 /// The refusals of [`delete_departed_vault`], pure so each one is testable.
@@ -1601,6 +1753,106 @@ pub async fn list_tree(
     tree::list_tree(&vault)
 }
 
+// ---- sync rules (#401) ------------------------------------------------------
+
+/// The vault's last-known sync rules (the `.context/sync-rules.json` cache), or
+/// `None` when this vault has never been given any.
+#[tauri::command]
+pub async fn get_sync_rules(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<crate::sync_rules::RulesDoc>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    Ok(crate::sync_rules::read_cached(&vault))
+}
+
+/// What [`set_sync_rules`] did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRulesApplied {
+    /// The patterns differ from the ones in force before, so the tree, the
+    /// index and the sync map all moved.
+    pub changed: bool,
+}
+
+/// Make `doc` the vault's sync rules: cache it, install it, and re-reconcile
+/// the index so excluded notes and files leave it (and lifted ones come back).
+///
+/// Only INDEX rows move. The CRDT tables, file identities and the sync map's
+/// ids are untouched, so nothing is deleted and lifting a rule restores the same
+/// notes. The sync layer parks what it held at excluded paths itself.
+#[tauri::command]
+pub async fn set_sync_rules(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    doc: crate::sync_rules::RulesDoc,
+    expected_epoch: Option<u64>,
+) -> AppResult<SyncRulesApplied> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let before = crate::sync_rules::read_cached(&vault);
+    // A pattern change, or a file-type switch: either changes what the walk surfaces.
+    let changed = before.as_ref().map(|d| d.patterns.as_str()).unwrap_or("") != doc.patterns
+        || before.as_ref().map(|d| d.opt_in_groups()).unwrap_or(0) != doc.opt_in_groups();
+    let same_doc = before.as_ref() == Some(&doc);
+    if !same_doc {
+        crate::sync_rules::save_and_install(&vault, doc)?;
+    }
+    if changed {
+        let queue = state.inner.lock().unwrap().watcher.as_ref().map(|w| w.extract_queue());
+        let started = std::time::Instant::now();
+        let guard = index.lock().unwrap();
+        let result = guard.rebuild_report(&vault);
+        drop(guard);
+        let (ok, skipped) = match result {
+            Ok(report) => {
+                if let Some(q) = queue {
+                    q.enqueue(report.pending);
+                }
+                (true, report.skipped)
+            }
+            Err(e) => {
+                log::error!("[sync-rules] index rebuild failed for {}: {e}", vault.display());
+                (false, 0)
+            }
+        };
+        let epoch = state.inner.lock().unwrap().vault_epoch;
+        let _ = app.emit(
+            "index-ready",
+            IndexReady {
+                path: vault.to_string_lossy().to_string(),
+                epoch,
+                ok,
+                ms: started.elapsed().as_millis() as u64,
+                skipped,
+            },
+        );
+    }
+    Ok(SyncRulesApplied { changed })
+}
+
+/// The vault's `.baaldaignore` (#401): the on-disk face of its sync rules,
+/// or `None` when there is no such file (or it is not a plain file).
+#[tauri::command]
+pub async fn read_rules_file(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Option<String>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    crate::sync_rules::read_rules_file(&vault)
+}
+
+/// Write the vault's `.baaldaignore` when its text differs. Returns whether it
+/// wrote. The watcher's echo of this write is answered by comparing texts.
+#[tauri::command]
+pub async fn write_rules_file(
+    state: State<'_, AppState>,
+    text: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    crate::sync_rules::write_rules_file(&vault, &text)
+}
+
 /// Lazy sidebar loading: return only one directory's immediate children.
 /// `path` is the vault-relative dir ("" = root). Sub-dirs come back as
 /// expandable-but-unloaded folders (empty `children`); the UI fetches deeper
@@ -1721,6 +1973,20 @@ pub async fn rebind_note_id(
     rebound
 }
 
+/// The sync layer's fork heal: key the note at `path` by `doc_id`
+/// (`Index::heal_note_id`). False when refused.
+#[tauri::command]
+pub async fn heal_note_id(
+    state: State<'_, AppState>,
+    path: String,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (_vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.heal_note_id(&path, &doc_id)
+}
+
 #[tauri::command]
 pub async fn write_note(
     state: State<'_, AppState>,
@@ -1750,6 +2016,13 @@ pub async fn write_note(
         guard.set_disk_base(doc_id, &notefile::sha256_hex(&content))?;
     }
     guard.index_note(&vault, &abs)?;
+    // One id per note: a file this write created (or a row that never held
+    // local history) takes the writer's doc id, not a fresh one.
+    if let Some(doc_id) = doc_id.as_deref() {
+        if let Err(e) = guard.adopt_writer_id(&path, doc_id) {
+            log::warn!("[index] couldn't key {path} by its doc id: {e}");
+        }
+    }
     Ok("written")
 }
 
@@ -1864,17 +2137,105 @@ pub async fn rename_path(
     from: String,
     to: String,
     expected_epoch: Option<u64>,
+    allow_excluded_target: Option<bool>,
+    defer_links: Option<bool>,
 ) -> AppResult<String> {
     // Epoch-pinned because the UI renames a multi-select in a loop: every lap
     // after the first runs past an await, and a rename applied to the wrong vault
     // moves a same-named file the user never touched.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let old_abs = vault::resolve_in_vault(&vault, &from)?;
-    let new_rel = notefile::rename_path(&vault, &from, &to)?;
+    let allow = allow_excluded_target.unwrap_or(false);
+    let new_rel = notefile::rename_path_opts(&vault, &from, &to, allow)?;
     let new_abs = vault::resolve_in_vault(&vault, &new_rel)?;
-    // Keep doc_id stable across the move (file or folder subtree).
-    index.lock().unwrap().rename_note(&vault, &old_abs, &new_abs)?;
+    let guard = index.lock().unwrap();
+    if allow && vault::is_excluded_any_kind(&vault, &new_rel) {
+        // Followed into a folder that doesn't sync (#401): the index forgets the
+        // rows (search, links, the sidebar) while the CRDT tables, keyed by
+        // doc_id, stay for the day the rule goes and `rebind_note_id` returns it.
+        let gone = [old_abs.clone()];
+        let _ = guard.remove_notes(&vault, &gone);
+        let _ = guard.remove_files(&vault, &gone);
+    } else {
+        // Keep doc_id stable across the move (file or folder subtree). A
+        // follow of many renames defers the link pass to one
+        // `flush_deferred_links` at its end (`Index::rename_note_opts`).
+        guard.rename_note_opts(&vault, &old_abs, &new_abs, defer_links.unwrap_or(false))?;
+    }
     Ok(new_rel)
+}
+
+/// The one link pass a run of `rename_path { deferLinks: true }` owes. Cheap
+/// when nothing is owed. True when a pass ran.
+#[tauri::command]
+pub async fn flush_deferred_links(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (_vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.flush_deferred_links()
+}
+
+/// One excluded file's content hash (#401), see [`excluded_hashes`].
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcludedHash {
+    pub path: String,
+    pub sha256: String,
+    pub is_note: bool,
+}
+
+/// sha256 of every surfaced file at or under these EXCLUDED paths (#401),
+/// capped at 5000 files. The delete drain pairs a note or binary that vanished
+/// with one of these to tell "moved into a folder that doesn't sync" (park it)
+/// from a delete. Paths that are not excluded, gone, or links are skipped.
+#[tauri::command]
+pub async fn excluded_hashes(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    expected_epoch: Option<u64>,
+) -> AppResult<Vec<ExcludedHash>> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    tauri::async_runtime::spawn_blocking(move || Ok(excluded_hashes_impl(&vault, &paths)))
+        .await
+        .map_err(|e| AppError::new(e.to_string()))?
+}
+
+pub fn excluded_hashes_impl(vault: &Path, paths: &[String]) -> Vec<ExcludedHash> {
+    const CAP: usize = 5000;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for rel in paths {
+        let rel = rel.trim_start_matches('/');
+        if rel.is_empty() || vault::rel_path_is_ignored(rel) || !vault::is_excluded_any_kind(vault, rel) {
+            continue;
+        }
+        let Ok(abs) = vault::resolve_in_vault(vault, rel) else { continue };
+        let walker = walkdir::WalkDir::new(&abs).follow_links(false).into_iter().filter_entry(|e| {
+            e.file_name().to_str().map(|n| !vault::is_ignored_name(n)).unwrap_or(false)
+        });
+        for entry in walker.flatten() {
+            if out.len() >= CAP {
+                return out;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str() else { continue };
+            if !vault::is_allowed_file(name) {
+                continue;
+            }
+            let Ok(r) = entry.path().strip_prefix(vault) else { continue };
+            let r = r.to_string_lossy().replace('\\', "/");
+            if !seen.insert(r.clone()) {
+                continue;
+            }
+            let Ok(sha) = notefile::sha256_file(entry.path()) else { continue };
+            out.push(ExcludedHash { path: r, sha256: sha, is_note: vault::is_note_file(name) });
+        }
+    }
+    out
 }
 
 /// Idempotent folder create, for reconciliation (see `notefile::ensure_folder`).
@@ -1918,12 +2279,13 @@ pub async fn delete_folder_if_empty(
     state: State<'_, AppState>,
     path: String,
     expected_epoch: Option<u64>,
+    allow_excluded: Option<bool>,
 ) -> AppResult<bool> {
     // Epoch-pinned like `trash_note`: driven by a debounced registry pull that
     // can outlive a vault switch.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let abs = vault::resolve_in_vault(&vault, &path)?;
-    let removed = notefile::delete_folder_if_empty(&vault, &path)?;
+    let removed = notefile::delete_folder_if_empty_with(&vault, &path, allow_excluded.unwrap_or(false))?;
     if removed {
         index.lock().unwrap().remove_note(&vault, &abs)?;
     }
@@ -1956,7 +2318,18 @@ pub async fn delete_file(
 pub struct InboundRemoval {
     path: String,
     doc_id: Option<String>,
+    /// Remove only while the file still hashes to THIS doc's disk base (the
+    /// bytes last agreed with the server). A save made moments before an
+    /// access change can reach the disk before the index has re-read it, so a
+    /// caller that judged the note clean from the index would otherwise delete
+    /// an edit it never saw. A changed file stays, with `CHANGED_ON_DISK`,
+    /// and is judged again on the next pass. No recorded base: no check.
+    #[serde(default)]
+    if_at_base_of: Option<String>,
 }
+
+/// The error a removal answers when the file moved on since its disk base.
+pub const CHANGED_ON_DISK: &str = "changed on disk since it last synced; kept";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1968,8 +2341,8 @@ pub struct InboundRemovalOutcome {
 #[cfg(test)]
 fn remove_inbound_file(vault: &Path, index: &Mutex<Index>, item: &InboundRemoval) -> AppResult<()> {
     let outcomes = remove_inbound_files(vault, index, vec![InboundRemoval {
-        path: item.path.clone(), doc_id: item.doc_id.clone(),
-    }], || Ok(()))?;
+        path: item.path.clone(), doc_id: item.doc_id.clone(), if_at_base_of: item.if_at_base_of.clone(),
+    }], false, || Ok(()))?;
     if let Some(error) = &outcomes[0].error {
         return Err(AppError::new(error));
     }
@@ -1981,9 +2354,10 @@ pub fn delete_files_batch(
     state: State<'_, AppState>,
     items: Vec<InboundRemoval>,
     expected_epoch: Option<u64>,
+    allow_excluded: Option<bool>,
 ) -> AppResult<Vec<InboundRemovalOutcome>> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
-    remove_inbound_files(&vault, &index, items, || {
+    remove_inbound_files(&vault, &index, items, allow_excluded.unwrap_or(false), || {
         require_vault_at(&state, expected_epoch).map(|_| ())
     })
 }
@@ -1992,6 +2366,7 @@ fn remove_inbound_files(
     vault: &Path,
     index: &Mutex<Index>,
     items: Vec<InboundRemoval>,
+    allow_excluded: bool,
     check_epoch: impl Fn() -> AppResult<()>,
 ) -> AppResult<Vec<InboundRemovalOutcome>> {
     if items.len() > 64 {
@@ -2003,7 +2378,15 @@ fn remove_inbound_files(
         // Re-check between files so a vault switch cancels the remaining work.
         check_epoch()?;
         let result = vault::resolve_in_vault(&vault, &item.path).and_then(|abs| {
-            notefile::delete_file(&vault, &item.path)?;
+            if let Some(base_doc) = item.if_at_base_of.as_deref() {
+                let base = index.lock().unwrap().get_disk_base(base_doc)?;
+                if let Some(base) = base {
+                    if abs.is_file() && notefile::sha256_file(&abs)? != base {
+                        return Err(AppError::new(CHANGED_ON_DISK));
+                    }
+                }
+            }
+            notefile::delete_file_with(&vault, &item.path, allow_excluded)?;
             removed.push((abs, item.doc_id));
             Ok(())
         });
@@ -2818,6 +3201,31 @@ pub fn materialize_notes(
     index: &Index,
     items: &[MaterializeItem],
 ) -> AppResult<Vec<MaterializeOutcome>> {
+    materialize_notes_with(vault, index, items, true)
+}
+
+/// [`materialize_notes`] for files that are already on disk: index and re-key
+/// them, and NEVER create a missing one. A path that is not there (or not a
+/// regular file) is left out, `created: false, rebound: false`.
+///
+/// For a folder move made outside the app: the move is paired from a listing,
+/// the server is asked, and only then are the moved files indexed under their
+/// kept ids. A note deleted in that window must stay deleted; the create-only
+/// batch wrote it back empty, and the delete was lost.
+pub fn index_existing_notes(
+    vault: &Path,
+    index: &Index,
+    items: &[MaterializeItem],
+) -> AppResult<Vec<MaterializeOutcome>> {
+    materialize_notes_with(vault, index, items, false)
+}
+
+fn materialize_notes_with(
+    vault: &Path,
+    index: &Index,
+    items: &[MaterializeItem],
+    create_missing: bool,
+) -> AppResult<Vec<MaterializeOutcome>> {
     let mut outcomes: Vec<MaterializeOutcome> = Vec::with_capacity(items.len());
     // (rel_path, doc_id) for the rows that exist on disk, plus where each one's
     // outcome sits.
@@ -2830,6 +3238,17 @@ pub fn materialize_notes(
                 "[materialize] refusing {}: {reason}",
                 item.rel_path
             );
+            outcomes.push(MaterializeOutcome {
+                rel_path: item.rel_path.clone(),
+                created: false,
+                rebound: false,
+                error: None,
+            });
+            continue;
+        }
+        if !create_missing
+            && !matches!(crate::vault::vault_path_state(vault, &item.rel_path), crate::vault::PathState::Regular)
+        {
             outcomes.push(MaterializeOutcome {
                 rel_path: item.rel_path.clone(),
                 created: false,
@@ -2877,11 +3296,15 @@ pub async fn materialize_notes_batch(
     state: State<'_, AppState>,
     items: Vec<MaterializeItem>,
     expected_epoch: Option<u64>,
+    index_only: Option<bool>,
 ) -> AppResult<Vec<MaterializeOutcome>> {
     // Epoch-pinned like `rebind_note_id`: the doc ids come from ONE vault's
     // registry map, and writing them into another vault's index forks its notes.
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
+    if index_only.unwrap_or(false) {
+        return index_existing_notes(&vault, &guard, &items);
+    }
     materialize_notes(&vault, &guard, &items)
 }
 
@@ -3418,18 +3841,48 @@ mod tests {
         index.lock().unwrap().append_yjs_update("d1", &[1]).unwrap();
         for path in ["Docs", ".context/config.json", "../outside.md"] {
             assert!(remove_inbound_file(tmp.path(), &index, &InboundRemoval {
-                path: path.into(), doc_id: Some("d1".into()),
+                path: path.into(), doc_id: Some("d1".into()), if_at_base_of: None,
             }).is_err());
         }
         assert!(tmp.path().join("Docs/n.md").exists());
         assert!(tmp.path().join(".context/config.json").exists());
         assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 1);
         remove_inbound_file(tmp.path(), &index, &InboundRemoval {
-            path: "Docs/n.md".into(), doc_id: Some("d1".into()),
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()), if_at_base_of: None,
         }).unwrap();
         assert!(!tmp.path().join("Docs/n.md").exists());
         assert!(tmp.path().join("Docs").exists());
         assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 0);
+    }
+
+    #[test]
+    fn inbound_removal_at_base_keeps_a_file_saved_since_it_last_synced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = Mutex::new(Index::open_in_memory().unwrap());
+        std::fs::create_dir(tmp.path().join("Docs")).unwrap();
+        std::fs::write(tmp.path().join("Docs/n.md"), "synced").unwrap();
+        index.lock().unwrap().set_disk_base("d1", &notefile::sha256_hex("synced")).unwrap();
+        index.lock().unwrap().append_yjs_update("d1", &[1]).unwrap();
+        // Saved moments before the access change: kept, CRDT untouched.
+        std::fs::write(tmp.path().join("Docs/n.md"), "synced\nan edit\n").unwrap();
+        let err = remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()), if_at_base_of: Some("d1".into()),
+        }).unwrap_err();
+        assert_eq!(err.to_string(), CHANGED_ON_DISK);
+        assert!(tmp.path().join("Docs/n.md").exists());
+        assert_eq!(index.lock().unwrap().load_yjs_state("d1").unwrap().update_count, 1);
+        // Back at its base: removed as before.
+        std::fs::write(tmp.path().join("Docs/n.md"), "synced").unwrap();
+        remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/n.md".into(), doc_id: Some("d1".into()), if_at_base_of: Some("d1".into()),
+        }).unwrap();
+        assert!(!tmp.path().join("Docs/n.md").exists());
+        // No recorded base: no check.
+        std::fs::write(tmp.path().join("Docs/m.md"), "anything").unwrap();
+        remove_inbound_file(tmp.path(), &index, &InboundRemoval {
+            path: "Docs/m.md".into(), doc_id: None, if_at_base_of: Some("d2".into()),
+        }).unwrap();
+        assert!(!tmp.path().join("Docs/m.md").exists());
     }
 
 
@@ -3479,6 +3932,83 @@ mod tests {
         // separator trimmed so the label reads "D:".
         assert_eq!(root_label("D:\\"), "D:");
         assert_eq!(root_label("/"), "/");
+    }
+
+    /// Membership ended: what the vault synced goes, what a rule kept local stays.
+    #[test]
+    fn departed_removal_keeps_what_never_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = dir.path().join("team");
+        let w = |rel: &str| {
+            let p = v.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        std::fs::create_dir_all(v.join(".context")).unwrap();
+        std::fs::write(
+            v.join(".context/config.json"),
+            r#"{"organizationId":"org-1","docs":{"Notes/a.md":"d1","projects/app/context.md":"d2"},
+                "files":{"projects/app/node_modules/x/index.js":"f9"},
+                "parked":{"docs":{"d3":"projects/app/code/synced-before-the-rule.md"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            v.join(".context/sync-rules.json"),
+            r#"{"patterns":"/projects/app/code/\n","types":{},"folders":{}}"#,
+        )
+        .unwrap();
+        w("Notes/a.md");
+        w("Notes/.DS_Store");
+        w("attachments/abc.png");
+        w("projects/app/context.md");
+        w("projects/app/code/main.py");
+        w("projects/app/code/synced-before-the-rule.md");
+        w("projects/app/node_modules/y/local-only.js");
+        w("projects/app/code/.git/HEAD");
+        w("projects/app/.git/config");
+        w("projects/app/node_modules/x/index.js");
+        w(".obsidian/app.json");
+        w("tools/setup.exe");
+        w(".baaldaignore");
+        let kept = remove_departed_contents(&v).unwrap();
+        // Synced content and the CRDT store are gone, and the emptied folder too.
+        // Synced content, what the vault registered anywhere (a parked note under
+        // the rule, a file the team synced before build folders were hidden),
+        // and the CRDT store are gone.
+        for gone in [
+            "Notes",
+            "attachments",
+            "projects/app/context.md",
+            "projects/app/code/synced-before-the-rule.md",
+            "projects/app/node_modules/x",
+            ".baaldaignore",
+            ".context",
+        ] {
+            assert!(!v.join(gone).exists(), "{gone} should be removed");
+        }
+        // Never registered and never syncable: existed only here, kept.
+        for stays in [
+            "projects/app/code/main.py",
+            "projects/app/code/.git/HEAD",
+            "projects/app/.git/config",
+            "projects/app/node_modules/y/local-only.js",
+            ".obsidian/app.json",
+            "tools/setup.exe",
+        ] {
+            assert!(v.join(stays).exists(), "{stays} should be kept");
+        }
+        assert!(kept > 0);
+        assert!(v.exists(), "the folder stays while it holds kept work");
+
+        // A vault holding only synced content leaves nothing behind.
+        let v2 = dir.path().join("plain");
+        std::fs::create_dir_all(v2.join(".context")).unwrap();
+        std::fs::write(v2.join(".context/config.json"), "{}").unwrap();
+        std::fs::create_dir_all(v2.join("A")).unwrap();
+        std::fs::write(v2.join("A/n.md"), "x").unwrap();
+        std::fs::write(v2.join(".baaldaignore"), "/build/\n").unwrap();
+        assert_eq!(remove_departed_contents(&v2).unwrap(), 0);
+        assert!(!v2.exists());
     }
 
     /// Membership-loss deletion is permanent, so its target checks are strict.

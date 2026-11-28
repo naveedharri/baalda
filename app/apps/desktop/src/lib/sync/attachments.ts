@@ -65,9 +65,10 @@
 // back to the legacy `POST /api/vaults/:id/blobs` and remembers, so exactly one
 // upload pays for the probe.
 
+import { isHiddenName } from "../syncRules/folders";
 import { UnmaterializablePaths } from "./windowsPaths";
 import { announceAttachmentArrived } from "../attachmentArrivals";
-import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
+import { formatFor, isNoteExt, isSurfacedFormat, mimeForPath as mimeForFormat } from "../formats";
 import { isTransientPath, pathKey } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
 import {
@@ -104,6 +105,17 @@ export interface LocalAttachment {
  * quiet period.
  */
 export const UPLOAD_QUIET_MS = 3_000;
+/** How many extra passes one failed offline-rename move may ask for. */
+const MOVE_RETRY_MAX = 3;
+/** How soon a pass held back by a failed deleted-files listing asks again. */
+export const HELD_FILES_RETRY_MS = 15_000;
+/** First retry after a pass whose listing or downloads failed on the network;
+ *  doubles per failing pass up to {@link TRANSIENT_RETRY_MAX_MS}. */
+export const TRANSIENT_RETRY_MS = 15_000;
+export const TRANSIENT_RETRY_MAX_MS = 5 * 60_000;
+/** How many quick passes (one per {@link UPLOAD_QUIET_MS}) may wait for the
+ *  local index to give newly dropped files their ids. */
+export const INDEX_WAIT_MAX_ROUNDS = 40;
 
 /** Rust's `attachments.rs CHANGED_DURING_UPLOAD`: the bytes streamed were not
  *  the bytes the intent declared. Never completed; rehashed on a later pass. */
@@ -159,9 +171,7 @@ export function isSafeAttachmentRelPath(relPath: string): boolean {
   // Normalize separators; reject Windows-style just in case.
   const parts = relPath.split(/[\\/]/);
   if (parts[0] !== "attachments" || parts.length < 2) return false;
-  return parts.every(
-    (seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith("."),
-  );
+  return parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !isHiddenName(seg));
 }
 
 /** Does this vault-relative path live in the hidden `attachments/` store? */
@@ -183,8 +193,6 @@ export function isUnderAttachments(relPath: string): boolean {
  * the authority, including the denied build dirs this side does not enumerate;
  * this filter is what keeps the pass from queueing work Rust will refuse.
  */
-/** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs (and `sync/inbound.ts`). */
-const TREE_DENIED_DIRS = ["node_modules", "dist", "build", "target", "vendor", "__pycache__", "venv"];
 
 /**
  * Download failures retrying cannot fix while the server row stays the same:
@@ -211,19 +219,19 @@ export function isSafeTreeBinaryRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const parts = relPath.split(/[\\/]/);
   if (parts.length === 0) return false;
-  if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
-    return false;
-  // Rust's `ensure_tree_binary_rel` refuses these build dirs (`vault.rs
-  // DENIED_DIRS`). A row an older client registered there would otherwise be
+  // Dot names and build folders only when the vault switched them on, and
+  // never the floor (`syncRules/folders.ts`, the twin of Rust's
+  // `ensure_tree_binary_rel`): a row registered there would otherwise be
   // planned on every pass, presigned, refused by Rust and planned again.
-  if (parts.some((seg) => TREE_DENIED_DIRS.includes(seg))) return false;
+  if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !isHiddenName(seg)))
+    return false;
   if (isNoteExt(relPath)) return false;
   // Another device's Office lock file (`~$Report.docx`, #265), registered by a
   // client that predates the ignore rule: never pulled onto this disk. Its row
   // is left alone — this only declines the download.
   if (isTransientPath(relPath)) return false;
   const format = formatFor(relPath);
-  return !!format && format.surface && format.syncAs === "attachment";
+  return !!format && isSurfacedFormat(format) && format.syncAs === "attachment";
 }
 
 /**
@@ -291,7 +299,18 @@ export function diffAttachments(
 }
 
 /** A local upload, plus the base it was edited from (see {@link planBinarySync}). */
-export type PlannedUpload = LocalAttachment & { baseSha?: string | null };
+export type PlannedUpload = LocalAttachment & {
+  baseSha?: string | null;
+  /** The server row's own path when it differs from this one: a teammate
+   *  renamed the file while it was being edited here. Once the edit is up the
+   *  pass looks again, so the local file follows the rename (see the upload
+   *  loop) instead of staying under the old name until some unrelated pass. */
+  serverPath?: string;
+  /** The server's current version of this file (an edit of a file the server
+   *  already holds). Put back when the upload is refused for want of write
+   *  access, as a view-only note's text is (see {@link ViewOnlyFile}). */
+  serverVersion?: ServerBlob & { docId: string; relPath: string };
+};
 
 /**
  * Replace a local tree binary with the server's version of the SAME file.
@@ -305,7 +324,7 @@ export interface BinaryReplace {
   local: LocalAttachment;
   blob: ServerBlob & { docId: string; relPath: string };
   keepCopy: boolean;
-  reason: "teammate-edit" | "no-base" | "conflict" | "stale-base";
+  reason: "teammate-edit" | "no-base" | "conflict" | "stale-base" | "view-only";
 }
 
 export interface BinaryPlan {
@@ -328,6 +347,16 @@ export interface BinaryPlan {
    * {@link planBinarySync}; anything less keeps today's behaviour.
    */
   toMove: Array<{ docId: string; from: string; to: string; sha256: string }>;
+  /**
+   * The other direction: a teammate renamed or moved a file this device holds
+   * by id, with the same bytes. The LOCAL file follows (`from` → `to`). Before
+   * this it counted as agreed at its old path, so the rename never reached this
+   * disk (and an old folder left holding it came back as a new folder).
+   */
+  toFollow: Array<{ docId: string; from: string; to: string; sha256: string }>;
+  /** Known files left alone this pass because the deleted-files listing failed
+   *  ({@link BinaryPlanContext.tombstonesUnknown}); the pass asks again later. */
+  held: LocalAttachment[];
 }
 
 /** What the three-way needs to know about this device's history. */
@@ -338,6 +367,21 @@ export interface BinaryPlanContext {
   baseFor: (docId: string) => string | null;
   /** Did the server delete the `files` row with this id (`file_tombstones`)? */
   isTombstoned?: (docId: string) => boolean;
+  /**
+   * The server has the deleted-files listing but it failed this pass. A file
+   * this device knows by an id the server no longer lists then waits: it may
+   * be one a teammate deleted, and the server accepts a deleted id back, so
+   * uploading it would undo their delete for everyone.
+   */
+  tombstonesUnknown?: boolean;
+  /**
+   * Did the server name this `files` id as revoked for this user (the
+   * session's named revocations)? The registry takes such a file off this disk;
+   * until it does, it is neither uploaded nor held. Uploading it was a request
+   * per file the server could only refuse (403 or 409 `not_readable`), and
+   * the refusals were remembered for the session.
+   */
+  isRevoked?: (docId: string) => boolean;
 }
 
 /**
@@ -414,6 +458,8 @@ export function planBinarySync(
   const agreed: BinaryPlan["agreed"] = [];
   const toTrash: BinaryPlan["toTrash"] = [];
   const toMove: BinaryPlan["toMove"] = [];
+  const toFollow: BinaryPlan["toFollow"] = [];
+  const held: LocalAttachment[] = [];
   /** Server rows the three-way consumed: never also a plain download. */
   const consumed = new Set<string>();
   /** Local paths the three-way decided: never also a plain upload. */
@@ -446,6 +492,18 @@ export function planBinarySync(
           toTrash.push({ local: a, docId: knownId });
           continue;
         }
+        if (knownId && ctx.tombstonesUnknown) {
+          decided.add(a.relPath);
+          held.push(a);
+          continue;
+        }
+        // Access was taken away: the registry is removing it. A known id the
+        // server is merely missing bytes for (a row minted before its upload)
+        // is never in that set, so it still uploads below.
+        if (knownId && ctx.isRevoked?.(knownId)) {
+          decided.add(a.relPath);
+          continue;
+        }
         // Nothing on the server at this path either (a known id whose row is
         // simply elsewhere would have matched `byDoc`).
         if (!byPath.has(pathKey(a.relPath))) orphans.push(a);
@@ -455,6 +513,15 @@ export function planBinarySync(
       for (const r of rows) consumed.add(r.id);
       const same = rows.find((r) => r.sha256 === a.sha256);
       if (same) {
+        const serverPath = same.relPath as string;
+        if (
+          knownId &&
+          pathKey(serverPath) !== pathKey(a.relPath) &&
+          !localPaths.has(pathKey(serverPath))
+        ) {
+          toFollow.push({ docId: same.docId as string, from: a.relPath, to: serverPath, sha256: a.sha256 });
+          continue;
+        }
         agreed.push({ relPath: a.relPath, docId: same.docId as string, sha256: a.sha256 });
         continue;
       }
@@ -463,7 +530,13 @@ export function planBinarySync(
       const base = ctx.baseFor(docId);
       if (base && rows.some((r) => r.sha256 === base)) {
         // The server still holds what we last agreed on: the change is ours.
-        toUpload.push({ ...a, baseSha: base });
+        const serverPath = current.relPath as string;
+        toUpload.push({
+          ...a,
+          baseSha: base,
+          serverVersion: { ...current, docId, relPath: a.relPath },
+          ...(pathKey(serverPath) !== pathKey(a.relPath) ? { serverPath } : {}),
+        });
         continue;
       }
       const blob = { ...current, docId, relPath: a.relPath };
@@ -566,7 +639,7 @@ export function planBinarySync(
       (isUnderAttachments(b.relPath) || !unboundShas.has(b.sha256)) &&
       !localPaths.has(pathKey(b.relPath)),
   );
-  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove };
+  return { toUpload, toDownload, toReplace, agreed, toTrash, toMove, toFollow, held };
 }
 
 /**
@@ -630,11 +703,37 @@ class ParentNotRegistered extends Error {
 }
 
 /**
+ * A tree binary the local index has not given an id yet: a big folder was just
+ * dropped and the watcher's index pass is still catching up. Without an id
+ * there is no `files` row to register, and bytes sent without one are a
+ * guaranteed `400 invalid_rel_path` that used to be remembered as permanent
+ * for those bytes, so most of a cloned repo never synced (2026-11-22). The
+ * file waits, queued, and the next pass registers it with its id.
+ */
+class NotIndexedYet extends Error {
+  constructor() {
+    super("not_indexed_yet");
+    this.name = "NotIndexedYet";
+  }
+}
+
+/**
  * The server refused an upload because this device's base is stale (409
  * `stale_base`): a teammate uploaded a newer version since. `current` is the
  * server's version, which the pass downloads instead (keeping the local bytes
  * in `.context/trash`).
  */
+/** An edit of a file the server holds, refused because this person may only
+ *  view it. Their bytes can never go up, so the team's version is put back
+ *  (with a notice), exactly as a view-only note's text is; before this the file
+ *  was skipped for the session and the two versions stayed apart for good. */
+class ViewOnlyFile extends Error {
+  constructor(public readonly current: ServerBlob & { docId: string; relPath: string }) {
+    super("view_only");
+    this.name = "ViewOnlyFile";
+  }
+}
+
 class StaleBase extends Error {
   constructor(public readonly current: ServerBlob) {
     super("stale_base");
@@ -821,6 +920,19 @@ async function runProbeFirst<T>(
   await runPool(items.slice(1), (item, i) => worker(item, i + 1), opts);
 }
 
+/**
+ * A pass's transfers, smallest first (stable; an unknown size counts as 0).
+ *
+ * The first item is {@link runProbeFirst}'s probe and runs alone, and a file
+ * over {@link BYTES_IN_FLIGHT_BUDGET} waits for an empty pipe and then runs
+ * alone too. In listing order, a fresh device whose first binary was a 150 MB
+ * video downloaded nothing else for 85 s; small files first keep the counter
+ * moving and leave the big ones to the end of the pass.
+ */
+function smallestFirst<T extends { size?: number }>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => (a.size ?? 0) - (b.size ?? 0));
+}
+
 /** How long an `attachments/` drop refused for access (403) waits before the
  *  mirror asks again on its own. */
 export const EMBED_REFUSAL_RETRY_MS = 60_000;
@@ -893,6 +1005,33 @@ export interface AttachmentSyncDeps {
    * to always-current when omitted (unit tests).
    */
   isCurrent?: () => boolean;
+  /** {@link BinaryPlanContext.isRevoked}: a `files` id the server named as
+   *  revoked for this user this session (`docSession.authoritativeRevoked`). */
+  isRevokedFile?: (fileId: string) => boolean;
+  /**
+   * The server's resolver on known `files` ids the listing stopped naming:
+   * the ids this user can no longer read (`registry.noAccessIds`). Asked
+   * before such a file uploads. An access change reaches the blob listing
+   * before the revocation frame does, so without it the pass tried to upload
+   * every file the person had just lost, one refusal each (37 in one test).
+   * A throw holds those files for the pass.
+   */
+  noAccessFileIds?: (fileIds: string[]) => Promise<Set<string>>;
+  /**
+   * Is the app removing this path itself right now (a revocation, a teammate's
+   * delete; `registry.isOwnRemoval`, marked BEFORE the file goes)? Such a file
+   * never uploads. The removal deletes the file and then forgets its id, and a
+   * pass listing the disk a moment earlier saw a file with no id: it uploaded
+   * it as new and the server refused (11 in one access-loss test).
+   */
+  isOwnRemoval?: (relPath: string) => boolean;
+  /**
+   * This user's view-only paths, from the same lock view the editor and the
+   * sidebar padlocks use (`docSession.setReadOnlyPathCheck`). The text pass
+   * sends nothing for them: the server refuses it (403), and the device that
+   * uploaded the bytes sends their text. A throw means "unknown": sent as before.
+   */
+  readOnlyPaths?: () => Promise<(relPath: string) => boolean>;
   /** List the vault's local binaries — `attachments/` AND the tree binaries
    *  (`ipc.listBinaries`). */
   listLocal: () => Promise<LocalAttachment[]>;
@@ -925,6 +1064,9 @@ export interface AttachmentSyncDeps {
   listFileTombstones?: () => Promise<string[]>;
   /** Remove a local tree binary outright (`ipc.deleteFile`). */
   removeLocal?: (relPath: string) => Promise<void>;
+  /** Files a teammate deleted left this disk: the folders they emptied are
+   *  removed by the registry's next pass, which this asks for. */
+  deletedFilesRemoved?: () => void;
   /** LEGACY upload: POST the whole body in one shot. The fallback for a server
    *  with no intent route, and the reason that route stays forever. `docId` is
    *  the `files` row a tree binary belongs to — sent as `x-doc-id`. */
@@ -971,6 +1113,8 @@ export interface AttachmentSyncDeps {
    * register-then-upload flow, unchanged.
    */
   filesWithBytes?: () => Promise<boolean>;
+  /** Does the server advertise `empty-files` (0-byte tree files sync)? */
+  emptyFiles?: () => Promise<boolean>;
   /** Re-mint presigned part URLs whose own presign expired mid-upload. */
   requestParts?: (
     partsUrl: string,
@@ -1143,7 +1287,9 @@ export interface AttachmentSyncDeps {
    *  of an adoption, so `.context/config.json` never names two ids for one
    *  file (`registry.forgetFileId`). */
   forgetFileId?: (relPath: string) => void;
-  /** `DELETE /api/files/:id` — used for exactly one thing here: dropping a row
+  /** Move a known tree binary on disk to where a teammate moved it, keeping
+   *  its id (`registry.followFileMove`). True when it moved. */
+  followFileMove?: (from: string, to: string) => Promise<boolean>;  /** `DELETE /api/files/:id` — used for exactly one thing here: dropping a row
    *  THIS device created for bytes the server already knows under another id.
    *  It deletes only blobs carrying that id, and a forked row carries none. */
   deleteFile?: (id: string) => Promise<void>;
@@ -1219,6 +1365,8 @@ export class AttachmentSync {
   private legacyListingBlocked = false;
   private legacyListingRetryAt = 0;
   private rerun = false;
+  /** Failed offline-rename moves, per from→to: each asks for a few more passes. */
+  private moveRetries = new Map<string, number>();
   /**
    * Does this server speak the intent flow? `null` = not asked, `false` = it
    * answered 404 and every later upload goes straight to the legacy route.
@@ -1259,6 +1407,17 @@ export class AttachmentSync {
    *  changed mid-upload). One timer for all of them, so a file that keeps
    *  changing costs one pass per quiet period, never a tight loop. */
   private settleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The retry for files held by a failed deleted-files listing. */
+  private heldTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * A pass whose listing failed or whose downloads failed on the network (the
+   * connection dropped mid-pass) asks again on its own. Before, nothing did:
+   * the reconnect's pull changed nothing, so 173 files of a group grant stayed
+   * missing until some unrelated file changed on disk or the app restarted.
+   */
+  private transientTimer: ReturnType<typeof setTimeout> | null = null;
+  private transientFailed = false;
+  private transientStreak = 0;
   /** The "your image could not be shared" toast, once per sync instance. */
   private embedRefusalNotified = false;
   /** The storage-full toast is raised at most once per sync instance. */
@@ -1273,6 +1432,17 @@ export class AttachmentSync {
   /** Paths whose one-step registration the server refused this session: they
    *  take the old register-then-upload path, which owns those refusals. */
   private readonly oneStepDeclined = new Set<string>();
+  /** Bytes refused with a 403 (no write access): about access, which changes.
+   *  An access change forgets them ({@link forgetAccessRefusals}); before, a
+   *  short No access left every file's bytes, an empty file's included, skipped
+   *  until the next launch, so a new empty file never synced. */
+  private readonly accessSkips = new Set<string>();
+  /** The text pass said once that it could not read the lock view. */
+  private lockViewWarned = false;
+  /** Per path: passes that found no id for it yet (see {@link NotIndexedYet}). */
+  private readonly indexWaits = new Map<string, number>();
+  /** Consecutive passes that left files waiting for the local index. */
+  private indexWaitRounds = 0;
   /** The local index's path → `files.id` map, read once per pass. */
   private localIds: Map<string, string> | null = null;
   /**
@@ -1398,11 +1568,27 @@ export class AttachmentSync {
     this.deps.setFileBase?.(docId, sha256);
   }
 
+  /** The registry moved a registration with its file: the cached id follows. */
+  noteFileMoved(from: string, to: string, id: string): void {
+    if (this.fileIds.get(from) === id) this.fileIds.delete(from);
+    this.fileIds.set(to, id);
+  }
+
   private docIdFor(relPath: string): string | null {
     return this.fileIds.get(relPath) ?? this.deps.knownFileId?.(relPath) ?? null;
   }
 
   // ---- The sidebar's file dots (see `deps.onFileStates`) -----------------
+
+  /** Tree binaries on this disk the server does not hold and no pass will
+   *  send: never synced (an empty file on an older server, a rule's leftovers)
+   *  or kept after access ended. The sidebar flags them Local, never green. */
+  private localOnlyFiles = new Map<string, "unsynced" | "kept">();
+
+  /** See {@link localOnlyFiles}: each path with why it is local. */
+  localOnlyPaths(): Array<[path: string, why: "unsynced" | "kept"]> {
+    return [...this.localOnlyFiles];
+  }
 
   /** Hand the current map to the UI. One emission, whole map. */
   private publishFileStates(): void {
@@ -1415,7 +1601,8 @@ export class AttachmentSync {
     if (!this.deps.onFileStates) return;
     // The hidden root store has no sidebar row to badge.
     if (isUnderAttachments(relPath)) return;
-    if (this.fileStates.get(relPath) === state) return;
+    if (this.fileStates.get(relPath) === state && !this.localOnlyFiles.has(relPath)) return;
+    this.localOnlyFiles.delete(relPath);
     this.fileStates.set(relPath, state);
     this.publishFileStates();
   }
@@ -1436,7 +1623,9 @@ export class AttachmentSync {
     this.registerRefused.delete(relPath);
     this.permanentSkips.delete(relPath);
     this.localIds?.delete(relPath);
-    if (this.fileStates.delete(relPath)) this.publishFileStates();
+    this.indexWaits.delete(relPath);
+    const wasLocal = this.localOnlyFiles.delete(relPath);
+    if (this.fileStates.delete(relPath) || wasLocal) this.publishFileStates();
   }
 
   /**
@@ -1477,11 +1666,14 @@ export class AttachmentSync {
     try {
       do {
         this.rerun = false;
+        this.transientFailed = false;
         result = await this.pass();
       } while (this.rerun && this.current());
     } finally {
       this.running = false;
     }
+    if (this.transientFailed) this.retryTransient();
+    else this.transientStreak = 0;
     return result;
   }
 
@@ -1565,6 +1757,14 @@ export class AttachmentSync {
    * index batch. Deliberately NOT part of {@link recheckEmbedUploads}, which
    * also runs on every channel reconnect and would re-ask on each one.
    */
+  /** This user's access changed: uploads refused for access are asked again. */
+  forgetAccessRefusals(): void {
+    if (this.accessSkips.size === 0) return;
+    for (const sha of this.accessSkips) this.permanentSkips.delete(sha);
+    this.accessSkips.clear();
+    this.scheduleReconcile();
+  }
+
   forgetTextRefusals(): void {
     this.refusals.deletePrefix(TEXT_REFUSAL_PREFIX);
     for (const id of this.textRefused) this.textDone.delete(id);
@@ -1690,6 +1890,27 @@ export class AttachmentSync {
     return hidden;
   }
 
+  /** Ask again for files the failed deleted-files listing held: a slower retry
+   *  than the quiet period, since the server is the one failing. */
+  private retryHeldFiles(): void {
+    if (this.heldTimer) return;
+    this.heldTimer = this.setTimeoutImpl(() => {
+      this.heldTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, HELD_FILES_RETRY_MS);
+  }
+
+  /** See {@link transientTimer}. */
+  private retryTransient(): void {
+    if (this.transientTimer || !this.current()) return;
+    const delay = Math.min(TRANSIENT_RETRY_MS * 2 ** this.transientStreak, TRANSIENT_RETRY_MAX_MS);
+    this.transientStreak = Math.min(this.transientStreak + 1, 10);
+    this.transientTimer = this.setTimeoutImpl(() => {
+      this.transientTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, delay);
+  }
+
   /** Ask again once the quiet period has passed (see {@link settleTimer}). */
   private retryAfterSettle(): void {
     if (this.settleTimer) return;
@@ -1733,6 +1954,7 @@ export class AttachmentSync {
         return { uploaded: 0, downloaded: 0 };
       }
       console.warn("[attachments] listing failed — skipping this pass", e);
+      this.transientFailed = true;
       return { uploaded: 0, downloaded: 0 };
     }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
@@ -1754,23 +1976,80 @@ export class AttachmentSync {
       }
     }
     let tombstoned: Set<string> | null = null;
+    let tombstonesUnknown = false;
     if (this.deps.listFileTombstones) {
       try {
         tombstoned = new Set(await this.deps.listFileTombstones());
       } catch (e) {
-        console.warn("[attachments] file tombstones unavailable — no suppression this pass", e);
+        // A 404 is a server without the listing (older than #215): there is
+        // nothing to wait for, so the older behaviour holds.
+        tombstonesUnknown = (e as { status?: number } | null)?.status !== 404;
+        console.warn(
+          tombstonesUnknown
+            ? "[attachments] file tombstones unavailable — known files the server no longer lists wait for the next pass"
+            : "[attachments] this server has no file tombstones listing",
+          e,
+        );
       }
     }
+    // Known files the server stopped listing, neither deleted nor already
+    // named revoked: lost access, or a row still waiting for its bytes. Only
+    // the second may upload, so ask the server which is which first.
+    let noAccess: Set<string> | null = null;
+    let accessUnknown = false;
+    if (this.deps.noAccessFileIds && !tombstonesUnknown) {
+      const listedIds = new Set(server.flatMap((b) => (b.docId ? [b.docId] : [])));
+      const unlisted = new Set<string>();
+      for (const a of local) {
+        if (isUnderAttachments(a.relPath)) continue;
+        const id = this.docIdFor(a.relPath);
+        if (!id || listedIds.has(id) || tombstoned?.has(id) || this.deps.isRevokedFile?.(id)) continue;
+        unlisted.add(id);
+      }
+      if (unlisted.size > 0) {
+        try {
+          noAccess = await this.deps.noAccessFileIds([...unlisted]);
+        } catch (e) {
+          // A 404 is a server without the access check: nothing to wait for,
+          // so the older behaviour (upload) holds, as for tombstones above.
+          if ((e as { status?: number } | null)?.status !== 404) {
+            accessUnknown = true;
+            noAccess = unlisted;
+            console.warn("[attachments] could not check access for files the server stopped listing — they wait", e);
+          }
+        }
+        if (!this.current()) return { uploaded: 0, downloaded: 0 };
+      }
+    }
+    const revoked = this.deps.isRevokedFile;
     const plan = planBinarySync(local, server, {
       docIdFor: (relPath) => this.docIdFor(relPath),
       baseFor: (docId) => this.baseFor(docId),
       isTombstoned: tombstoned ? (docId) => tombstoned.has(docId) : undefined,
+      tombstonesUnknown,
+      isRevoked: noAccess
+        ? (docId) => noAccess.has(docId) || (revoked?.(docId) ?? false)
+        : revoked,
     });
+    if (accessUnknown) this.retryHeldFiles();
     await this.trashTombstoned(plan.toTrash);
+    if (plan.held.length > 0) this.retryHeldFiles();
     // #408: `attachments/` drops this listing no longer names for us.
     const hiddenEmbeds = await this.settleHiddenEmbeds(local, server);
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
     if (!this.attachmentSyncBlocked) await this.moveRenamedOffline(plan.toMove);
+    for (const f of plan.toFollow) {
+      if (!this.current()) break;
+      // A live window owns these paths; the delete queue pairs them itself.
+      if (this.deps.isDeletePending?.(f.from) || this.deps.isDeletePending?.(f.to)) {
+        this.skippedForPendingDelete = true;
+        continue;
+      }
+      if (!(await this.deps.followFileMove?.(f.from, f.to))) continue;
+      this.fileIds.delete(f.from);
+      this.fileIds.set(f.to, f.docId);
+      this.setBase(f.docId, f.sha256);
+    }
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
     const { toDownload } = plan;
     // A 0-byte file has nothing to upload: the server refuses an empty blob
@@ -1781,8 +2060,15 @@ export class AttachmentSync {
     // push, so it is settled, never registered and never queued.
     // An Office lock file never uploads (#265). Rust's listing already leaves
     // them out; this is the same rule held on the side that talks to the server.
+    // A server advertising `empty-files` takes them (no bytes move: the intent
+    // answers like a dedupe hit), so an empty tree file syncs and follows
+    // access like any other. Without it they stay settled and local.
+    const emptyOk = await this.emptyFilesEnabled();
     const toUpload = plan.toUpload.filter(
-      (a) => a.size !== 0 && !isTransientPath(a.relPath) && !hiddenEmbeds.has(a.relPath),
+      (a) =>
+        (a.size !== 0 || (emptyOk && !isUnderAttachments(a.relPath))) &&
+        !isTransientPath(a.relPath) &&
+        !hiddenEmbeds.has(a.relPath),
     );
     // Replacements grow during the upload phase: a 409 `stale_base` is one more.
     const replacements: BinaryReplace[] = [...plan.toReplace];
@@ -1823,6 +2109,7 @@ export class AttachmentSync {
       if (b.relPath && this.unmaterializable.skip(b.relPath)) continue;
       if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
         console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
+        this.skippedForPendingDelete = true;
         continue;
       }
       downloads.push(b);
@@ -1839,18 +2126,26 @@ export class AttachmentSync {
         ...toUpload.map((a) => a.relPath),
         ...replacements.map((r) => r.local.relPath),
       ]);
+      // Green means the server HOLDS these bytes at this path. A file that is
+      // neither held nor queued (an empty file on a server without
+      // `empty-files`, a copy kept after access ended) is local only: it used
+      // to read "synced" and lend its green to every folder above it.
+      const held = new Set<string>();
+      for (const b of server) {
+        if (b.relPath && b.sha256) held.add(`${pathKey(b.relPath)}\0${b.sha256}`);
+      }
       this.fileStates = new Map<string, DocSyncState>();
+      this.localOnlyFiles = new Map<string, "unsynced" | "kept">();
       for (const a of local) {
         if (isUnderAttachments(a.relPath)) continue;
-        if (this.unreadable.has(pathKey(a.relPath))) continue;
-        this.fileStates.set(
-          a.relPath,
-          this.isPermanentlySkipped(a.sha256)
-            ? "error"
-            : queued.has(a.relPath)
-              ? "queued"
-              : "synced",
-        );
+        if (this.unreadable.has(pathKey(a.relPath))) {
+          this.localOnlyFiles.set(a.relPath, "kept");
+          continue;
+        }
+        if (this.isPermanentlySkipped(a.sha256)) this.fileStates.set(a.relPath, "error");
+        else if (queued.has(a.relPath)) this.fileStates.set(a.relPath, "queued");
+        else if (held.has(`${pathKey(a.relPath)}\0${a.sha256}`)) this.fileStates.set(a.relPath, "synced");
+        else this.localOnlyFiles.set(a.relPath, "unsynced");
       }
       // …plus the files this pass is about to PULL DOWN. They have no local row
       // yet — the sidebar's tree is the disk — but the roll-up credits a path to
@@ -1860,6 +2155,7 @@ export class AttachmentSync {
       for (const b of downloads) {
         if (!b.relPath || isUnderAttachments(b.relPath)) continue;
         this.fileStates.set(b.relPath, "queued");
+        this.localOnlyFiles.delete(b.relPath);
       }
       this.publishFileStates();
     }
@@ -1877,6 +2173,7 @@ export class AttachmentSync {
     if (!this.current()) return { uploaded: 0, downloaded: 0 };
 
     let uploaded = 0;
+    let waitingForIndex = 0;
     let downloaded = 0;
     // Abandoned for the whole pass, not the one file (see {@link AbortPass}):
     // the quota refusal is the vault's answer, so it becomes a flag the pool's
@@ -1885,7 +2182,7 @@ export class AttachmentSync {
     let aborted: string | null = null;
     const bytes = new BytesInFlight(BYTES_IN_FLIGHT_BUDGET);
     await runProbeFirst(
-      toUpload,
+      smallestFirst(toUpload),
       async (a) => {
         // A file the server has already refused for good (too large, wrong type)
         // is skipped without a round trip — see `permanentSkips`.
@@ -1897,6 +2194,13 @@ export class AttachmentSync {
           this.embedRefusedUntil.delete(a.sha256);
         }
         if (this.unreadable.has(pathKey(a.relPath))) return;
+        if (this.deps.isOwnRemoval?.(a.relPath)) {
+          // Asked again later: a new file saved at this path while the mark
+          // lasts must still go up once the removal is over.
+          this.setFileState(a.relPath, "queued");
+          this.retryHeldFiles();
+          return;
+        }
         if (this.isHeldCreate(a.relPath)) {
           this.setFileState(a.relPath, "error");
           return;
@@ -1920,6 +2224,9 @@ export class AttachmentSync {
         try {
           if (await bytes.run(a.size ?? 0, () => this.uploadOne(a))) {
             uploaded++;
+            // A teammate renamed it meanwhile: the server keeps its row's path,
+            // so one more pass finds the same bytes there and follows it.
+            if (a.serverPath) this.rerun = true;
             // The bytes are THERE now — the one position an upload may say so.
             this.deps.confirmFileBytes?.(a.relPath);
             if (isUnderAttachments(a.relPath)) this.deps.setAttachmentBase?.(a.relPath, a.sha256, "up");
@@ -1937,6 +2244,26 @@ export class AttachmentSync {
           if (e instanceof ParentNotRegistered) {
             this.setFileState(a.relPath, "queued");
             console.info(`[attachments] ${a.relPath} waits for its folder to reach the server`);
+            return;
+          }
+          if (e instanceof NotIndexedYet) {
+            const waits = (this.indexWaits.get(a.relPath) ?? 0) + 1;
+            this.indexWaits.set(a.relPath, waits);
+            if (waits > INDEX_WAIT_MAX_ROUNDS) {
+              // Never indexed: it is only on this computer, and says so.
+              this.fileStates.delete(a.relPath);
+              this.localOnlyFiles.set(a.relPath, "unsynced");
+              this.publishFileStates();
+              return;
+            }
+            this.setFileState(a.relPath, "queued");
+            waitingForIndex++;
+            return;
+          }
+          if (e instanceof ViewOnlyFile) {
+            replacements.push({ local: a, blob: e.current, keepCopy: true, reason: "view-only" });
+            this.setFileState(a.relPath, "queued");
+            console.info(`[attachments] ${a.relPath} is view-only here — putting the team's version back`);
             return;
           }
           if (e instanceof StaleBase) {
@@ -2007,9 +2334,21 @@ export class AttachmentSync {
       },
     );
     if (aborted) return { uploaded, downloaded };
+    // Files the index has not caught up on: ask again shortly, a bounded number
+    // of times (the watcher's next batch starts a pass of its own as well).
+    if (waitingForIndex > 0 && this.indexWaitRounds < INDEX_WAIT_MAX_ROUNDS) {
+      this.indexWaitRounds++;
+      console.info(`[attachments] ${waitingForIndex} file(s) wait for the local index before they upload`);
+      this.retryAfterSettle();
+    } else if (waitingForIndex === 0) {
+      this.indexWaitRounds = 0;
+    }
     const replaces = replacements.filter((r) => {
       if (this.attachmentSyncBlocked) return false;
-      if (this.deps.isDeletePending?.(r.local.relPath)) return false;
+      if (this.deps.isDeletePending?.(r.local.relPath)) {
+        this.skippedForPendingDelete = true;
+        return false;
+      }
       return true;
     });
     const total = downloads.length + replaces.length;
@@ -2019,7 +2358,7 @@ export class AttachmentSync {
     if (total > 0) this.deps.onDownloadsQueued?.(total);
     let settled = 0;
     await runProbeFirst(
-      downloads,
+      smallestFirst(downloads),
       async (b) => {
         // Its bytes are moving now. The dot was already `queued` from the rebuild
         // above; this is the same queued → syncing → synced walk an upload makes.
@@ -2065,6 +2404,7 @@ export class AttachmentSync {
             );
           } else {
             console.error("[attachments] download failed", b.relPath, e);
+            this.transientFailed = true;
           }
           // The dot stays `syncing` — like a failed upload, `error` is reserved
           // for a refusal retrying cannot fix, and the next pass tries again.
@@ -2077,13 +2417,14 @@ export class AttachmentSync {
     // The server's version of a file this disk holds a different one of (see
     // `planBinarySync`). After the plain downloads, through the same budget.
     const kept: string[] = [];
+    const viewOnly: string[] = [];
     await runPool(
       replaces,
       async (r) => {
         const relPath = r.local.relPath;
         this.setFileState(relPath, "syncing");
         try {
-          await bytes.run(r.blob.size ?? 0, () => this.replaceOne(r, kept));
+          await bytes.run(r.blob.size ?? 0, () => this.replaceOne(r, r.reason === "view-only" ? viewOnly : kept));
           downloaded++;
           this.fileIds.set(relPath, r.blob.docId);
           this.deps.rememberFileId?.(relPath, r.blob.docId);
@@ -2101,6 +2442,14 @@ export class AttachmentSync {
       },
       { concurrency: BINARY_CONCURRENCY, shouldStop: () => !this.current() },
     );
+    if (viewOnly.length > 0 && this.current()) {
+      this.deps.notify?.(
+        viewOnly.length === 1
+          ? `You can only view ${baseName(viewOnly[0])}, so your changes were replaced with your team's version.`
+          : `You can only view ${viewOnly.length} files you changed, so your changes were replaced with your team's version.`,
+        "neutral",
+      );
+    }
     if (kept.length > 0 && this.current()) {
       this.deps.notify?.(
         kept.length === 1
@@ -2125,6 +2474,7 @@ export class AttachmentSync {
    *  local copy. */
   private async trashTombstoned(items: BinaryPlan["toTrash"]): Promise<void> {
     const remove = this.deps.removeLocal;
+    let removed = 0;
     for (const { local, docId } of items) {
       if (!remove || !this.current()) {
         console.info(`[attachments] ${local.relPath} was deleted on the server — not uploading it back`);
@@ -2136,10 +2486,15 @@ export class AttachmentSync {
         this.fileIds.delete(local.relPath);
         this.deps.forgetFileId?.(local.relPath);
         console.info(`[attachments] ${local.relPath} (file ${docId}) was deleted by a teammate — removed here`);
+        removed++;
       } catch (e) {
         console.warn(`[attachments] couldn't remove deleted file ${local.relPath}; leaving it`, e);
       }
     }
+    // A deleted folder still holding these files was kept pending by the pass
+    // that ran before them; nothing else asks again, so it stayed on disk,
+    // empty, until the next unrelated change.
+    if (removed > 0 && this.current()) this.deps.deletedFilesRemoved?.();
   }
 
   /**
@@ -2156,13 +2511,30 @@ export class AttachmentSync {
     for (const m of items) {
       if (!this.current()) return;
       // A live window owns these paths; the delete queue pairs them itself.
-      if (this.deps.isDeletePending?.(m.from) || this.deps.isDeletePending?.(m.to)) continue;
-      if (this.deps.isRenamePending?.()) return;
+      // Either way the move is only postponed, and nothing else would come
+      // back for it (2026-11-28: a rename racing a teammate's folder move
+      // waited ~90 s for an unrelated pass), so ask again once it settles.
+      if (this.deps.isDeletePending?.(m.from) || this.deps.isDeletePending?.(m.to)) {
+        this.retryAfterSettle();
+        continue;
+      }
+      if (this.deps.isRenamePending?.()) {
+        this.retryAfterSettle();
+        return;
+      }
       let id: string | null = null;
       try {
         id = await register({ relPath: m.to, id: m.docId });
       } catch (e) {
         console.warn(`[attachments] couldn't move the files row ${m.from} → ${m.to}; leaving it`, e);
+        // Often a moment early, not wrong: a teammate's folder move is still
+        // carrying this file (`m.to` names the folder it just left), and the
+        // next pass sees it at its new place. Nothing else asks for that pass,
+        // so ask, a few times per move (five-app test, 2026-11-28).
+        const key = `${pathKey(m.from)}→${pathKey(m.to)}`;
+        const tries = (this.moveRetries.get(key) ?? 0) + 1;
+        this.moveRetries.set(key, tries);
+        if (tries <= MOVE_RETRY_MAX) this.retryAfterSettle();
         continue;
       }
       if (!this.current()) return;
@@ -2180,8 +2552,7 @@ export class AttachmentSync {
   }
 
   private async replaceOne(r: BinaryReplace, kept: string[]): Promise<void> {
-    const relPath = r.local.relPath;
-    // Both sides changed (or no shared base): the server's version wins and
+    const relPath = r.local.relPath;    // Both sides changed (or no shared base): the server's version wins and
     // no local copy is kept (decided 2026-11-19: nothing goes to .context/trash).
     if (r.keepCopy) {
       console.info(`[attachments] ${relPath} (${r.reason}) — replaced by the server's version`);
@@ -2219,6 +2590,9 @@ export class AttachmentSync {
       // The lane ahead may have learned these bytes are refused for good.
       if (this.isPermanentlySkipped(a.sha256)) return false;
     }
+    // Re-checked here: the wait for a lane or the byte budget can outlast the
+    // moment the app began removing this file.
+    if (this.deps.isOwnRemoval?.(a.relPath)) return false;
     let release!: () => void;
     const claim = new Promise<void>((resolve) => (release = resolve));
     this.uploadBySha.set(a.sha256, claim);
@@ -2248,6 +2622,18 @@ export class AttachmentSync {
     let docId = register ? undefined : await this.ensureFileRow(a);
     if (docId === undefined && this.parentMissing.delete(a.relPath)) throw new ParentNotRegistered();
     if (this.unreadable.has(pathKey(a.relPath))) throw new HiddenFile();
+    // A tree binary never goes up without a `files` row: the server cannot
+    // place it and refuses it (`invalid_rel_path`). No row yet and no refusal
+    // on record means the index or the server has not answered yet: wait.
+    if (
+      docId === undefined &&
+      !register &&
+      !isUnderAttachments(a.relPath) &&
+      this.deps.registerFile &&
+      !this.registerRefused.has(a.relPath)
+    ) {
+      throw new NotIndexedYet();
+    }
     /** Record the row a one-step upload created or bound to — exactly what
      *  `ensureFileRow` records after `POST /api/files`. */
     const bindOneStep = (file: OneStepFileRow | undefined): void => {
@@ -2358,6 +2744,11 @@ export class AttachmentSync {
         this.refuseEmbedForNow(a);
         return false;
       }
+      if (status === 403 && a.baseSha && a.serverVersion && errCode(e) !== "not_readable") {
+        // An edit of a file the server already holds (its base is the server's
+        // version), refused for want of write access: view-only here.
+        throw new ViewOnlyFile(a.serverVersion);
+      }
       if (status === 413 || status === 415 || status === 400 || status === 403) {
         // Permanent for these bytes: the file is over the cap or of a type the
         // server refuses. Retrying it every pass is a guaranteed failure every
@@ -2374,8 +2765,21 @@ export class AttachmentSync {
         // remembered beyond this instance, so the next session start does not
         // ask again; a 403 is about access, which an owner can change, so it
         // stays a session-only skip.
-        if (status === 403) this.permanentSkips.add(a.sha256);
-        else this.skipPermanently(a.sha256);
+        if (
+          status === 400 &&
+          errCode(e) === "invalid_rel_path" &&
+          !docId &&
+          !isUnderAttachments(a.relPath) &&
+          !this.registerRefused.has(a.relPath)
+        ) {
+          // No row to place it under: about this request, never these bytes
+          // (other paths may hold the same bytes, every empty file does).
+          throw new NotIndexedYet();
+        }
+        if (status === 403) {
+          this.permanentSkips.add(a.sha256);
+          this.accessSkips.add(a.sha256);
+        } else this.skipPermanently(a.sha256);
         if (status === 415) this.noteUnsupportedType(a);
         console.warn(
           `[attachments] ${a.relPath} refused permanently (${status} ${errCode(e) ?? "?"}) — skipping`,
@@ -2588,6 +2992,17 @@ export class AttachmentSync {
       if (errCode(e) !== "upload_incomplete") throw e;
       await retryPut();
       return await complete(completeUrl, body());
+    }
+  }
+
+  /** Does this server take 0-byte files (`empty-files`)? Unknown ⇒ false. */
+  private async emptyFilesEnabled(): Promise<boolean> {
+    if (!this.deps.emptyFiles || !this.deps.createIntent) return false;
+    if (this.intentSupported === false) return false;
+    try {
+      return await this.deps.emptyFiles();
+    } catch {
+      return false;
     }
   }
 
@@ -2967,7 +3382,9 @@ export class AttachmentSync {
         return undefined;
       }
       if (code === "path_folder_mismatch") this.parentMissing.add(relPath);
-      const permanent = status != null && status >= 400 && status < 500 && status !== 400;
+      // A 400 other than `path_folder_mismatch` is an answer too: read as
+      // transient, the file would wait for a row that never comes.
+      const permanent = status != null && status >= 400 && status < 500 && code !== "path_folder_mismatch";
       if (permanent) this.registerRefused.add(relPath);
       console.warn(
         `[attachments] ${relPath} — no files row (${status ?? "?"} ${code ?? "?"})${
@@ -3135,8 +3552,27 @@ export class AttachmentSync {
     const upload = this.deps.uploadText;
     const read = this.deps.fileText;
     if (!upload || !read) return;
+    // View-only here: the server would refuse each one (403). One lock read per
+    // batch instead of a refused request per downloaded file.
+    let sendable = paths;
+    if (this.deps.readOnlyPaths && paths.length > 0) {
+      try {
+        const readOnly = await this.deps.readOnlyPaths();
+        sendable = paths.filter((p) => !readOnly(p));
+        if (sendable.length < paths.length) {
+          console.info(`[attachments] ${paths.length - sendable.length} view-only file(s): no text sent`);
+        }
+      } catch (e) {
+        // Unknown: send as before; a 403 still stops that blob for the session.
+        if (!this.lockViewWarned) {
+          this.lockViewWarned = true;
+          console.warn("[attachments] no lock view for the text pass — sending text as before", e);
+        }
+      }
+      if (!this.current()) return;
+    }
     await runProbeFirst(
-      paths,
+      sendable,
       async (relPath) => {
         let text: Awaited<ReturnType<typeof read>>;
         try {
@@ -3170,7 +3606,18 @@ export class AttachmentSync {
         } catch (e) {
           const status = errStatus(e);
           if (status === 404) {
-            // The route is absent, or the blob is. Neither is worth another file.
+            // This blob only (gone since the listing, not ready yet, another
+            // vault's): the server answers that with a JSON body. Skip it and
+            // keep going; its next completion or listing brings it back. Only
+            // a route that is absent (the framework's plain 404) ends the
+            // session's text uploads. Before, one stale blob id switched off
+            // file search text for every upload until the app restarted.
+            const body = (e as { body?: unknown } | null)?.body;
+            if (body && typeof body === "object") {
+              this.textDone.delete(blobId);
+              if (this.blobIdBySha.get(text.sha256) === blobId) this.blobIdBySha.delete(text.sha256);
+              return;
+            }
             this.textSupported = false;
             this.pendingText.clear();
             console.warn("[attachments] server takes no extracted text — stopping for this session");
@@ -3205,6 +3652,20 @@ export class AttachmentSync {
     );
   }
 
+  /** A pass skipped a download or replacement because its path sat in an open
+   *  delete window (`deps.isDeletePending`); {@link deleteWindowClosed} owes it
+   *  another pass. */
+  private skippedForPendingDelete = false;
+
+  /** The delete queue closed a window: run the pass a skipped file is owed.
+   *  A path that really was deleted is no longer listed locally and stays
+   *  deleted; one that was a save or a move's arrival gets its bytes now. */
+  deleteWindowClosed(): void {
+    if (!this.skippedForPendingDelete || !this.current()) return;
+    this.skippedForPendingDelete = false;
+    this.scheduleReconcile();
+  }
+
   /** Debounced reconcile — collapses a burst of watcher events into one pass. */
   scheduleReconcile(): void {
     if (this.timer) this.clearTimeoutImpl(this.timer);
@@ -3235,6 +3696,14 @@ export class AttachmentSync {
     if (this.settleTimer) {
       this.clearTimeoutImpl(this.settleTimer);
       this.settleTimer = null;
+    }
+    if (this.heldTimer) {
+      this.clearTimeoutImpl(this.heldTimer);
+      this.heldTimer = null;
+    }
+    if (this.transientTimer) {
+      this.clearTimeoutImpl(this.transientTimer);
+      this.transientTimer = null;
     }
     // The text pass holds the same captured vaultId and must die with it.
     if (this.textTimer) {

@@ -18,6 +18,7 @@
  * codebase — this is the code that decides to delete someone's notes.
  */
 
+import { isHiddenName } from "../syncRules/folders";
 import { pathKey, samePathKey } from "../pathIdentity";
 
 /** docId → vault-relative path, on one side of the comparison. */
@@ -197,6 +198,9 @@ export interface InboundRejection {
   path: string;
   docId: string | null;
   reason: string;
+  /** Refused only by a per-pass safety cap: the item itself was fine, and the
+   *  next pass plans it again. */
+  capped?: true;
 }
 
 export interface InboundPlan {
@@ -215,6 +219,14 @@ export interface InboundPlan {
    */
   removeFolders: string[];
   renames: InboundRename[];
+  /**
+   * Folders a teammate moved (`from` local path → `to` server path). Their
+   * notes move through `renames`; the registry moves the tree binaries it
+   * knows under `from` the same way, BEFORE the emptied directory is removed.
+   * A binary left behind kept the old folder non-empty, and the next pass
+   * registered it as a brand-new folder: the move "came back" as a twin.
+   */
+  movedFolders: Array<{ from: string; to: string }>;
   trash: InboundTrash[];
   /**
    * Local note paths the OUTBOUND half must not re-register.
@@ -279,7 +291,6 @@ export interface InboundPlan {
 // `rel_path = ".context/config.json"` would be "move this note over the vault's
 // doc map". Hence an explicit allowlist on this side.
 
-/** Mirrors `IGNORED_DIRS` in src-tauri/src/vault.rs. */
 /**
  * Two vault paths that name the same file.
  *
@@ -297,17 +308,6 @@ export function samePath(a: string, b: string): boolean {
   return samePathKey(a, b);
 }
 
-const IGNORED_DIRS = [".context", ".git"];
-/** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs. */
-const DENIED_DIRS = [
-  "node_modules",
-  "dist",
-  "build",
-  "target",
-  "vendor",
-  "__pycache__",
-  "venv",
-];
 /** Note extensions the registry reconciles (mirrors `NOTE_EXTS` in registry.ts,
  *  `lib/formats.ts` and Rust `vault.rs`; a literal on purpose — see the note on
  *  registry.ts's copy, and `__tests__/formatsLockstep.test.ts`). */
@@ -326,11 +326,11 @@ function segmentsOk(path: string): boolean {
   const segs = path.split("/");
   for (const seg of segs) {
     if (!seg || seg === "." || seg === "..") return false;
-    // Any dot-prefixed segment: covers `.context`, `.git`, and every hidden dir
-    // the Rust walker skips, so we can never move a note somewhere the tree
-    // walk and watcher would then ignore it.
-    if (seg.startsWith(".")) return false;
-    if (IGNORED_DIRS.includes(seg) || DENIED_DIRS.includes(seg)) return false;
+    // The floor (`.context`, `.git`…) always, and dot names and build folders
+    // unless the vault switched them on: exactly what the Rust walker skips,
+    // so we can never move a note somewhere the tree walk and watcher would
+    // then ignore it (`syncRules/folders.ts`).
+    if (isHiddenName(seg)) return false;
     if (seg.length > MAX_SEGMENT_BYTES) return false;
   }
   return true;
@@ -372,17 +372,17 @@ export function isSafeFolderPath(path: string): boolean {
 /**
  * Ceilings on how much one pass may change, per category.
  *
- * A teammate tidying up deletes a few notes; a bug in this file, a permission
- * glitch, or a truncated response "deletes" most of the vault. There is no rule
- * that tells those apart from the inside, so we cap the blast radius instead:
- * over the line, the whole category is abandoned and reported as a failure, and
- * the next pull gets to decide again with fresh data.
- *
- * This is the guard that would have caught the incident that destroyed 428 notes.
+ * Teammates' DELETIONS have no ceiling (2026-11-24). A deletion is planned only
+ * for a note the server sent an explicit tombstone for, matched by id, so a
+ * truncated or glitched listing cannot produce one: a note that is merely absent
+ * takes the revocation path below, which keeps its cap and its access-check. The
+ * old 20% deletion cap could not tell a teammate's big folder delete from a bug,
+ * and since the refused notes stay in the baseline it refused them again on every
+ * pass: they stayed on a member's disk for good, unsyncable, with the badge in
+ * error. A runaway client is stopped at the source instead, by the outbound
+ * disk-delete cap (`docSession.drainDiskDeletes`), and checkpoints bring back a
+ * mistaken delete.
  */
-function trashCap(mapped: number): number {
-  return Math.max(5, Math.ceil(mapped * 0.2));
-}
 /**
  * Revocation gets a more generous budget than deletion.
  *
@@ -414,6 +414,7 @@ export function planInbound(input: InboundInput): InboundPlan {
     createFolders: [],
     removeFolders: [],
     renames: [],
+    movedFolders: [],
     trash: [],
     suppress: new Set(),
     stubs: [],
@@ -476,6 +477,7 @@ export function planInbound(input: InboundInput): InboundPlan {
       if (serverFoldersCi.has(pathKey(path))) continue; // re-created server-side
       if (!isSafeFolderPath(path)) continue;
       plan.removeFolders.push(path);
+      plan.movedFolders.push({ from: path, to: now });
     }
   }
 
@@ -725,6 +727,8 @@ export function planInbound(input: InboundInput): InboundPlan {
     }
   }
 
+  settleOccupiedRenames(plan);
+
   // Trash deepest-first, so a folder's contents leave before anything prunes it.
   plan.trash.sort((a, b) => b.path.split("/").length - a.path.split("/").length);
 
@@ -766,15 +770,63 @@ function pushRename(
   // places, the far half of a chain) is planned on the next one — exactly as it
   // is today, where such a rename fails at the IPC boundary and is retried.
   if (localPaths.has(pathKey(to))) {
-    plan.rejected.push({
-      kind: "rename",
-      path: to,
-      docId,
-      reason: `the server moved this note to ${to}, but another note already occupies that path, so it was left at ${from}`,
-    });
+    // Unless another rename of this same plan takes the occupant away (a
+    // teammate's rotation, `mv B C && mv A B`: B's note leaves the path A's
+    // takes). Judged once the plan is whole (`settleOccupiedRenames`).
+    let held = occupiedRenames.get(plan);
+    if (!held) occupiedRenames.set(plan, (held = []));
+    held.push({ docId, from, to });
     return;
   }
   plan.renames.push({ docId, from, to });
+}
+
+/** Renames whose destination another note held when planned, per plan. */
+const occupiedRenames = new WeakMap<InboundPlan, Array<{ docId: string; from: string; to: string }>>();
+
+/**
+ * Keep a held rename when another rename of the plan vacates its destination,
+ * and order the renames so the one leaving a path runs before the one taking
+ * it. Refused one by one, the far half of a chain was left at its old path
+ * while a placeholder for it took the freed name under a fresh id, and every
+ * later pass found the name occupied again: the note stayed split in two on
+ * every receiving device (2026-11-28 five-app test). A cycle (two notes
+ * swapping places) has no safe order and is refused as before.
+ */
+function settleOccupiedRenames(plan: InboundPlan): void {
+  const held = occupiedRenames.get(plan) ?? [];
+  occupiedRenames.delete(plan);
+  const refuse = (r: { docId: string; from: string; to: string }) =>
+    plan.rejected.push({
+      kind: "rename",
+      path: r.to,
+      docId: r.docId,
+      reason: `the server moved this note to ${r.to}, but another note already occupies that path, so it was left at ${r.from}`,
+    });
+  if (held.length === 0) return;
+  let kept = [...held];
+  for (;;) {
+    const leaving = new Set([...plan.renames, ...kept].map((r) => pathKey(r.from)));
+    const next = kept.filter((r) => leaving.has(pathKey(r.to)) && pathKey(r.to) !== pathKey(r.from));
+    if (next.length === kept.length) break;
+    kept = next;
+  }
+  for (const r of held) if (!kept.includes(r)) refuse(r);
+  if (kept.length === 0) return;
+  // Vacate first: a rename waits while another still has to leave its target.
+  const all = [...plan.renames, ...kept];
+  const ordered: typeof all = [];
+  const waiting = [...all];
+  while (waiting.length > 0) {
+    const i = waiting.findIndex((r) => !waiting.some((q) => q !== r && pathKey(q.from) === pathKey(r.to)));
+    if (i < 0) break;
+    ordered.push(waiting.splice(i, 1)[0]);
+  }
+  for (const r of waiting) {
+    if (kept.includes(r)) refuse(r);
+    else ordered.push(r);
+  }
+  plan.renames = ordered;
 }
 
 function pushTrash(
@@ -807,8 +859,8 @@ function applyBreakers(
   // On an AUTHORITATIVE pass the revocation budget is lifted (see
   // `InboundInput.authoritative`): the cap's whole job is to disbelieve a
   // shrunken listing, and here the listing is the server's completed answer to
-  // "what may this user read now". The DELETION budget is never lifted — that
-  // one guards work, not access.
+  // "what may this user read now". Deletions have no budget at all (see
+  // `revokeCap`'s neighbour comment above).
   //
   // When the server also NAMED the revoked docs (`InboundInput.authoritativeRevoked`)
   // the lift is narrowed to those, so a listing that shrinks with nothing
@@ -834,7 +886,6 @@ function applyBreakers(
       : (t: InboundTrash) => t.reason === "revoked" && namedRevoked.has(t.docId)
     : () => false;
   const caps: Array<[InboundTrash["reason"], number, string]> = [
-    ["deleted", trashCap(mapped), "deletions"],
     ["revoked", revokeCap(mapped), "access removals"],
   ];
   for (const [reason, cap, label] of caps) {
@@ -847,6 +898,7 @@ function applyBreakers(
         path: t.path,
         docId: t.docId,
         reason: `refused: ${group.length} ${label} in one pass exceeds the ${cap} safety limit`,
+        capped: true,
       });
     }
     plan.trash = plan.trash.filter((t) => !refused.has(t));
@@ -872,16 +924,33 @@ function applyBreakers(
     if (t.binary && t.reason === "revoked") owed.add(t.docId);
   }
   plan.needsAccessCheck = [...owed];
+  // A rename that a teammate's FOLDER move explains is not counted: the
+  // folder's own server id moved from `mf.from` to `mf.to` and the note keeps
+  // the same place under it. That is identity evidence, not a path diff, and
+  // a move destroys nothing. Without this a teammate renaming one big folder
+  // (more than 30% of the vault) was refused on every other device, which then
+  // wrote the notes again at the new path and left the old files behind.
   const rCap = renameCap(mapped);
-  if (plan.renames.length > rCap) {
-    for (const r of plan.renames) {
+  const folderMoves = plan.movedFolders.map((mf) => [pathKey(mf.from) + "/", pathKey(mf.to) + "/"] as const);
+  const explained = (r: InboundRename): boolean => {
+    const from = pathKey(r.from);
+    const to = pathKey(r.to);
+    return folderMoves.some(
+      ([f, t]) => from.startsWith(f) && to.startsWith(t) && from.slice(f.length) === to.slice(t.length),
+    );
+  };
+  const unexplained = plan.renames.filter((r) => !explained(r));
+  if (unexplained.length > rCap) {
+    const refused = new Set(unexplained);
+    for (const r of unexplained) {
       plan.rejected.push({
         kind: "rename",
         path: r.to,
         docId: r.docId,
-        reason: `refused: ${plan.renames.length} moves in one pass exceeds the ${rCap} safety limit`,
+        reason: `refused: ${unexplained.length} moves in one pass exceeds the ${rCap} safety limit`,
+        capped: true,
       });
     }
-    plan.renames = [];
+    plan.renames = plan.renames.filter((r) => !refused.has(r));
   }
 }

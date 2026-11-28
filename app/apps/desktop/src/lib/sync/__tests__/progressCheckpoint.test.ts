@@ -38,6 +38,21 @@ function fakeClock() {
 }
 
 describe("SyncProgressReporter", () => {
+  it("a new phase counts work still in flight, so done never passes total", () => {
+    const r = new SyncProgressReporter({ onProgress: () => {}, onDocState: () => {} });
+    let inFlight = 0;
+    r.setCarry(() => inFlight);
+    r.phase("downloading", 1000); // a file wave of 1000
+    inFlight = 1000;
+    for (let i = 0; i < 700; i++) { r.item("ok"); inFlight--; }
+    r.phase("downloading", 50); // a note backfill restarts the counter
+    for (let i = 0; i < 300 + 50; i++) { r.item("ok"); inFlight = Math.max(0, inFlight - 1); }
+    const s = r.snapshot();
+    expect(s.total).toBe(350);
+    expect(s.done).toBeLessThanOrEqual(s.total);
+    r.dispose();
+  });
+
   it("coalesces a burst of items into ~one emission per throttle window", () => {
     const clock = fakeClock();
     const progress: SyncProgress[] = [];

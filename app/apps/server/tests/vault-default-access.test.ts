@@ -6,14 +6,14 @@ import { testAppDeps } from "./helpers/app.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
 import { seedMember, seedNote } from "./helpers/seed.js";
 import { effectivePermission } from "../src/permissions/resolver.js";
+import { vaultRootWritable } from "../src/permissions/http-gates.js";
 
 /**
  * The access a vault has the moment it is created.
  *
- * A vault is created SHARED — for its creator, its current team AND anyone
- * who joins later: the future-member default starts Open alongside the
- * org-wide `edit` grant, so a teammate invited next week sees the notes that
- * already exist (a Private join default used to hide them).
+ * A vault is created on Only what's shared (2026-11-23): sealed for the team
+ * (owners and admins included) and for anyone who joins later, while its
+ * creator gets Can edit everything as their own level so they can use it.
  *
  * The tests below pin both halves of that: the default is applied at creation,
  * and it is applied ONLY at creation, so an owner who later chooses Private
@@ -65,30 +65,43 @@ describe("a new vault's default access", () => {
     await pool.end();
   });
 
-  it("grants the team edit access when the first vault is created", async () => {
+  it("seals the first vault for the team and gives its creator Can edit everything", async () => {
     await createVault(owner, org, "Notes");
     const { rows } = await orgGrants(org);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].permission).toBe("edit");
+    expect(rows.map((r) => r.permission)).toEqual(["denied"]);
+    const own = await pool.query<{ permission: string }>(
+      `SELECT permission FROM shares
+        WHERE resource_type = 'vault' AND resource_id = $1
+          AND principal_type = 'user' AND principal_id = $2`,
+      [org, owner.userId],
+    );
+    expect(own.rows.map((r) => r.permission)).toEqual(["edit"]);
   });
 
-  it("opens the vault to people who join later", async () => {
+  it("starts people who join later on Only what's shared", async () => {
     await createVault(owner, org, "Notes");
     const { rows } = await pool.query<{ join_default: string }>(
       "SELECT join_default FROM organization_access_settings WHERE organization_id = $1",
       [org],
     );
-    expect(rows[0]?.join_default).toBe("open");
+    expect(rows[0]?.join_default).toBe("private");
   });
 
-  it("lets a later joiner read a note that existed before they joined", async () => {
+  it("lets the creator read and add notes, and shows a later member or admin nothing", async () => {
     const vault = await createVault(owner, org, "Notes");
     const note = await seedNote(vault.id, null, "owners-note.md", owner.userId);
+    expect(await effectivePermission(owner.userId, note)).toBe("edit");
+    expect(await vaultRootWritable(owner.userId, org)).toBe(true);
 
     const joiner = await signUp("joiner@default-access.test");
     await seedMember(org, joiner.userId, "member");
-
-    expect(await effectivePermission(joiner.userId, note)).toBe("edit");
+    const admin = await signUp("admin@default-access.test");
+    await seedMember(org, admin.userId, "admin");
+    for (const who of [joiner, admin]) {
+      expect(await effectivePermission(who.userId, note)).toBe("none");
+      // Members don't keep what they write either: nothing to add at the root.
+      expect(await vaultRootWritable(who.userId, org)).toBe(false);
+    }
   });
 
   it("does not re-grant when a second collection is added", async () => {
@@ -116,8 +129,7 @@ describe("a new vault's default access", () => {
         WHERE resource_type = 'vault' AND resource_id = $1 AND principal_type = 'org'`,
       [org],
     );
-    // …and New-member access is its own setting (it starts Open with the
-    // vault), so a fully locked vault sets that to Private too.
+    // …and New-member access is its own setting, set to Private explicitly.
     const res = await req(owner, "PUT", `/api/orgs/${org}/access-default`, { mode: "private" });
     expect(res.status).toBe(200);
 

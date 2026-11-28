@@ -32,7 +32,7 @@ use crate::error::AppResult;
 use crate::extract::{extract_text, extractor_for, max_input_bytes, Extracted, Extractor, TextStatus};
 use crate::index::Index;
 use crate::notefile::sha256_file;
-use crate::vault::{is_indexable_file, rel_from_abs};
+use crate::vault::{is_indexable_in, rel_from_abs};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -232,7 +232,7 @@ pub fn run(
     let Ok(rel) = rel_from_abs(vault, abs) else {
         return Ok(None);
     };
-    if !is_indexable_file(&rel) {
+    if !is_indexable_in(vault, &rel) {
         return Ok(None);
     }
     // A file that vanished between the watcher event and here is not an error:

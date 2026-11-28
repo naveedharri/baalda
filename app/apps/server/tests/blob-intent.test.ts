@@ -436,7 +436,9 @@ describe("blob intent → PUT → complete", () => {
       (await (await intent(owner, vault, body)).json()) as Intent;
 
     expect((await bad({ sha256: "nope", size: 10 })).code).toBe("invalid_sha256");
-    expect((await bad({ sha256: sha, size: 0 })).code).toBe("invalid_size");
+    // A 0-byte file is legal (`empty-files`), but only with the hash of no bytes.
+    expect((await bad({ sha256: sha, size: 0 })).code).toBe("invalid_sha256");
+    expect((await bad({ sha256: sha, size: -1 })).code).toBe("invalid_size");
     expect((await bad({ sha256: sha, size: 10, relPath: "../etc/passwd" })).code).toBe(
       "invalid_rel_path",
     );

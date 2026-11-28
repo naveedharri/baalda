@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AttachmentSync,
   planBinarySync,
@@ -55,7 +55,15 @@ describe("planBinarySync — the decision table", () => {
       [S("b1", P, "v1", "D")],
       ctx({ [P]: "D" }, { D: "v1" }),
     );
-    expect(plan.toUpload).toEqual([{ relPath: P, sha256: "v3", baseSha: "v1" }]);
+    expect(plan.toUpload).toEqual([
+      {
+        relPath: P,
+        sha256: "v3",
+        baseSha: "v1",
+        // What a view-only refusal puts back (the server's current version).
+        serverVersion: { id: "b1", relPath: P, sha256: "v1", docId: "D" },
+      },
+    ]);
     expect(plan.toReplace).toEqual([]);
   });
 
@@ -136,6 +144,8 @@ class FakeServer {
   rows = new Map<string, { id: string; relPath: string; bytes: Uint8Array }>();
   pending = new Map<string, { docId: string; relPath: string; bytes?: Uint8Array }>();
   uploads: Array<{ device: string; sha: string; baseSha: string | null }> = [];
+  /** Docs whose edits the server refuses (403): view-only for every device. */
+  viewOnly = new Set<string>();
   private next = 1;
 
   seed(docId: string, relPath: string, content: string) {
@@ -208,6 +218,13 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
     createIntent: async (input) => {
       const docId = input.docId as string;
       const cur = server.rows.get(docId);
+      if (server.viewOnly.has(docId)) {
+        throw Object.assign(new Error("read-only"), {
+          status: 403,
+          code: "no_write_access",
+          body: { error: "This vault is read-only for you", code: "no_write_access" },
+        });
+      }
       if (cur && shaOf(cur.bytes) === input.sha256) {
         return { deduped: true as const, blob: { ...server.meta(docId) } as never };
       }
@@ -242,8 +259,10 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
       const id = url.slice(9);
       const p = server.pending.get(id)!;
       server.pending.delete(id);
-      // One version per doc: the new row retires the old one.
-      server.rows.set(p.docId, { id: `blob-${id}`, relPath: p.relPath, bytes: p.bytes! });
+      // One version per doc: the new row retires the old one. The `files` row
+      // keeps its own path (a teammate's rename stands), as on the real server.
+      const at = server.rows.get(p.docId)?.relPath ?? p.relPath;
+      server.rows.set(p.docId, { id: `blob-${id}`, relPath: at, bytes: p.bytes! });
     },
     knownFileId: (p) => d.ids.get(p) ?? null,
     registerFile: async ({ id }) => id,
@@ -252,6 +271,16 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
     fileBase: (docId) => d.bases.get(docId) ?? null,
     setFileBase: (docId, sha) => void d.bases.set(docId, sha),
     notify: (text) => void d.notices.push(text),
+    followFileMove: async (from, to) => {
+      const b = d.files.get(from);
+      if (!b || d.files.has(to)) return false;
+      d.files.delete(from);
+      d.files.set(to, b);
+      const id = d.ids.get(from);
+      d.ids.delete(from);
+      if (id) d.ids.set(to, id);
+      return true;
+    },
   });
   d.sync = new AttachmentSync(deps());
   d.restart = () => {
@@ -264,6 +293,26 @@ const P = "Team/report.docx";
 const read = (d: Device) => dec(d.files.get(P)!);
 
 describe("AttachmentSync three-way, two devices on one server", () => {
+  it("an edit uploaded after a teammate renamed the file follows the rename in the same reconcile", async () => {
+    const server = new FakeServer();
+    server.seed("D", "Old/r.docx", "V1");
+    const a = device("A", server, { "Old/r.docx": "V1" }, { "Old/r.docx": "D" });
+    await a.sync.reconcile();
+
+    // A teammate renames it while A edits it under the old name.
+    server.rows.get("D")!.relPath = "New/r.docx";
+    a.files.set("Old/r.docx", enc("V2"));
+    await a.sync.reconcile();
+
+    expect(server.uploads).toEqual([{ device: "A", sha: "sha:V2", baseSha: "sha:V1" }]);
+    expect(server.current("D")).toBe("V2");
+    expect(server.meta("D").relPath).toBe("New/r.docx");
+    // Followed without waiting for some unrelated pass, the id kept.
+    expect(a.files.has("Old/r.docx")).toBe(false);
+    expect(dec(a.files.get("New/r.docx")!)).toBe("V2");
+    expect(a.ids.get("New/r.docx")).toBe("D");
+  });
+
   it("the production flip converges: an upgraded pair with no bases settles on the server's version", async () => {
     // A holds V1, B holds V2, and the server holds whichever uploaded last.
     const server = new FakeServer();
@@ -352,6 +401,83 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     await a.sync.reconcile();
     await b.sync.reconcile();
     expect(server.uploads.length).toBe(before);
+  });
+
+  it("a view-only edit is put back to the team's version, with a notice, and settles", async () => {
+    const server = new FakeServer();
+    server.seed("D", P, "V1");
+    const a = device("A", server, { [P]: "V1" }, { [P]: "D" });
+    await a.sync.reconcile();
+    server.viewOnly.add("D");
+    a.files.set(P, enc("mine"));
+    await a.sync.reconcile();
+    expect(server.current("D")).toBe("V1");
+    expect(read(a)).toBe("V1");
+    expect(a.bases.get("D")).toBe("sha:V1");
+    expect(a.notices).toEqual([
+      "You can only view report.docx, so your changes were replaced with your team's version.",
+    ]);
+    // Settled: another round neither uploads nor notifies.
+    await a.sync.reconcile();
+    expect(server.uploads).toEqual([]);
+    expect(a.notices.length).toBe(1);
+  });
+
+  it("a NEW file refused for want of write access stays on this computer", async () => {
+    const server = new FakeServer();
+    const a = device("A", server, { "Team/new.docx": "fresh" }, { "Team/new.docx": "N" });
+    server.viewOnly.add("N");
+    await a.sync.reconcile();
+    expect(dec(a.files.get("Team/new.docx")!)).toBe("fresh");
+    expect(a.notices).toEqual([]);
+  });
+
+  it("an offline-rename move that fails asks for another pass (a teammate's move still landing)", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = new FakeServer();
+      server.seed("D", "Old/r.docx", "V1");
+      const a = device("A", server, { "Old/r.docx": "V1" }, { "Old/r.docx": "D" });
+      await a.sync.reconcile();
+      // Renamed here while the row is being moved elsewhere: the first move
+      // names a folder that just went.
+      a.files.delete("Old/r.docx");
+      a.files.set("Old/renamed.docx", enc("V1"));
+      const sync = a.sync as unknown as { deps: AttachmentSyncDeps; scheduleReconcile: () => void };
+      let calls = 0;
+      sync.deps.registerFile = async () => {
+        calls++;
+        throw new Error('No folder at "Old". Create it first');
+      };
+      const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+      await a.sync.reconcile();
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(again).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an offline-rename move postponed by a pending rename asks for another pass", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = new FakeServer();
+      server.seed("D", "Old/r.docx", "V1");
+      const a = device("A", server, { "Old/r.docx": "V1" }, { "Old/r.docx": "D" });
+      await a.sync.reconcile();
+      a.files.delete("Old/r.docx");
+      a.files.set("Old/renamed.docx", enc("V1"));
+      const sync = a.sync as unknown as { deps: AttachmentSyncDeps; scheduleReconcile: () => void };
+      sync.deps.isRenamePending = () => true;
+      const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+      await a.sync.reconcile();
+      expect(server.meta("D").relPath).toBe("Old/r.docx");
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(again).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a genuine local edit still uploads, carrying its base", async () => {

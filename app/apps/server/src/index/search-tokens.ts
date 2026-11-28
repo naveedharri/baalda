@@ -1,6 +1,6 @@
 import { tokenize } from "./embedder.js";
 
-/** Upper bound on a stored token set, in UTF-16 code units (all ASCII here). */
+/** Upper bound on a stored token set, in UTF-16 code units. */
 export const SEARCH_TOKENS_MAX = 64 * 1024;
 /**
  * The bound for a keyed row's token set, which lives only inside its sealed
@@ -13,15 +13,23 @@ export const SEALED_TOKENS_MAX = 1024 * 1024;
 
 /**
  * Characters whose lowercase may differ between JS `toLowerCase()` and
- * Postgres `lower()` in a way that changes the `[a-z0-9_]` runs a query token
- * can match: every non-ASCII code point whose JS lowercase contains an ASCII
+ * Postgres `lower()` in a way that changes where an ASCII query token can
+ * match: every non-ASCII code point whose JS lowercase contains an ASCII
  * letter, digit or underscore (U+0130 "İ" → "i\u0307", U+212A Kelvin → "k",
  * computed at load so no case is missed), checked with the `u` flag. Postgres
  * maps these through the database collation (glibc / ICU / C), which can give
- * a different run, so a text containing one is left to the old SQL path. All
- * other non-ASCII characters lower to non-ASCII in both and act as separators
- * in both, so they are safe. Query tokens are shared by both paths (JS
- * `tokenize`, ASCII by construction), so only the stored side needs this.
+ * a different result, so a text containing one is left to the old SQL path.
+ * All other non-ASCII characters lower to non-ASCII in both, so an ASCII query
+ * token matches the same positions in both. Query tokens are shared by both
+ * paths (JS `tokenize`), so only the stored side needs this.
+ *
+ * Non-ASCII query tokens (Hangul, CJK, accented Latin, ...) are lowered by JS
+ * on both the query and the stored side of the app path. Uncased scripts such
+ * as Hangul and CJK match identically in the SQL fallback too; for cased
+ * non-ASCII letters the SQL fallback follows the database collation. `tokenize`
+ * also NFC-normalizes and the SQL fallback does not, so a fallback row whose text
+ * is DECOMPOSED (`e` + U+0301) misses a query typed precomposed; token-set rows
+ * normalize both sides.
  */
 const UNSAFE_LOWER: ReadonlySet<number> = (() => {
   const set = new Set<number>([0x130, 0x212a]);
@@ -47,8 +55,8 @@ export function hasUnsafeLowercase(text: string): boolean {
 /**
  * The derived keyword set search scores against instead of reading note text in
  * SQL: unique `tokenize()` output in first-seen order, joined by single spaces.
- * A query token (always `[a-z0-9_]+`) is a substring of `lower(text)` exactly
- * when it is a substring of one maximal `[a-z0-9_]` run, i.e. of one token, so
+ * A query token (always `[\p{L}\p{M}\p{N}_]+`, NFC) is a substring of `lower(text)`
+ * exactly when it is a substring of one maximal `[\p{L}\p{M}\p{N}_]` run, i.e. of one token, so
  * `set.includes(q)` reproduces the old `position(q IN lower(text)) > 0` (the
  * space separator is outside the alphabet and can never be part of a match).
  *

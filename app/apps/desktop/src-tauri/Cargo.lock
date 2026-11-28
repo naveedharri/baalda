@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.113"
+version = "0.1.114"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -912,6 +912,7 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+ "webview2-com",
  "windows-sys 0.61.2",
  "zip 2.4.2",
 ]

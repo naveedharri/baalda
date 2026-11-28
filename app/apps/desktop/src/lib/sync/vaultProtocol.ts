@@ -167,6 +167,8 @@ export type ServerControl =
   /** The vault's team skills changed (publish, delivery, pin, delete,
    *  settings): a hint to refetch the skills manifest, nothing more. */
   | { t: "skills-changed"; orgId: string }
+  /** The vault's sync rules changed (#401): a hint to refetch and apply them. */
+  | { t: "sync-rules-changed"; orgId: string; revision: number }
   /** This user's pending messages changed: a hint to refetch `GET /api/messages`. */
   | { t: "messages-changed" }
   | ({ t: "presence" } & PresenceState)
@@ -297,6 +299,12 @@ export function parseServerControl(text: string): ServerControl | null {
   if (t === "skills-changed") {
     const orgId = (v as { orgId?: unknown }).orgId;
     return typeof orgId === "string" && orgId ? { t: "skills-changed", orgId } : null;
+  }
+  if (t === "sync-rules-changed") {
+    const o = v as { orgId?: unknown; revision?: unknown };
+    return typeof o.orgId === "string" && o.orgId
+      ? { t: "sync-rules-changed", orgId: o.orgId, revision: typeof o.revision === "number" ? o.revision : 0 }
+      : null;
   }
   if (t === "messages-changed") return { t: "messages-changed" };
   if (t === "presence") {

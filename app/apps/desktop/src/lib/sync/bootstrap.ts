@@ -84,6 +84,9 @@ export interface BootstrapDeps {
   haveDocs(): string[] | Promise<string[]>;
   /** A doc whose content is now stored locally (`registry.markPushed`). */
   markPushed(docId: string): void;
+  /** The server holds at least `sv` for this doc: the state vector of ITS copy
+   *  just stored (`registry.recordAck`), never the local doc's. */
+  markAcked?(docId: string, sv: Uint8Array): void;
   /** One owed watcher echo for a file WE just created (`registry.markMaterialized`). */
   markMaterialized(relPath: string): void;
   loadResume(): BootstrapResume | null;
@@ -472,6 +475,7 @@ export class BootstrapRunner {
         case "unchanged": {
           // The CRDT rows are stored either way, so the server's copy is here.
           this.deps.markPushed(entry.docId);
+          if (entry.stateVector) this.deps.markAcked?.(entry.docId, entry.stateVector);
           // One owed watcher echo for the file we just created, so the sync
           // layer does not read our own write as an external edit.
           this.deps.markMaterialized(entry.relPath);

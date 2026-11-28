@@ -792,4 +792,58 @@ describe("account billing routes (team model)", () => {
     );
     expect(row.rows[0]).toMatchObject({ status: "active", cancel_at_period_end: true, billing_account_id: account });
   });
+
+  it("webhook naming a billing account this server never had (another server's checkout) is acknowledged, not a 500", async () => {
+    fakeProvider.nextEvent = {
+      eventId: "evt_foreign_1",
+      occurredAt: new Date(),
+      type: "subscription_active",
+      organizationId: "org_on_another_server",
+      accountId: "ba_on_another_server",
+      userId: "user_on_another_server",
+      providerCustomerId: "cus_x",
+      providerSubscriptionId: "sub_foreign_1",
+      plan: "team",
+      status: "active",
+      currentPeriodEnd: new Date(Date.now() + 20 * 86400_000),
+      cancelAtPeriodEnd: false,
+      interval: "month",
+      amount: 3000,
+      currency: "usd",
+    } as never;
+    const res = await req("POST", "/api/billing/webhook", { body: {} });
+    expect(res.status).toBe(202);
+    const rows = await pool.query("SELECT 1 FROM subscriptions WHERE provider_subscription_id = 'sub_foreign_1'");
+    expect(rows.rowCount).toBe(0);
+    // Claimed: the provider's retry is answered as already processed.
+    fakeProvider.nextEvent = { ...(fakeProvider.nextEvent as object) } as never;
+    expect((await req("POST", "/api/billing/webhook", { body: {} })).status).toBe(200);
+  });
+
+  it("webhook naming an unknown billing account but one of OUR vaults lands on that vault's account", async () => {
+    const a = await signUp("wh-own@b.com");
+    const org = await vault(a);
+    const account = (await ensureAccountForUser(pool, a.userId))!;
+    fakeProvider.nextEvent = {
+      eventId: "evt_foreign_2",
+      occurredAt: new Date(),
+      type: "subscription_active",
+      organizationId: org,
+      accountId: "ba_stale_id",
+      userId: a.userId,
+      providerCustomerId: "cus_y",
+      providerSubscriptionId: "sub_own_2",
+      plan: "team",
+      status: "active",
+      currentPeriodEnd: new Date(Date.now() + 20 * 86400_000),
+      cancelAtPeriodEnd: false,
+      interval: "month",
+      amount: 3000,
+      currency: "usd",
+    } as never;
+    const res = await req("POST", "/api/billing/webhook", { body: {} });
+    expect(res.status).toBe(200);
+    const row = await pool.query("SELECT billing_account_id FROM subscriptions WHERE provider_subscription_id = 'sub_own_2'");
+    expect(row.rows[0]?.billing_account_id).toBe(account);
+  });
 });

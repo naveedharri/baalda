@@ -33,6 +33,62 @@ pub fn temp_sibling(parent: &Path, file_name: &str) -> PathBuf {
     parent.join(format!(".{file_name}.{}.{n}.tmp", std::process::id()))
 }
 
+/// The process id in one of OUR atomic-write temp names
+/// (`.{file_name}.{pid}.{n}.tmp`, [`temp_sibling`]), or `None` for any other
+/// name. Strict on purpose: only this exact shape is ever swept, so a user's
+/// own `.notes.tmp` or an editor's `~WRL0001.tmp` is never touched.
+pub fn temp_sibling_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (head, n) = rest.rsplit_once('.')?;
+    let (file, pid) = head.rsplit_once('.')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if file.is_empty() || !digits(pid) || !digits(n) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// How long an unchanged temp file of ANOTHER process waits before it counts as
+/// debris. A download streams into its temp file, so its modified time keeps
+/// moving while it is written; one untouched this long has no writer left.
+pub const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Remove the temp files a killed or crashed run left behind (found by the
+/// four-app test, 2026-11-23: a member app killed mid-download kept three
+/// `.Audio ….tmp` files forever; a video would leave hundreds of MB).
+///
+/// Only [`temp_sibling_pid`] names, only regular files (never through a
+/// symlink), never this process's own (`own_pid`: a write may be in flight)
+/// and never one modified within `max_age` (another Baalda process on the
+/// same folder may still be writing it). `.git` and `node_modules` are not
+/// walked: nothing Baalda writes lives there. Returns how many were removed.
+pub fn sweep_stale_temp_files(root: &Path, own_pid: u32, max_age: std::time::Duration) -> usize {
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    let walk = walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
+        !(e.file_type().is_dir() && matches!(e.file_name().to_str(), Some(".git" | "node_modules")))
+    });
+    for entry in walk.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(pid) = entry.file_name().to_str().and_then(temp_sibling_pid) else { continue };
+        if pid == own_pid {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if now.duration_since(modified).map_or(true, |age| age < max_age) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) => log::warn!("[temp-sweep] could not remove {}: {e}", entry.path().display()),
+        }
+    }
+    removed
+}
+
 /// Read a `.md` note to a string (vault-relative path).
 pub fn read_note(vault: &Path, rel: &str) -> AppResult<String> {
     let abs = resolve_in_vault(vault, rel)?;
@@ -87,6 +143,7 @@ pub fn write_note_cas(
 ) -> AppResult<WriteNoteOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
     require_vault_root(vault)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     let state = vault_path_state(vault, rel);
     match state {
         PathState::Symlink => return Err(symlink_refusal(rel)),
@@ -184,6 +241,7 @@ pub fn write_atomic_fsync(target: &Path, content: &[u8]) -> AppResult<()> {
 /// wrong *decision*, not a concurrent one.
 pub fn write_note_if_missing(vault: &Path, rel: &str, content: &str) -> AppResult<bool> {
     resolve_in_vault(vault, rel)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     // `symlink_metadata`, not `exists()` (#216): a link at (or above) this path
     // is invisible to the tree walk, so "already there" would keep a stale doc
     // id mapped to whatever the link points at. Refused outright — never
@@ -244,6 +302,7 @@ pub fn write_note_if_absent_or_empty(
     content: &str,
 ) -> AppResult<WriteOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
+    crate::vault::refuse_excluded(vault, rel, false)?;
     // One stat answers both "is it there" and "is it empty", and a missing file
     // is not an error here — it is the common case.
     let size = match std::fs::metadata(&abs) {
@@ -276,6 +335,7 @@ pub fn create_note(vault: &Path, parent_rel: &str, name: &str) -> AppResult<Stri
     let rel = join_rel(parent_rel, &name);
     let abs = resolve_in_vault(vault, &rel)?;
     require_vault_root(vault)?;
+    crate::vault::refuse_excluded(vault, &rel, false)?;
     if abs.exists() {
         return Err(AppError::new("a note with that name already exists"));
     }
@@ -296,6 +356,7 @@ pub fn create_folder(vault: &Path, parent_rel: &str, name: &str) -> AppResult<St
     let rel = join_rel(parent_rel, name);
     let abs = resolve_in_vault(vault, &rel)?;
     require_vault_root(vault)?;
+    crate::vault::refuse_excluded(vault, &rel, true)?;
     if abs.exists() {
         return Err(AppError::new("a folder with that name already exists"));
     }
@@ -305,11 +366,35 @@ pub fn create_folder(vault: &Path, parent_rel: &str, name: &str) -> AppResult<St
 
 /// Rename/move a file or folder within the vault. Returns the new rel path.
 pub fn rename_path(vault: &Path, old_rel: &str, new_rel: &str) -> AppResult<String> {
+    rename_path_opts(vault, old_rel, new_rel, false)
+}
+
+/// [`rename_path`], optionally allowing the DESTINATION to be excluded by the
+/// vault's sync rules (#401). Only the sync layer asks for that: a teammate
+/// moved a note into a folder that doesn't sync, and following the move on
+/// disk (then parking the note) is what keeps its id and avoids a duplicate.
+/// The source must still be visible, and the floor (`.context`, `.git`, dot
+/// names) still refuses through `resolve_in_vault`'s callers as before.
+pub fn rename_path_opts(
+    vault: &Path,
+    old_rel: &str,
+    new_rel: &str,
+    allow_excluded_target: bool,
+) -> AppResult<String> {
     let old_abs = resolve_in_vault(vault, old_rel)?;
     let new_abs = resolve_in_vault(vault, new_rel)?;
     if !old_abs.exists() {
         return Err(AppError::new("source path does not exist"));
     }
+    // Neither end may be excluded (#401): moving something INTO an excluded
+    // folder from the app would take it out of sync, and moving an excluded
+    // item out would mean the app reached into a folder it hides.
+    if !allow_excluded_target {
+        crate::vault::refuse_excluded(vault, new_rel, old_abs.is_dir())?;
+    } else if crate::vault::rel_path_is_ignored(new_rel.trim_start_matches('/')) {
+        return Err(AppError::new("that path is never synced"));
+    }
+    crate::vault::refuse_excluded(vault, old_rel, old_abs.is_dir())?;
     if new_abs.exists() {
         return Err(AppError::new("destination already exists"));
     }
@@ -340,6 +425,7 @@ pub fn ensure_folder(vault: &Path, rel: &str) -> AppResult<bool> {
             "refusing to create a folder in an ignored dir",
         ));
     }
+    crate::vault::refuse_excluded(vault, rel, true)?;
     let abs = resolve_in_vault(vault, rel)?;
     require_vault_root(vault)?;
     if abs.is_dir() {
@@ -498,8 +584,20 @@ fn unique_trash_dest(vault: &Path, rel: &str) -> AppResult<String> {
 /// recursive — `remove_dir`, not `remove_dir_all` — so it can only ever take
 /// away a folder that holds nothing.
 pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
+    delete_folder_if_empty_with(vault, rel, false)
+}
+
+/// [`delete_folder_if_empty`], optionally for a folder the vault's rules hide:
+/// what the removal of a revoked team's rule-hidden files emptied
+/// (`registry.revokeParked`). Still empty-only; the floor is refused either way.
+pub fn delete_folder_if_empty_with(vault: &Path, rel: &str, allow_excluded: bool) -> AppResult<bool> {
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new("refusing to touch an ignored dir"));
+    }
+    // An excluded folder (#401) is never removed by sync: it is kept, the same
+    // answer a folder that still holds something gets.
+    if !allow_excluded && crate::sync_rules::excludes(vault, rel, true) {
+        return Ok(false);
     }
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
@@ -579,12 +677,24 @@ pub fn delete_path(vault: &Path, rel: &str) -> AppResult<()> {
 /// `remove_dir_all` on a tree, or to remove the vault's own doc-id map and CRDT
 /// store. Both guards belong here, where they cannot be refactored away from.
 pub fn delete_file(vault: &Path, rel: &str) -> AppResult<()> {
+    delete_file_with(vault, rel, false)
+}
+
+/// [`delete_file`], optionally for a path the vault's sync rules hide: the
+/// removal of a rule-hidden copy of a TEAM file whose access ended, which the
+/// server confirmed (`registry.revokeParked`). The floor is refused either way.
+pub fn delete_file_with(vault: &Path, rel: &str, allow_excluded: bool) -> AppResult<()> {
     // `.context/`, `.git`, dotfiles — the same refusal `trash_note` and
     // `delete_folder_if_empty` make. Checked BEFORE the directory test, so
     // `.context/config.json` is refused on its own merits rather than surviving
     // because it happens to be a file.
     if crate::vault::rel_path_is_ignored(rel) {
         return Err(AppError::new(format!("refusing to delete an ignored path: {rel}")));
+    }
+    // Sync never deletes what the vault's rules exclude (#401), except a
+    // confirmed revocation of a team file the rules merely hid.
+    if !allow_excluded {
+        crate::vault::refuse_excluded(vault, rel, false)?;
     }
     let abs = resolve_in_vault(vault, rel)?;
     if !abs.exists() {
@@ -654,6 +764,70 @@ fn join_rel(parent_rel: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn temp_sibling_pid_reads_only_our_own_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = temp_sibling(dir.path(), "note.md");
+        let name = ours.file_name().unwrap().to_str().unwrap();
+        assert_eq!(temp_sibling_pid(name), Some(std::process::id()));
+        assert_eq!(temp_sibling_pid(".Audio mp3.mp3.37240.36.tmp"), Some(37240));
+        assert_eq!(temp_sibling_pid(".a.b.c.md.12.0.tmp"), Some(12));
+        for other in [
+            ".note.md.tmp",       // import_export's single name, not swept
+            ".notes.tmp",
+            ".x.abc.3.tmp",
+            ".x.12.tmp",
+            "~WRL0001.tmp",
+            "note.md.12.3.tmp",   // no leading dot: a user's file
+            "..12.3.tmp",         // no file name
+            ".note.md.12.3.TMP2",
+            "note.md",
+        ] {
+            assert_eq!(temp_sibling_pid(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn sweep_removes_only_old_temp_files_of_other_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Folder/Deep")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let debris = [
+            root.join(".Audio mp3.mp3.37240.36.tmp"),
+            root.join("Folder/Deep/.Video mov.mov.37240.40.tmp"),
+        ];
+        let keep = [
+            root.join(format!(".mine.md.{}.1.tmp", std::process::id())), // own process
+            root.join(".git/.HEAD.37240.1.tmp"),                          // not walked
+            root.join(".notes.tmp"),
+            root.join("Folder/note.md"),
+            root.join("Folder/report.37240.1.tmp"),
+        ];
+        for p in debris.iter().chain(keep.iter()) {
+            std::fs::write(p, b"x").unwrap();
+        }
+        // Everything was written just now: with the real age nothing goes.
+        assert_eq!(sweep_stale_temp_files(root, std::process::id(), STALE_TEMP_AGE), 0);
+        assert!(debris.iter().all(|p| p.exists()));
+        // Old enough: only the other process's temp files go.
+        assert_eq!(sweep_stale_temp_files(root, std::process::id(), std::time::Duration::ZERO), 2);
+        assert!(debris.iter().all(|p| !p.exists()));
+        assert!(keep.iter().all(|p| p.exists()), "kept files must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_never_follows_a_symlinked_folder() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join(".other.md.37240.1.tmp");
+        std::fs::write(&target, b"x").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        assert_eq!(sweep_stale_temp_files(dir.path(), std::process::id(), std::time::Duration::ZERO), 0);
+        assert!(target.exists());
+    }
     use super::*;
 
     /// #221: a vault root that moved away while the app was open is never
@@ -1004,6 +1178,18 @@ mod tests {
     }
 
     #[test]
+    fn rename_never_lands_on_an_occupied_path() {
+        // An inbound chain keeps `A/n → B/n` because `B/n → C/n` vacates it;
+        // when the vacating rename fails, this refusal is what keeps B's file.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "A/n.md", "from A").unwrap();
+        write_note(tmp.path(), "B/n.md", "still B").unwrap();
+        assert!(rename_path(tmp.path(), "A/n.md", "B/n.md").is_err());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("B/n.md")).unwrap(), "still B");
+        assert_eq!(std::fs::read_to_string(tmp.path().join("A/n.md")).unwrap(), "from A");
+    }
+
+    #[test]
     fn sha_is_stable() {
         assert_eq!(sha256_hex("abc"), sha256_hex("abc"));
         assert_ne!(sha256_hex("abc"), sha256_hex("abd"));
@@ -1196,6 +1382,29 @@ mod tests {
         assert!(ensure_folder(tmp.path(), ".context/evil").is_err());
         assert!(ensure_folder(tmp.path(), "node_modules/x").is_err());
         assert!(ensure_folder(tmp.path(), "../up").is_err());
+    }
+
+    #[test]
+    fn delete_file_with_excluded_still_refuses_the_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), "x").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".context")).unwrap();
+        std::fs::write(tmp.path().join(".context/config.json"), "{}").unwrap();
+        assert!(delete_file_with(tmp.path(), ".git/config", true).is_err());
+        assert!(delete_file_with(tmp.path(), ".context/config.json", true).is_err());
+        assert!(tmp.path().join(".git/config").exists());
+        assert!(tmp.path().join(".context/config.json").exists());
+    }
+
+    #[test]
+    fn delete_folder_if_empty_with_reaches_only_what_it_is_told() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_folder(tmp.path(), "A/B").unwrap();
+        // Ignored names stay refused even when excluded paths are allowed.
+        assert!(delete_folder_if_empty_with(tmp.path(), ".git", true).is_err());
+        assert!(delete_folder_if_empty_with(tmp.path(), "A/B", true).unwrap());
+        assert!(!tmp.path().join("A/B").exists());
     }
 
     #[test]

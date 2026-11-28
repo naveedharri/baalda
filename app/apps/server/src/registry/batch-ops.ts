@@ -2,12 +2,12 @@ import { withNoteQuota, noteLimitMessage } from "../billing/note-quota.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
-import { canCreateIn, canEditDoc } from "../permissions/http-gates.js";
+import { canCreateIn, canEditDoc, canRenameItem, RENAME_NOT_CREATOR_MESSAGE } from "../permissions/http-gates.js";
 import { createResolverCache, type ResolverCache } from "../permissions/resolver.js";
 import {
-  listPrivateHiddenDocsInVault,
   listReadableDocsInVault,
   listVisibleFolders,
+  readsWholeVault,
 } from "../permissions/vault-docs.js";
 import {
   TreeOpError,
@@ -105,7 +105,9 @@ export type RegisterCode =
   | "root_frozen"
   | "not_readable"
   | "doc_id_conflict"
-  | "note_deleted";
+  | "note_deleted"
+  | "rename_not_creator"
+  | "account_read_only";
 
 export interface FolderRow {
   id: string;
@@ -259,7 +261,7 @@ export function registerCtx(
   const cache = opts.cache ?? createRegisterCache();
   let visibleFolders: Promise<Set<string>> | null = null;
   let readableDocs: Promise<Set<string>> | null = null;
-  let hiddenDocs: Promise<Set<string>> | null = null;
+  let wholeVault: Promise<boolean> | null = null;
   const createdHere = new Set<string>();
   return {
     db,
@@ -289,24 +291,15 @@ export function registerCtx(
     },
     async canAdoptDoc(docId) {
       if (createdHere.has(docId)) return true;
-      hiddenDocs ??= (async () => {
-        // One indexed probe answers the overwhelmingly common case — no Private
-        // row in this vault's org could hide anything from this user — without
-        // the recursive walk. This runs on every re-registration pass.
-        const { rows } = await db.query<{ org: string }>(
-          `SELECT s.org_id AS org FROM shares s
-             JOIN vaults v ON v.organization_id = s.org_id
-            WHERE v.id = $1 AND s.permission = 'denied'
-              AND s.resource_type IN ('folder', 'file')
-              AND (s.principal_type = 'org' OR (s.principal_type = 'user' AND s.principal_id = $2))
-            LIMIT 1`,
-          [vaultId, userId],
-        );
-        return rows[0]
-          ? listPrivateHiddenDocsInVault(userId, rows[0].org, vaultId, db)
-          : new Set<string>();
-      })();
-      if (!(await hiddenDocs).has(docId)) return true;
+      // Whoever reads EVERY doc may adopt any of them without the per-doc walk:
+      // the overwhelmingly common case, and this runs on every re-registration
+      // pass. Anyone else is judged on the readable set itself. The shortcut
+      // used to treat a doc as readable unless a per-user or team No access row
+      // hid it, which missed everything hidden without one: a group's No
+      // access, and every doc nobody shared in an "Only what's shared" vault.
+      // Their adopt answered with the hidden note's id and title (2026-11-28).
+      wholeVault ??= readsWholeVault(db, userId, vaultId);
+      if (await wholeVault) return true;
       readableDocs ??= listReadableDocsInVault(userId, vaultId, db);
       return (await readableDocs).has(docId);
     },
@@ -1113,6 +1106,23 @@ export async function registerFile(
         code: "no_write_access",
         message: "You do not have permission to create a file here.",
       };
+    }
+    // Creator-only, like delete: a plain member moves only a file they added.
+    {
+      const { rows: org } = await ctx.db.query<{ organization_id: string }>(
+        "SELECT organization_id FROM vaults WHERE id = $1",
+        [ctx.vaultId],
+      );
+      const gate = org[0]
+        ? await canRenameItem(ctx.db, { orgId: org[0].organization_id, userId: ctx.userId, kind: "file", id })
+        : ({ ok: false, code: "rename_not_creator" } as const);
+      if (!gate.ok) {
+        return {
+          status: "error",
+          code: gate.code,
+          message: gate.code === "account_read_only" ? "Sync is read-only for this vault." : RENAME_NOT_CREATOR_MESSAGE,
+        };
+      }
     }
     try {
       await ctx.db.query("UPDATE files SET folder_id = $2, path = $3 WHERE id = $1", [

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dedupeReconcileItems, summarizeReconcile } from "../reconcileSummary";
-import type { ReconcileItem } from "../sync/reconcileReport";
+import { SELF_REVOKED_DETAIL, type ReconcileItem } from "../sync/reconcileReport";
 
 const at = 1_700_000_000_000;
 const item = (i: Partial<ReconcileItem> & Pick<ReconcileItem, "kind" | "path">): ReconcileItem => ({
@@ -23,7 +23,7 @@ describe("summarizeReconcile", () => {
       item({ kind: "folderKept", path: "Projects/Q3" }),
     ]);
     expect(lines.map((l) => l.text)).toEqual([
-      "2 notes you edited offline were deleted by a teammate. Your versions are in Trash.",
+      "2 notes you edited offline were deleted by a teammate. Your unsent changes went with them.",
       "1 note is kept on this device only: you no longer have access.",
       "1 note you deleted didn't reach the server, so it was put back. Delete it again to remove it for everyone.",
       "1 note was renamed to avoid a clash: plan.md → plan (2).md.",
@@ -35,7 +35,7 @@ describe("summarizeReconcile", () => {
   it("uses singular wording for one and plural for many", () => {
     const one = summarizeReconcile([item({ kind: "deletedByTeammate", path: "a.md", docId: "1" })]);
     expect(one[0].text).toBe(
-      "1 note you edited offline was deleted by a teammate. Your version is in Trash.",
+      "1 note you edited offline was deleted by a teammate. Your unsent changes went with it.",
     );
     const many = summarizeReconcile([
       item({ kind: "restoredFromServer", path: "a.md", docId: "1" }),
@@ -140,5 +140,32 @@ describe("dedupeReconcileItems", () => {
       ["restoredFromServer", at],
       ["keptLocally", at + 9],
     ]);
+  });
+});
+
+describe("unsent changes removed with a note whose access was removed", () => {
+  it("names one note, and says why", () => {
+    const [line] = summarizeReconcile([{ kind: "unsentRemoved", docId: "d1", path: "Team/Plan.md", at }]);
+    expect(line.text).toBe(
+      "Your unsent changes to Plan.md were removed: your access to it was removed before they reached the team.",
+    );
+  });
+  it("counts several, and leads the summary", () => {
+    const lines = summarizeReconcile([
+      { kind: "restoredFromServer", path: "a.md", at },
+      { kind: "unsentRemoved", docId: "d1", path: "Team/A.md", at },
+      { kind: "unsentRemoved", docId: "d2", path: "Team/B.md", at },
+    ]);
+    expect(lines[0].text).toBe(
+      "Your unsent changes to 2 notes were removed: your access to them was removed before they reached the team.",
+    );
+  });
+  it("says so plainly when the person removed their own access", () => {
+    const [line] = summarizeReconcile([
+      { kind: "unsentRemoved", docId: "d1", path: "Team/Plan.md", detail: SELF_REVOKED_DETAIL, at },
+    ]);
+    expect(line.text).toBe(
+      "Your unsent changes to Plan.md were removed: you removed your own access before they reached the team.",
+    );
   });
 });

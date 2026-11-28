@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
-import type { InviteManyResult, TeamAccessMode } from "../lib/api";
+import type { AccessGroup, InviteManyResult, TeamAccessMode, TeamAccessPosture } from "../lib/api";
+import { GROUP_OPTION, groupOptionId, isGroupOption } from "../lib/groups";
 import { authManager } from "../lib/auth/authManager";
 import { inviteWithVaultKeys, vaultKeysJoinCode } from "../lib/vaultKeys/runtime";
 import { classifyLimitError, freeLimitOf, invitePrewarning, limitFromError, peopleLimitReason, type LimitKind } from "../lib/billing";
@@ -11,16 +12,73 @@ import { AsyncButton } from "./AsyncButton";
 import { LimitNudge } from "./LimitNudge";
 import { PeopleLimitNotice, inviteLimitError, peopleLimitKind } from "./PeopleLimitNotice";
 import { MenuSelect } from "./MenuSelect";
+import { toast } from "../lib/toast";
 import { UpgradeDialog } from "./UpgradeDialog";
 
-type InviteAccess = TeamAccessMode | "default";
+/** `default` = no level of their own: only what is shared with them or their groups. */
+type InviteAccess = Exclude<TeamAccessMode, "private"> | "default";
 
-const ACCESS_OPTIONS: ReadonlyArray<{ value: InviteAccess; label: string; hint?: string }> = [
-  { value: "open", label: "Can edit" },
-  { value: "readonly", label: "Can view" },
-  { value: "private", label: "No access" },
-  { value: "default", label: "Vault default", hint: "Whatever the New members setting says" },
+const SEES_NOTHING = "They'll see an empty vault until you share notes or add them to a group.";
+/** The Access menu's values: a level, or a group to join (`group:<id>`, toggles). */
+type AccessChoice = InviteAccess | `group:${string}` | "groups";
+
+// Three levels (2026-11-27): No access is no level of their own, so what you
+// share with them later and the groups they join still open things.
+const ACCESS_LEVELS: ReadonlyArray<{ value: InviteAccess; label: string; hint?: string }> = [
+  { value: "open", label: "Can edit everything" },
+  { value: "readonly", label: "Can view everything" },
+  { value: "default", label: "No access", hint: "Nothing until you share something with them or add them to a group" },
 ];
+
+/**
+ * What someone who joins with no level of their own gets in a vault still on
+ * an older New members setting (`join_default` open/readonly, a vault the
+ * access model conversion has not reached yet), or null where they start on
+ * Only what's shared. The server still applies that setting there.
+ */
+export function legacyNewMembersLine(mode?: TeamAccessMode | null): string | null {
+  return mode === "open" ? "New members start on Can edit everything"
+    : mode === "readonly" ? "New members start on Can view everything"
+      : null;
+}
+
+/**
+ * The New members setting worth passing to the dialog: only while the vault
+ * still has an older Default access (`posture` edit/view, not converted yet),
+ * where the server still applies it. A converted vault (sealed, or never
+ * shared) gives joiners what their groups open, whatever the old setting says.
+ */
+export function legacyNewMembersSetting(
+  posture: TeamAccessPosture | null | undefined,
+  mode: TeamAccessMode | null | undefined,
+): TeamAccessMode | null {
+  return (posture === "edit" || posture === "view") && (mode === "open" || mode === "readonly") ? mode : null;
+}
+
+/**
+ * The Access menu's levels (2026-11-25): new members start on Only what's
+ * shared, so that is the default and means "no level of their own". New
+ * admins start on Can edit everything, so their menu has only that. In a vault
+ * still on an older New members setting the default is that setting.
+ */
+export function inviteAccessOptions(
+  role: "member" | "admin" = "member",
+  newMembers: TeamAccessMode | null = null,
+  /** The level the vault's members had team-wide before 2026-11-27 (`newMemberLevel`): it is the default. */
+  startLevel: TeamAccessMode | null = null,
+): Array<{ value: InviteAccess; label: string; hint?: string; tag?: string }> {
+  if (role === "admin") return [{ value: "open", label: "Can edit everything", hint: "Admins start on Can edit everything" }];
+  if (startLevel === "open" || startLevel === "readonly") {
+    return ACCESS_LEVELS.map((o) => o.value === startLevel
+      ? { ...o, hint: "Like the members already in the vault", tag: "Default" }
+      : o);
+  }
+  const legacy = legacyNewMembersLine(newMembers);
+  return ACCESS_LEVELS.map((o) =>
+    o.value !== "default" ? o
+      : legacy ? { value: "default" as const, label: "Vault default", hint: legacy, tag: "Default" }
+        : o);
+}
 
 /** Add typed or pasted text to the chip list, de-duplicated case-insensitively. */
 export function addChips(chips: readonly string[], text: string): string[] {
@@ -40,29 +98,77 @@ export function addChips(chips: readonly string[], text: string): string[] {
  * messages the old Members tab showed (emailed / no email server / email
  * failed, with the link to share).
  */
-export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, onNewMembersAccess, canManageBilling = false, seatAccount = null, ownerName = null, onClose, onInvited }: {
+export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembersAccess = null, startLevel = null, defaultKnown = true, canSetCodeGroups: canManageCode = false, canManageBilling = false, seatAccount = null, ownerName = null, groups = [], onClose, onInvited }: {
   orgId: string;
   /** For the join-code sentence. */
   vaultName?: string;
-  /** The vault's New members setting: what someone who joins by code gets. */
+  /** The vault's New members setting (`GET access-default`); only an older open/readonly one changes what is said. */
   newMembersAccess?: TeamAccessMode | null;
-  /** Change the New members setting from the Join code tab (owners/admins). */
-  onNewMembersAccess?: (mode: TeamAccessMode) => void;
+  /** The level new invites start on (the vault's old team-wide level, `overview.newMemberLevel`). */
+  startLevel?: TeamAccessMode | null;
+  /** False until the vault's Default access is known; an unknown default never warns that someone sees nothing. */
+  defaultKnown?: boolean;
+  /** Owners/admins: choose the access groups the join code adds people to. */
+  canSetCodeGroups?: boolean;
   /** The owner can add seats from the notice. */
   canManageBilling?: boolean;
   /** The account's seats, for the warning shown before anyone types (Team model only). */
   seatAccount?: Parameters<typeof invitePrewarning>[0] | null;
   /** The vault owner's name, so an admin knows whom to ask. */
   ownerName?: string | null;
+  /** Access groups the invitees can join instead of getting a level (empty: none offered). */
+  groups?: readonly AccessGroup[];
   onClose: () => void;
   /** Called with the per-address results so the roster can add rows at once. */
-  onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null }) => void;
+  onInvited: (results: InviteManyResult[], sent: { role: string; access: TeamAccessMode | null; groupIds?: string[] }) => void;
 }) {
   const serverUrl = useStore((s) => s.serverUrl);
   const [chips, setChips] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [role, setRole] = useState<"member" | "admin">("member");
-  const [access, setAccess] = useState<InviteAccess>("default");
+  const [pickedAccess, setAccess] = useState<InviteAccess>("default");
+  // Owners and admins start with Can edit everything (their own level, which
+  // can still be lowered later); members start on the vault default. Switching
+  // the role moves the Access choice along until it is picked by hand.
+  const [accessPicked, setAccessPicked] = useState(false);
+  // An admin can edit everything, whatever the menu held; back to Member,
+  // a level picked by hand comes back.
+  const chooseRole = (next: "member" | "admin") => setRole(next);
+  const startsOn: InviteAccess = startLevel === "open" || startLevel === "readonly" ? startLevel : "default";
+  const access: InviteAccess = role === "admin" ? "open" : accessPicked ? pickedAccess : startsOn;
+  // Groups to join on acceptance. Picking any means no personal level: a
+  // personal vault-wide level would make the groups do nothing (the server
+  // refuses both together).
+  const [joinGroups, setJoinGroups] = useState<string[]>([]);
+  const groupIds = role === "admin" ? [] : joinGroups.filter((id) => groups.some((g) => g.id === id));
+  const accessValue: AccessChoice = groupIds.length ? "groups" : access;
+  const accessOptions: ReadonlyArray<{ value: AccessChoice; label: string; hint?: string; section?: string; checked?: boolean }> = [
+    ...inviteAccessOptions(role, newMembersAccess, startLevel),
+    ...groups.map((g, i) => ({
+      value: `${GROUP_OPTION}${g.id}` as const,
+      label: g.name,
+      hint: i === 0 ? "Joins the group and gets what it can open" : undefined,
+      section: i === 0 ? "Or add to access groups" : undefined,
+      checked: groupIds.includes(g.id),
+    })),
+  ];
+  const chooseAccess = (v: AccessChoice) => {
+    if (v === "groups") return;
+    if (isGroupOption(v)) {
+      const id = groupOptionId(v);
+      setJoinGroups((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+      return;
+    }
+    setAccess(v as InviteAccess);
+    setAccessPicked(true);
+    setJoinGroups([]);
+  };
+  const groupsLabel = groupIds.length
+    ? (() => {
+        const first = groups.find((g) => g.id === groupIds[0])?.name ?? "Group";
+        return groupIds.length === 1 ? first : `${first} + ${groupIds.length - 1}`;
+      })()
+    : null;
   const [code, setCode] = useState<string | null>(null);
   const shortCode = code ? code.split("-")[0]! : "";
   const [results, setResults] = useState<InviteManyResult[] | null>(null);
@@ -74,15 +180,67 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
   const [tab, setTab] = useState<"email" | "code">("email");
   const [copied, setCopied] = useState(false);
 
+  // The access groups the join code adds people to; null until known, and on
+  // a server that cannot set them (no groups section then).
+  const [codeGroups, setCodeGroups] = useState<string[] | null>(null);
+  // The level people who join by the code start on (2026-11-27); undefined on
+  // a server that can't set one.
+  const [codeLevel, setCodeLevel] = useState<"edit" | "view" | null | undefined>(undefined);
   useEffect(() => {
     let live = true;
     authManager.api
-      .getJoinCode()
-      .then((c) => vaultKeysJoinCode(orgId, c))
+      .getJoinCodeInfo()
+      .then((info) => {
+        if (live) { setCodeGroups(info.groupIds); setCodeLevel(info.level); }
+        return vaultKeysJoinCode(orgId, info.code);
+      })
       .then((c) => { if (live) setCode(c); })
       .catch(() => {});
     return () => { live = false; };
   }, []);
+  const codeGroupIds = (codeGroups ?? []).filter((id) => groups.some((g) => g.id === id));
+  const toggleCodeGroup = (id: string) => {
+    if (codeGroups === null) return;
+    const prev = codeGroups;
+    const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+    setCodeGroups(next);
+    // Groups or a level, never both: the server clears the level.
+    if (next.length && codeLevel) setCodeLevel(null);
+    authManager.api
+      .setJoinCodeGroups(orgId, next)
+      .then((saved) => setCodeGroups(saved))
+      .catch((e) => {
+        setCodeGroups(prev);
+        toast(e instanceof Error ? e.message : "Couldn't change the join code's groups.", "error");
+      });
+  };
+  const chooseCodeLevel = (next: "edit" | "view" | null) => {
+    const prev = { level: codeLevel, groups: codeGroups };
+    setCodeLevel(next);
+    if (next) setCodeGroups((g) => (g === null ? g : []));
+    authManager.api
+      .setJoinCodeLevel(orgId, next)
+      .then((saved) => setCodeLevel(saved))
+      .catch((e) => {
+        setCodeLevel(prev.level);
+        setCodeGroups(prev.groups);
+        toast(e instanceof Error ? e.message : "Couldn't change the join code's access.", "error");
+      });
+  };
+  type CodeChoice = `group:${string}` | "groups";
+  const canSetCodeGroups = canManageCode && codeGroups !== null && groups.length > 0;
+  const codeOptions: ReadonlyArray<{ value: CodeChoice; label: string; hint?: string; checked?: boolean }> = groups.map((g, i) => ({
+    value: `${GROUP_OPTION}${g.id}` as const,
+    label: g.name,
+    hint: g.autoJoin ? "Takes new members automatically" : i === 0 ? "Joins the group and gets what it can open" : undefined,
+    checked: g.autoJoin || codeGroupIds.includes(g.id),
+  }));
+  // Groups that take every new member are joined anyway; the code adds its own.
+  const autoJoinNames = groups.filter((g) => g.autoJoin).map((g) => g.name);
+  const joinedByCode = [...new Set([...autoJoinNames, ...codeGroupIds.map((id) => groups.find((g) => g.id === id)?.name ?? "Group")])];
+  const codeGroupsLabel = joinedByCode.length
+    ? joinedByCode.length === 1 ? joinedByCode[0]! : `${joinedByCode[0]} + ${joinedByCode.length - 1}`
+    : "No group";
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !upgradeOpen) onClose(); };
@@ -107,14 +265,17 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
     setChips(all);
     setDraft("");
     try {
+      const sentAccess: TeamAccessMode | null = groupIds.length || access === "default" ? null : access;
       const out = await inviteWithVaultKeys(orgId, {
         emails: all,
         role,
-        access: access === "default" ? null : access,
+        access: sentAccess,
+        ...(groupIds.length ? { groupIds } : {}),
+        ...(role === "member" && !groupIds.length && sentAccess === null ? { onlyShared: true } : {}),
       });
       setResults(out);
       setChips(out.filter((r) => r.error).map((r) => r.email));
-      onInvited(out, { role, access: access === "default" ? null : access });
+      onInvited(out, { role, access: sentAccess, ...(groupIds.length ? { groupIds } : {}) });
       void useStore.getState().refreshVault();
     } catch (e) {
       const kind = classifyLimitError(e);
@@ -123,6 +284,13 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
       else setError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  // Nothing to open yet: they'd land on an empty sidebar (unless a group
+  // takes every new member).
+  const legacyNewMembers = legacyNewMembersLine(newMembersAccess);
+  const emailWarning = role === "member" && !groupIds.length && access === "default" && autoJoinNames.length === 0 && !legacyNewMembers && defaultKnown
+    ? SEES_NOTHING
+    : null;
 
   const prewarning = seatAccount ? invitePrewarning(seatAccount, ownerName, canManageBilling) : null;
 
@@ -178,26 +346,48 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
             </div>
             <div className="invite-code-row">
               <span>
-                People who join get
-                <small>The vault's New members setting</small>
+                People who join are added to
+                <small>{legacyNewMembers ? `${legacyNewMembers}${groups.length ? ", plus what these groups open" : ""}` : groups.length ? "They get what these groups open, and anything shared with them" : "They start on No access until you share something with them"}</small>
               </span>
-              {newMembersAccess && onNewMembersAccess ? (
-                <MenuSelect<TeamAccessMode>
-                  value={newMembersAccess}
-                  options={ACCESS_OPTIONS.filter((o): o is { value: TeamAccessMode; label: string } => o.value !== "default")}
-                  onSelect={onNewMembersAccess}
+              {canSetCodeGroups ? (
+                <MenuSelect<CodeChoice>
+                  value="groups"
+                  options={codeOptions}
+                  onSelect={(v) => {
+                    if (!isGroupOption(v)) return;
+                    const id = groupOptionId(v);
+                    if (groups.find((g) => g.id === id)?.autoJoin) return;
+                    toggleCodeGroup(id);
+                  }}
+                  ariaLabel="People who join are added to"
+                  triggerClassName="invite-field-trigger"
+                  menuClassName="access-menu"
+                  triggerContent={<span className="role-trigger-label">{codeGroupsLabel}</span>}
+                />
+              ) : (
+                <span className="muted">{codeGroupsLabel}</span>
+              )}
+            </div>
+            {canManageCode && codeLevel !== undefined && (
+              <div className="invite-code-row">
+                <span>
+                  People who join get
+                  <small>{codeLevel ? "Their own level; groups picked above are cleared" : "Nothing until you share something with them, plus what their groups open"}</small>
+                </span>
+                <MenuSelect<"shared" | "edit" | "view">
+                  value={codeLevel ?? "shared"}
+                  options={[
+                    { value: "edit", label: "Can edit everything" },
+                    { value: "view", label: "Can view everything" },
+                    { value: "shared", label: "No access" },
+                  ]}
+                  onSelect={(v) => chooseCodeLevel(v === "shared" ? null : v)}
                   ariaLabel="People who join get"
                   triggerClassName="invite-field-trigger"
                   menuClassName="access-menu"
                 />
-              ) : (
-                <span className="muted">{ACCESS_OPTIONS.find((o) => o.value === newMembersAccess)?.label ?? "The New members setting"}</span>
-              )}
-            </div>
-            <div className="invite-foot">
-              <span className="invite-foot-hint">They join as Members.</span>
-              <button type="button" className="ghost-pill" onClick={onClose}>Done</button>
-            </div>
+              </div>
+            )}
           </>
         ) : (<>
         <div className="invite-chips" onClick={(e) => (e.currentTarget.querySelector("input") as HTMLInputElement | null)?.focus()}>
@@ -241,7 +431,7 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
             <MenuSelect
               value={role}
               options={[{ value: "member", label: "Member" }, { value: "admin", label: "Admin", hint: "Can manage people and access" }]}
-              onSelect={setRole}
+              onSelect={chooseRole}
               ariaLabel="Role"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
@@ -250,34 +440,47 @@ export function InvitePeopleDialog({ orgId, vaultName = "this vault", newMembers
           </label>
           <label className="invite-field">
             <span className="invite-field-label">Access</span>
-            <MenuSelect
-              value={access}
-              options={ACCESS_OPTIONS}
-              onSelect={setAccess}
+            <MenuSelect<AccessChoice>
+              value={accessValue}
+              options={accessOptions}
+              onSelect={chooseAccess}
               ariaLabel="Access"
               triggerClassName="invite-field-trigger"
               menuClassName="access-menu"
               anchorClosest=".invite-field"
               disabled={role === "admin"}
+              triggerContent={groupsLabel ? <span className="role-trigger-label">{groupsLabel}</span> : undefined}
             />
           </label>
         </div>
+        {emailWarning && !results && (
+          <p className="invite-access-note" role="note">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M8 7.2v3.6M8 5.1v.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <span>{emailWarning}</span>
+          </p>
+        )}
         {error && <div className="auth-error">{error}</div>}
         {prewarning && !results && peopleNotice == null && (
-          <div className="limit-nudge">
-            <span>{prewarning.text}</span>
+          <div className="invite-seats" role="status">
+            <div className="invite-seats-copy">
+              <strong>{prewarning.title}</strong>
+              <span>{prewarning.text}</span>
+            </div>
             {prewarning.action === "add-seats" && (
-              <button type="button" className="link-btn" onClick={() => useStore.getState().requestAccountSettings("plan")}>
+              <button type="button" className="invite-seats-btn" onClick={() => useStore.getState().requestAccountSettings("plan")}>
                 Add seats
               </button>
             )}
             {prewarning.action === "upgrade" && (
               <button
                 type="button"
-                className="link-btn"
+                className="invite-seats-btn"
                 onClick={() => useStore.getState().requestUpgradeDialog({ reason: peopleLimitReason(seatAccount ? freeLimitOf(seatAccount) : null) })}
               >
-                Upgrade →
+                Upgrade
               </button>
             )}
           </div>

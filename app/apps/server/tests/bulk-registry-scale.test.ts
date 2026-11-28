@@ -98,7 +98,7 @@ describe("registration batch query count", () => {
    * every reconcile, and that case must stay the cheapest of all: the adopt
    * probe answers all 200 from ONE read and nothing else runs.
    */
-  it("re-registering 200 existing notes costs 2 statements", async () => {
+  it("re-registering 200 existing notes costs a fixed 8 statements", async () => {
     await seedFolder(vault, null, "Docs", "Docs");
     const inputs = Array.from({ length: NOTES }, (_, i) => ({
       relPath: `Docs/n${String(i).padStart(4, "0")}.md`,
@@ -110,12 +110,14 @@ describe("registration batch query count", () => {
     const counter = countingDb();
     const again = await registerNotes(registerCtx(vault, owner.userId, counter.db), inputs);
     expect(again.every((r) => r.status === "adopted")).toBe(true);
-    // 1 adopt probe + 1 parent-folder map + 1 Private probe (may this caller
-    // adopt what it found? — `canAdoptDoc`; one indexed read for the whole
-    // batch, and the recursive walk only when the vault has Private items).
-    // The folder read is still made because a batch does not know in advance
-    // that every item will adopt.
-    expect(counter.count()).toBe(3);
+    // 1 adopt probe + 1 parent-folder map + 6 for "may this caller adopt what
+    // it found?" (`canAdoptDoc` → `readsWholeVault`: the caller's vault access
+    // and one No access probe, once for the whole batch; the readable-set walk
+    // only for someone who does not read every doc). It was one probe that
+    // missed docs hidden by a group or by an "Only what's shared" vault
+    // (2026-11-28). The folder read is still made because a batch does not
+    // know in advance that every item will adopt.
+    expect(counter.count()).toBe(8);
   });
 
   /** Spread across folders, the only term that grows is `canCreateIn`, and it

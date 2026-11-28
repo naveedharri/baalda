@@ -83,8 +83,10 @@ async function setup() {
   const access = "AccessLegacyPlaintextTokenAbcdef";
   const refreshToken = "RefreshLegacyPlaintextTokenAbcde";
   await pool.query(
-    `INSERT INTO "oauthAccessToken" (id, "accessToken", "refreshToken", "accessTokenExpiresAt", "refreshTokenExpiresAt", "clientId", "userId", scopes)
-     VALUES ('g1', $1, $2, now() + interval '1 hour', now() + interval '7 days', $3, $4, 'openid offline_access')`,
+    // Stamped a minute back: later grants are stamped by the server's own clock,
+    // which can trail the database's by a few ms, and newestGrant() orders by it.
+    `INSERT INTO "oauthAccessToken" (id, "accessToken", "refreshToken", "accessTokenExpiresAt", "refreshTokenExpiresAt", "clientId", "userId", scopes, "createdAt")
+     VALUES ('g1', $1, $2, now() + interval '1 hour', now() + interval '7 days', $3, $4, 'openid offline_access', now() - interval '1 minute')`,
     [access, refreshToken, CLIENT, owner.userId],
   );
   await pool.query("INSERT INTO mcp_oauth_vault (client_id, user_id, organization_id) VALUES ($1, $2, $3)", [

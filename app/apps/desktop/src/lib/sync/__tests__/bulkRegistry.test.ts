@@ -406,6 +406,45 @@ describe("bulk folders, parents first", () => {
   });
 });
 
+describe("bulk folders, a refused parent", () => {
+  it("never sends the subtree of a folder the server refused", async () => {
+    const { api } = fakeApi();
+    const sent: string[] = [];
+    vi.mocked(api.batchCreateFolders).mockImplementation(async (_v, items) => {
+      return items.map((i) => {
+        sent.push(i.path);
+        if (i.path === "Top/Bad") {
+          return { path: i.path, id: null, status: "error" as const, code: "no_write_access", error: "refused" };
+        }
+        return { path: i.path, id: `folder-${i.path}`, status: "created" as const, code: null, error: null };
+      });
+    });
+    // 30 folders (the batch path): Top, Top/Bad, then a 28-deep chain inside it.
+    let chain: TreeNode = { id: "leaf", name: "D27", path: "", isDir: true, children: [] };
+    const names = Array.from({ length: 28 }, (_, i) => `D${i}`);
+    const build = (prefix: string, i: number): TreeNode => ({
+      id: `${prefix}/${names[i]}`,
+      name: names[i],
+      path: `${prefix}/${names[i]}`,
+      isDir: true,
+      children: i + 1 < names.length ? [build(`${prefix}/${names[i]}`, i + 1)] : [],
+    });
+    chain = build("Top/Bad", 0);
+    const t: TreeNode = {
+      id: "root",
+      name: "v",
+      path: "",
+      isDir: true,
+      children: [
+        { id: "top", name: "Top", path: "Top", isDir: true, children: [{ id: "bad", name: "Bad", path: "Top/Bad", isDir: true, children: [chain] }] },
+      ],
+    };
+    await reconcileWithTree(reg(api), { organizationId: ORG, vaultName: "v" }, t);
+    // Top and Top/Bad were asked; nothing beneath the refused folder was.
+    expect(sent).toEqual(["Top", "Top/Bad"]);
+  });
+});
+
 const reg = (api: ApiClient) => new VaultRegistry(api);
 
 describe("incremental checkpointing + resume", () => {

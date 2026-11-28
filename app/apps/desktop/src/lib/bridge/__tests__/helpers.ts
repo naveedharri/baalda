@@ -42,6 +42,11 @@ export class FakeFs {
   get(path: string): string | undefined {
     return this.files.get(path);
   }
+
+  /** Simulate an out-of-band removal or rename (Finder, git). */
+  externalRemove(path: string): void {
+    this.files.delete(path);
+  }
 }
 
 interface LoggedUpdate {

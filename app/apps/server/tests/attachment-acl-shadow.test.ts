@@ -24,8 +24,8 @@ const CASES: Array<[string, string, string, boolean, boolean]> = [
   // A path mentioned in prose or a code span is not a link: text grants it, refs does not.
   ["prose mention", "see attachments/notes.txt for details", "attachments/notes.txt", true, false],
   ["code span", "`attachments/raw.bin`", "attachments/raw.bin", true, false],
-  // A space inside the link target is not a markdown link target.
-  ["angle-bracket link with a space", "[doc](<attachments/Big Plan.pdf>)", "attachments/Big Plan.pdf", true, false],
+  // CommonMark's form for a target with a space: both rules see it (blob_refs v3).
+  ["angle-bracket link with a space", "[doc](<attachments/Big Plan.pdf>)", "attachments/Big Plan.pdf", true, true],
   // blob_refs is lowercased; LIKE is case-sensitive.
   ["case differs", "![x](attachments/photo.png)", "attachments/Photo.PNG", false, true],
   // Text over-matches a longer name; refs does not.

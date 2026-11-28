@@ -1,6 +1,7 @@
 //! Recursive vault tree walk → nested JSON for the react-arborist sidebar.
 
 use crate::error::AppResult;
+use crate::sync_rules::SyncRules;
 use crate::vault::{is_allowed_file, is_ignored_name};
 use serde::Serialize;
 use std::path::Path;
@@ -48,7 +49,8 @@ pub fn list_tree(vault: &Path) -> AppResult<TreeNode> {
         .and_then(|s| s.to_str())
         .unwrap_or("vault")
         .to_string();
-    let children = walk_dir(vault, "")?;
+    let rules = crate::sync_rules::active(vault);
+    let children = walk_dir(vault, "", rules.as_deref())?;
     Ok(TreeNode {
         id: "".to_string(),
         name,
@@ -76,6 +78,12 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
     };
     let mut dirs: Vec<TreeNode> = Vec::new();
     let mut files: Vec<TreeNode> = Vec::new();
+    // Asked with ancestors here: a lazy listing can be asked for any folder.
+    let rules = crate::sync_rules::active(vault);
+    let excluded = |rel: &str, is_dir: bool| rules.as_deref().is_some_and(|r| r.excludes(rel, is_dir));
+    if !rel.is_empty() && excluded(rel, true) {
+        return Ok(Vec::new());
+    }
 
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -105,6 +113,9 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
         };
 
         if file_type.is_dir() {
+            if excluded(&child_rel, true) {
+                continue;
+            }
             dirs.push(TreeNode {
                 id: child_rel.clone(),
                 name,
@@ -115,7 +126,7 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
                 modified: modified_millis(entry.metadata().ok()),
             });
         } else if file_type.is_file() {
-            if !is_allowed_file(&name) {
+            if !is_allowed_file(&name) || excluded(&child_rel, false) {
                 continue;
             }
             files.push(TreeNode {
@@ -136,7 +147,7 @@ pub fn list_children(vault: &Path, rel: &str) -> AppResult<Vec<TreeNode>> {
     Ok(dirs)
 }
 
-fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
+fn walk_dir(dir: &Path, rel_prefix: &str, rules: Option<&SyncRules>) -> AppResult<Vec<TreeNode>> {
     let mut dirs: Vec<TreeNode> = Vec::new();
     let mut files: Vec<TreeNode> = Vec::new();
 
@@ -168,7 +179,12 @@ fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
         };
 
         if file_type.is_dir() {
-            let children = walk_dir(&entry.path(), &rel)?;
+            // The vault's sync rules (#401): an excluded folder is hidden like a
+            // dot folder. Top-down, so the folder's own verdict is the whole one.
+            if rules.is_some_and(|r| r.excludes_entry(&rel, true)) {
+                continue;
+            }
+            let children = walk_dir(&entry.path(), &rel, rules)?;
             dirs.push(TreeNode {
                 id: rel.clone(),
                 name,
@@ -181,7 +197,7 @@ fn walk_dir(dir: &Path, rel_prefix: &str) -> AppResult<Vec<TreeNode>> {
         } else if file_type.is_file() {
             // Only surface allowed file types (notes/images/PDFs); skip code,
             // lockfiles, binaries, etc. so imports can't flood the vault.
-            if !is_allowed_file(&name) {
+            if !is_allowed_file(&name) || rules.is_some_and(|r| r.excludes_entry(&rel, false)) {
                 continue;
             }
             files.push(TreeNode {

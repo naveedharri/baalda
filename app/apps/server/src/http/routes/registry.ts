@@ -8,6 +8,8 @@ import { orgRole, vaultOrg } from "../../permissions/lookup.js";
 import {
   canCreateIn,
   canDeleteItem,
+  canRenameItem,
+  RENAME_NOT_CREATOR_MESSAGE,
   canEditDoc,
   canEditFolder,
   canWriteBlob,
@@ -280,41 +282,35 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       [id, organizationId, name, requestEncryption, session.userId],
     );
 
-    // Shared-with-team by default: a brand-new vault gets an org-wide `edit`
-    // grant, so anyone invited can read and write its notes the moment they
-    // join.
+    // Only what's shared by default (decided 2026-11-23): a brand-new vault is
+    // SEALED for the team (an org `denied` row: nobody, owners and admins
+    // included, reads anything until something is shared with them or their
+    // group), and people who join later start there too (`join_default`
+    // private). The person creating it gets Can edit everything as THEIR OWN
+    // level (a per-user vault `edit` row, "person wins either way"): without
+    // it they could not read or add a note in their own vault, and turning on
+    // sync for a folder of notes would fail to upload them. It is an ordinary
+    // personal setting, so it shows on their profile and can be lowered.
     //
-    // This replaces an earlier private-by-default posture. That one was right
-    // about solo vaults and wrong about what vaults are FOR: you invited
-    // someone, and they landed on an empty sidebar with no way to ask for
-    // access. Owners can still lock a vault down — Access panel → Private
-    // (`setVaultMode` in AccessPanel.tsx) sends `PUT /api/orgs/:orgId/team-access`,
-    // which drops this row AND every per-folder/per-file org grant with it.
+    // This reverses the 2026-07-30 shared-by-default posture, for NEW vaults
+    // only: existing vaults keep whatever they have.
     //
-    // Only on the first collection. The grant is keyed on the ORG (one org can
-    // own several collections and the grant covers all of them), so re-running
-    // it later would resurrect a grant an owner had deliberately revoked —
-    // silently re-opening a vault they had set to Private. A default is only a
-    // default at creation time; after that the owner's choice is the truth.
+    // Only on the first collection. These rows are keyed on the ORG (one org
+    // can own several collections), so re-running them later would overwrite
+    // what an owner chose since. A default is only a default at creation time.
     if (isFirstVault) {
       await pool.query(
         `INSERT INTO shares
            (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by)
-         VALUES ($1, $2, 'vault', $2, 'org', $2, 'edit', $3)
+         VALUES ($1, $2, 'vault', $2, 'org', $2, 'denied', $4),
+                ($3, $2, 'vault', $2, 'user', $4, 'edit', $4)
          ON CONFLICT (resource_type, resource_id, principal_type, principal_id) DO NOTHING`,
-        [randomUUID(), organizationId, session.userId],
+        [randomUUID(), organizationId, randomUUID(), session.userId],
       );
-      // …and for the people invited LATER, too. The future-member default
-      // (migration 032) starts `private`, which hid every note that existed
-      // before someone joined: a vault that read as shared showed a new
-      // teammate an empty sidebar. `open` is what migration 033 maps an
-      // org-wide `edit` vault grant to, so the two halves now agree. Same
-      // first-collection rule as the grant: after creation the owner's
-      // choice (Access → Everyone) is the truth.
       await pool.query(
         `INSERT INTO organization_access_settings (organization_id, join_default)
-         VALUES ($1, 'open')
-         ON CONFLICT (organization_id) DO UPDATE SET join_default = 'open', updated_at = now()`,
+         VALUES ($1, 'private')
+         ON CONFLICT (organization_id) DO UPDATE SET join_default = 'private', updated_at = now()`,
         [organizationId],
       );
     }
@@ -408,17 +404,27 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const session = await getSession(c);
     if (!session) return c.json({ error: "Authentication required" }, 401);
     const vaultId = c.req.param("vaultId");
-    const userId = c.req.query("userId");
-    if (!userId) return c.json({ error: "invalid_request", message: "userId is required" }, 400);
+    const userId = c.req.query("userId") ?? "";
+    // `groupId` instead of `userId`: a group's own board (what its rows give).
+    const groupId = c.req.query("groupId") ?? "";
+    if (!userId && !groupId) {
+      return c.json({ error: "invalid_request", message: "userId or groupId is required" }, 400);
+    }
     const org = await vaultOrg(vaultId);
     if (!org) return c.json({ error: "Unknown vault" }, 404);
     const role = await orgRole(org, session.userId);
     if (role !== "owner" && role !== "admin") {
       return c.json({ error: "Only a vault owner or admin can manage access" }, 403);
     }
-    const targetRole = await orgRole(org, userId);
-    if (!targetRole) {
-      return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+    let targetRole: string | null = null;
+    if (groupId) {
+      const g = await pool.query("SELECT 1 FROM access_groups WHERE id = $1 AND organization_id = $2", [groupId, org]);
+      if (!g.rowCount) return c.json({ error: "group_not_found", message: "That group does not exist" }, 404);
+    } else {
+      targetRole = await orgRole(org, userId);
+      if (!targetRole) {
+        return c.json({ error: "not_member", message: "That person is not a member of this vault" }, 404);
+      }
     }
     const [index, tree] = await Promise.all([loadAccessIndex(pool, org), loadAccessTreeRows(vaultId)]);
     const items = {
@@ -433,6 +439,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       vaultId,
       userId,
       role: targetRole,
+      ...(groupId ? { groupId } : {}),
       items,
     });
     const modes = encodeBoardModes(result, items);
@@ -765,6 +772,18 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json({ error: "You cannot modify this folder" }, 403);
     }
+    // Creator-only, like delete: a plain member renames/moves only a folder
+    // they made with nothing of anyone else's inside.
+    {
+      const org = await vaultOrg(row.vault_id);
+      const gate = org
+        ? await canRenameItem(pool, { orgId: org, userId: session.userId, kind: "folder", id })
+        : ({ ok: false, code: "rename_not_creator" } as const);
+      if (!gate.ok) {
+        if (gate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+        return c.json({ error: RENAME_NOT_CREATOR_MESSAGE, code: gate.code }, 403);
+      }
+    }
     const newParentId = body.parentId === undefined ? undefined : (body.parentId ?? null);
     const moveInput = {
       path: typeof body.path === "string" ? body.path : undefined,
@@ -774,7 +793,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Resolve where the folder will land BEFORE gating: a `path`-only move to
     // another directory (or to the root) is a re-parent whether or not the
     // caller said `parentId`, and both gates below must see the real target.
-    const current = (await findFolder(pool, id))!;
+    // Deleted while the gates above ran (a teammate's delete racing this move):
+    // the same answer as a folder that was already gone, never a 500.
+    const current = await findFolder(pool, id);
+    if (!current) return c.json({ error: "Unknown folder" }, 404);
     let plan;
     try {
       plan = await planFolderMove(pool, current, moveInput);
@@ -796,6 +818,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Moving a folder OUT to the root is a root creation by another name.
     if (plan.parentId === null && current.parent_id !== null && (await isRootFrozen(row.vault_id))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
+    }
+    // ...so it needs the same right as creating at the root (files already
+    // judge their destination with `canCreateIn`). Without it a member with
+    // edit on one folder could move a folder out to the root, where everyone
+    // with a whole-vault level reads it, and then not move it back (2026-11-28).
+    if (plan.parentId === null && current.parent_id !== null && !(await canCreateIn(session.userId, row.vault_id, null))) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      return c.json({ error: "You cannot move this folder to the top of the vault", code: "no_write_access" }, 403);
     }
 
     // Color is a vault-wide fact about the folder, so it rides the same PATCH
@@ -1085,6 +1115,20 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       return c.json({ error: "You cannot modify this note" }, 403);
     }
     const folderId = body.folderId === undefined ? undefined : (body.folderId ?? null);
+    // Creator-only rename/move, like delete (a retitle alone is not a move).
+    if (
+      (typeof body.relPath === "string" && body.relPath !== row.rel_path) ||
+      folderId !== undefined
+    ) {
+      const org = await vaultOrg(row.vault_id);
+      const gate = org
+        ? await canRenameItem(pool, { orgId: org, userId: session.userId, kind: "note", id })
+        : ({ ok: false, code: "rename_not_creator" } as const);
+      if (!gate.ok) {
+        if (gate.code === "account_read_only") return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+        return c.json({ error: RENAME_NOT_CREATOR_MESSAGE, code: gate.code }, 403);
+      }
+    }
     const moveInput = {
       relPath: typeof body.relPath === "string" ? body.relPath : undefined,
       title: body.title,
@@ -1121,7 +1165,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Resolve the destination from the PATH first: a `relPath`-only move to
     // another folder (or out to the root) is a re-parent whether or not the
     // client also said `folderId`, and both gates below must judge the real one.
-    const note = (await findNote(pool, id))!;
+    // Deleted while the gates above ran (a teammate's delete racing this move):
+    // the same answer as a note that was already gone, never a 500.
+    const note = await findNote(pool, id);
+    if (!note) return c.json({ error: "Unknown note" }, 404);
     let plan;
     try {
       plan = await planNoteMove(pool, note, moveInput);
@@ -1145,6 +1192,14 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // unless it already lives there, which is a rename, not a move.
     if (plan.folderId === null && row.folder_id !== null && (await isRootFrozen(row.vault_id))) {
       return c.json(ROOT_FROZEN_ERROR, 403);
+    }
+    // ...so it needs the same right as creating at the root, like a file move.
+    // Without it a member with edit on a group's folder could move a note out
+    // to the root, where everyone with a whole-vault level reads it, and then
+    // not move it back (2026-11-28 five-app test).
+    if (plan.folderId === null && row.folder_id !== null && !(await canCreateIn(session.userId, row.vault_id, null))) {
+      if (await refusedForBilling(await vaultOrg(row.vault_id))) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      return c.json({ error: "You cannot move this note to the top of the vault", code: "no_write_access" }, 403);
     }
 
     const color = normalizeColor(body.color);
@@ -1188,7 +1243,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     const noteOrg = await vaultOrg(row.vault_id);
     if (!(await canEditDoc(session.userId, id))) {
       if (await refusedForBilling(noteOrg)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
-      return c.json({ error: "You cannot delete this note" }, 403);
+      return c.json({ error: "You cannot delete this note", code: "no_edit_permission" }, 403);
     }
     const noteGate = noteOrg
       ? await canDeleteItem(pool, { orgId: noteOrg, userId: session.userId, kind: "note", id })
@@ -1255,6 +1310,7 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
       if (out.code === "transient_file") return c.json({ error: out.message, code: out.code }, 400);
       if (out.code === "root_frozen") return c.json(ROOT_FROZEN_ERROR, 403);
       if (out.code === "not_readable") return c.json({ error: out.message, code: out.code }, 409);
+      if (out.code === "rename_not_creator") return c.json({ error: out.message, code: out.code }, 403);
       if (await refusedForBilling(org)) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
       return c.json(NO_WRITE_ACCESS_ERROR("file"), 403);
     }

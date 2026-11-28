@@ -210,9 +210,17 @@ describe("billing lapse: remaining content writes answer 402, management stays o
     expect(rows[0].deleted_at).not.toBeNull();
   });
 
-  it("PUT team-access is management and still answers 200", async () => {
+  it("access management still answers 200 while lapsed", async () => {
     const f = await fixture({ status: "canceled", periodEnd: PAST });
-    const res = await call(f.owner, "PUT", `/api/orgs/${f.org}/team-access`, { mode: "readonly" });
+    const { rows } = await pool.query<{ userId: string }>(
+      `SELECT "userId" FROM member WHERE "organizationId" = $1 AND role = 'member' LIMIT 1`,
+      [f.org],
+    );
+    const res = await call(f.owner, "POST", `/api/orgs/${f.org}/access/bulk`, {
+      mode: "readonly",
+      audience: { type: "users", userIds: [rows[0]!.userId] },
+      resources: [{ resourceType: "vault", resourceId: f.org }],
+    });
     expect(res.status).toBe(200);
   });
 

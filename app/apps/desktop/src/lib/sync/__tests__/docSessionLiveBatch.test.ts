@@ -33,6 +33,15 @@ const COLLECTION = "collection-1";
 
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
+    // Sync rules (#401): these fixtures have none.
+    isParked: () => false,
+    filterBlobListing: <T,>(b: T[]) => b,
+    isFrozenPath: () => false,
+    isExcludedPath: () => false,
+    frozenFilePaths: () => [] as string[],
+    setSyncRules: () => {},
+    syncRules: () => ({ source: "", types: { code: false, extra: false }, isEmpty: true, sameAs: () => true }),
+    parkedCount: () => ({ notes: 0, files: 0 }),
     vaultId: "collection-1" as string | null,
     notes: [] as Array<{ docId: string; relPath: string }>,
     pushedSet: new Set<string>(),
@@ -262,6 +271,8 @@ const connects = vi.hoisted(() => ({
   order: [] as string[],
   readOnly: new Set<string>(),
   serverContent: new Map<string, string>(),
+  /** Docs whose push the server never acknowledges (a transient failure). */
+  flushFail: new Set<string>(),
 }));
 vi.mock("../syncManager", () => ({
   DocSync: class {
@@ -285,7 +296,7 @@ vi.mock("../syncManager", () => ({
       this.isSynced = true;
     }
     async whenFlushed() {
-      return true;
+      return !connects.flushFail.has(this.docId);
     }
     destroy() {}
     refreshAccess() {}
@@ -376,6 +387,7 @@ beforeEach(() => {
   connects.order = [];
   connects.readOnly = new Set();
   connects.serverContent = new Map();
+  connects.flushFail = new Set();
 });
 
 describe("revoked embeds (#408): an attachments pass follows a revocation removal", () => {
@@ -647,6 +659,55 @@ describe("a live import — the local-change drain", () => {
         .sort(),
     );
     expect(connects.order).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it("holds edits made while the channel is down and sends them when it is back", async () => {
+    // A file changed while offline used to fail its push once and never be
+    // tried again: it reached nobody until the next launch.
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await liveVault(sm);
+    engineHooks.opts?.onStatus?.("error"); // the connection dropped
+    await flush();
+    await externalEdits(sm, true);
+    await settleRetries();
+    expect(apiHooks.pushes).toEqual([]);
+    expect(connects.order).toEqual([]);
+
+    engineHooks.opts?.onStatus?.("synced");
+    await settleRetries();
+    expect(apiHooks.pushes).toHaveLength(1);
+    expect(apiHooks.pushes[0].map((i) => i.docId).sort()).toEqual(
+      notes(30, "edit")
+        .map((n) => n.docId)
+        .sort(),
+    );
+    vi.useRealTimers();
+  });
+
+  it("retries a per-note push that failed, at most five more times", async () => {
+    // Below the batch threshold each note gets its own socket. A transient
+    // failure there used to be logged and dropped.
+    vi.useFakeTimers();
+    const sm = new SyncManager();
+    await liveVault(sm);
+    const edited = notes(2, "few");
+    fakeRegistry.notes = [...fakeRegistry.notes, ...edited];
+    for (const n of edited) {
+      fakeRegistry.pushedSet.add(n.docId);
+      storeHooks.withContent.add(n.docId);
+      storeHooks.ingestChanges.add(n.docId);
+    }
+    connects.flushFail.add("few0");
+    sm.handleLocalFilesChanged(edited.map((n) => ({ path: n.relPath, kind: "modified" as const })));
+    for (let i = 0; i < 40; i++) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flush();
+    }
+    expect(apiHooks.pushes).toEqual([]);
+    expect(connects.order.filter((d) => d === "few0")).toHaveLength(6);
+    expect(connects.order.filter((d) => d === "few1")).toHaveLength(1);
     vi.useRealTimers();
   });
 

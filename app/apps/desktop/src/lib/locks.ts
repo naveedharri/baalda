@@ -77,6 +77,16 @@ export function hasBillingLapsedLock(locks: readonly Share[]): boolean {
   return locks.some((l) => shareResourceType(l) === "vault" && l.reason === "billing_lapsed");
 }
 
+/**
+ * Whether Unlock can remove this row. A group's Can view is reported as the
+ * caller's own `readonly` row (`reason: "group_view"`, id `group-view:<id>`) so
+ * the item shows padlocked, but it is the group's grant, not a lock: there is no
+ * share row with that id, and the way to change it is the group's access.
+ */
+export function isRemovableLock(lock: Share): boolean {
+  return lock.reason !== "group_view";
+}
+
 /** True when the overlay carries the whole-vault Read-only posture. */
 export function hasVaultLock(locks: readonly Share[]): boolean {
   return locks.some((l) => shareResourceType(l) === "vault");
@@ -119,17 +129,27 @@ export function lockScopesByPath(
   locks: Share[],
   currentUserId: string | undefined,
   lifts: readonly Share[] = [],
+  /**
+   * Resolve ids through this id → path map instead of the tree. The sidebar
+   * tree is lazy, so a check made for paths nobody expanded (the text pass,
+   * closed-app edits) passes the registry's full map (`idToPathIndex`).
+   */
+  index?: ReadonlyMap<string, string>,
 ): LockScopeMap {
   const map: LockScopeMap = new Map<string, LockScope>();
-  if (!tree || locks.length === 0) return map;
+  if ((!tree && !index) || locks.length === 0) return map;
   if (hasVaultLock(locks)) {
-    const seed = (n: TreeNode) => {
-      map.set(n.path, "vault");
-      n.children?.forEach(seed);
-    };
-    tree.children?.forEach(seed);
+    if (index) {
+      for (const p of index.values()) map.set(p, "vault");
+    } else if (tree) {
+      const seed = (n: TreeNode) => {
+        map.set(n.path, "vault");
+        n.children?.forEach(seed);
+      };
+      tree.children?.forEach(seed);
+    }
   }
-  const idToPath = resourceIdsByPath(tree);
+  const idToPath = index ?? resourceIdsByPath(tree);
   // Before the item rows, so an explicit `locked` row inside a lifted folder
   // still lands and still wins.
   const personalLifts = new Set<string>();

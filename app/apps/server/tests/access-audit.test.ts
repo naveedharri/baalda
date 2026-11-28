@@ -63,11 +63,16 @@ it("logs bulk changes and join defaults atomically, ignores heartbeat updates an
   await seedVault(org.id);
   await pool.query("DELETE FROM access_audit");
   await applyBulkAccess({ organizationId: org.id, actorUserId: owner.userId,
-    resources: [{ resourceType: "vault", resourceId: org.id }], audience: { type: "org" }, mode: "private" });
-  await setJoinDefault(org.id, owner.userId, "readonly");
+    resources: [{ resourceType: "vault", resourceId: org.id }], audience: { type: "users", userIds: [owner.userId] }, mode: "open" });
+  await pool.query(
+    `INSERT INTO organization_access_settings (organization_id, join_default) VALUES ($1, 'open')
+     ON CONFLICT (organization_id) DO UPDATE SET join_default = 'open'`,
+    [org.id],
+  );
+  await setJoinDefault(org.id, owner.userId, "private");
   const before = await listAccessAudit(org.id, owner.userId);
   expect(before.events.some(e => e.entityType === "shares" && e.actorUserId === owner.userId)).toBe(true);
-  expect(before.events.some(e => e.after?.joinDefault === "readonly" && e.actorUserId === owner.userId)).toBe(true);
+  expect(before.events.some(e => e.after?.joinDefault === "private" && e.actorUserId === owner.userId)).toBe(true);
   await expect(withAuditActor(owner.userId, async client => {
     await client.query("DELETE FROM shares WHERE org_id = $1", [org.id]);
     throw new Error("rollback");
@@ -79,19 +84,18 @@ it("logs bulk changes and join defaults atomically, ignores heartbeat updates an
   expect((await listAccessAudit(org.id, owner.userId)).events[0].actorUserId).toBeNull();
 });
 
-it("attributes Better Auth removal to the caller, not the removed user", async () => {
+it("Better Auth's own remove-member stays refused and leaves no membership event", async () => {
   const owner = await signUp("native-owner@audit.test");
   const target = await signUp("native-target@audit.test");
   const org = await createOrg(owner, "Native", "audit-native");
   const memberId = await seedMember(org.id, target.userId, "member");
+  await pool.query("DELETE FROM access_audit");
   const response = await app.fetch(new Request("http://local/api/auth/organization/remove-member", {
     method: "POST", headers: authHeaders(owner),
     body: JSON.stringify({ organizationId: org.id, memberIdOrEmail: memberId }),
   }));
-  expect(response.status).toBe(200);
-  const history = await listAccessAudit(org.id, owner.userId);
-  expect(history.events.find(e => e.entityId === memberId && e.action === "delete"))
-    .toMatchObject({ actorUserId: owner.userId, before: { userId: target.userId } });
+  expect(response.status).toBe(403);
+  expect((await listAccessAudit(org.id, owner.userId)).events.filter(e => e.entityId === memberId)).toEqual([]);
 });
 
 it("Better Auth's own role endpoint stays refused and leaves no unattributed role event", async () => {

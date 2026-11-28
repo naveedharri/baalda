@@ -333,12 +333,15 @@ export const removeRecentVault = (path: string) =>
 export const deleteVault = (path: string) =>
   invoke<void>("delete_vault", { path });
 /**
- * Membership ended: PERMANENTLY delete a vault folder stamped with
- * `organizationId` (no Trash, no recovery copy). Rust refuses links, roots,
- * the home and vaults folders, and any folder whose stamp names another vault.
+ * Membership ended: PERMANENTLY delete what a vault folder stamped with
+ * `organizationId` registered or would sync (no Trash, no recovery copy), and
+ * keep only files it never registered that could not sync — a local
+ * checkout's own files, `.git`, unsynced types (#401). Resolves how many
+ * entries were kept; the folder itself goes when that is 0. Rust refuses links, roots, the home and vaults folders, and
+ * any folder whose stamp names another vault.
  */
 export const deleteDepartedVault = (path: string, organizationId: string) =>
-  invoke<void>("delete_departed_vault", { path, organizationId });
+  invoke<number>("delete_departed_vault", { path, organizationId });
 /**
  * Reset local copy (#228): PERMANENTLY delete the open vault's folder on this
  * device (never the Trash) after stopping its watcher. Rust refuses anything
@@ -463,6 +466,10 @@ export const writeTrashCopy = (
  */
 export const rebindNoteId = (path: string, docId: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("rebind_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
+/** {@link rebindNoteId} for the fork heal: a row holding `docId` under another
+ *  spelling of the same path (an older build's case twin) is dropped first. */
+export const healNoteId = (path: string, docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("heal_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
 /** Atomic write + re-index. `docId` (the bridge's egest) also records the
  *  written bytes as that doc's disk base in the same Rust call (#200). */
 /** What `write_note` did. `stale` = the compare-and-swap refused: the file no
@@ -525,8 +532,28 @@ export const createFolder = (parent: string, name: string, expectedEpoch?: Vault
 // loop or a native dialog. A rename/delete that lands after a vault switch would
 // otherwise move or destroy the same relative path in the vault the user just
 // opened.
-export const renamePath = (from: string, to: string, expectedEpoch?: VaultEpoch) =>
-  invoke<string>("rename_path", { from, to, expectedEpoch: expectedEpoch ?? null });
+export const renamePath = (
+  from: string,
+  to: string,
+  expectedEpoch?: VaultEpoch,
+  opts?: { allowExcludedTarget?: boolean; deferLinks?: boolean },
+) =>
+  invoke<string>("rename_path", {
+    from,
+    to,
+    expectedEpoch: expectedEpoch ?? null,
+    // Only the sync layer sets it: following a teammate's move INTO a folder
+    // the vault's sync rules hide (#401). The UI never may.
+    allowExcludedTarget: opts?.allowExcludedTarget ?? null,
+    // A run of many renames (following a teammate's folder move) skips the
+    // per-rename whole-vault link pass and calls `flushDeferredLinks` once at
+    // its end; Rust records what it owes, so a run that never ends is caught up
+    // by the next link pass or the next open.
+    deferLinks: opts?.deferLinks ?? null,
+  });
+/** The single link pass a run of `renamePath(…, { deferLinks: true })` owes. */
+export const flushDeferredLinks = (expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("flush_deferred_links", { expectedEpoch: expectedEpoch ?? null });
 /** Idempotent folder create — safe to call on every reconcile. Resolves true
  *  when THIS call created the directory (the watcher will echo it), false when
  *  it already existed — including under another spelling on a case-insensitive
@@ -562,11 +589,21 @@ export const deleteFile = (path: string, expectedEpoch?: VaultEpoch) =>
   invoke<void>("delete_file", { path, expectedEpoch: expectedEpoch ?? null });
 /** Bounded, file-only inbound cleanup; docId also clears revoked CRDT state. */
 export const deleteFilesBatch = (
-  items: Array<{ path: string; docId: string | null }>,
+  items: Array<{
+    path: string;
+    docId: string | null;
+    /** Remove only while the file still hashes to this doc's disk base; a
+     *  changed file stays and answers `CHANGED_ON_DISK` (`sync/registry.ts`). */
+    ifAtBaseOf?: string | null;
+  }>,
   expectedEpoch?: VaultEpoch,
+  /** Only for a confirmed revocation of rule-hidden team files
+   *  (`registry.revokeParked`): Rust otherwise refuses an excluded path. */
+  opts?: { allowExcluded?: boolean },
 ) => invoke<Array<{ path: string; error: string | null }>>("delete_files_batch", {
   items,
   expectedEpoch: expectedEpoch ?? null,
+  allowExcluded: opts?.allowExcluded ?? null,
 });
 
 /**
@@ -575,8 +612,17 @@ export const deleteFilesBatch = (
  * it was already gone, or when anything still lives inside, in which case the
  * folder stays, deliberately.
  */
-export const deleteFolderIfEmpty = (path: string, expectedEpoch?: VaultEpoch) =>
-  invoke<boolean>("delete_folder_if_empty", { path, expectedEpoch: expectedEpoch ?? null });
+export const deleteFolderIfEmpty = (
+  path: string,
+  expectedEpoch?: VaultEpoch,
+  /** Only for folders emptied by `registry.revokeParked`. */
+  opts?: { allowExcluded?: boolean },
+) =>
+  invoke<boolean>("delete_folder_if_empty", {
+    path,
+    expectedEpoch: expectedEpoch ?? null,
+    allowExcluded: opts?.allowExcluded ?? null,
+  });
 
 /** Import external files/folders (absolute host paths) into `dest` (vault-relative). */
 export const importPaths = (dest: string, sources: string[], expectedEpoch?: VaultEpoch) =>
@@ -888,10 +934,15 @@ export interface MaterializeOutcome {
 export const materializeNotesBatch = (
   items: MaterializeItem[],
   expectedEpoch?: VaultEpoch,
+  /** `indexOnly`: index and re-key the files that are there, never create a
+   *  missing one (a folder move outside the app, where a note deleted while
+   *  the move was being paired must stay deleted). */
+  opts?: { indexOnly?: boolean },
 ): Promise<MaterializeOutcome[]> =>
   invoke<MaterializeOutcome[]>("materialize_notes_batch", {
     items,
     expectedEpoch: expectedEpoch ?? null,
+    indexOnly: opts?.indexOnly ?? false,
   });
 
 // ---- Attachment binary I/O (Phase 3 blob store, spec 02 §2) ---------------
@@ -1243,14 +1294,55 @@ export const getVaultEpoch = () => invoke<number>("get_vault_epoch");
  */
 export interface FilesChanged {
   changes: FileChanged[];
+  /** Paths the vault's sync rules hide (#401) that exist right now. Never in
+   *  `changes`; only the delete drain reads them (a move INTO a folder that
+   *  doesn't sync parks the note instead of deleting it). Absent when empty. */
+  ignored?: string[];
+  /** The vault root's `.baaldaignore` changed (#401). Absent when not. */
+  rulesFile?: boolean;
 }
 
 /** Subscribe to whole watcher batches — what the sync layer wants, because a
  *  batch has exactly ONE structural conclusion to draw. */
 export const onFilesChanged = (
-  cb: (changes: FileChanged[]) => void,
+  cb: (changes: FileChanged[], ignored: string[], rulesFile: boolean) => void,
 ): Promise<UnlistenFn> =>
-  listen<FilesChanged>("files-changed", (event) => cb(event.payload?.changes ?? []));
+  listen<FilesChanged>("files-changed", (event) =>
+    cb(event.payload?.changes ?? [], event.payload?.ignored ?? [], event.payload?.rulesFile === true),
+  );
+
+// ---- Sync rules (#401) ------------------------------------------------------
+
+/** The vault's sync rules as Rust holds them (`.context/sync-rules.json`). */
+export interface SyncRulesDoc {
+  version: number;
+  patterns: string;
+  /** Optional file-type groups (`syncRules/match.ts SyncTypes`). */
+  types?: { code?: boolean; extra?: boolean };
+  /** Folder switches (`syncRules/folders.ts SyncFolders`). */
+  folders?: { hidden?: boolean; build?: boolean };
+  revision?: number | null;
+  [extra: string]: unknown;
+}
+/** The rules Rust walks with right now (null = none saved on this device). */
+export const getSyncRules = (expectedEpoch?: VaultEpoch) =>
+  invoke<SyncRulesDoc | null>("get_sync_rules", { expectedEpoch: expectedEpoch ?? null });
+/** Save + install; Rust re-walks the index when the patterns changed. */
+export const setSyncRules = (doc: SyncRulesDoc, expectedEpoch?: VaultEpoch) =>
+  invoke<{ changed: boolean }>("set_sync_rules", { doc, expectedEpoch: expectedEpoch ?? null });
+/** The vault root's `.baaldaignore` text, or null when there is none. */
+export const readRulesFile = (expectedEpoch?: VaultEpoch) =>
+  invoke<string | null>("read_rules_file", { expectedEpoch: expectedEpoch ?? null });
+/** Write the vault root's `.baaldaignore` when it differs; true if it wrote. */
+export const writeRulesFile = (text: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("write_rules_file", { text, expectedEpoch: expectedEpoch ?? null });
+/** sha256 of the files at/under these excluded paths (the delete drain's
+ *  move-into-a-hidden-folder pairing). */
+export const excludedHashes = (paths: string[], expectedEpoch?: VaultEpoch) =>
+  invoke<Array<{ path: string; sha256: string; isNote: boolean }>>("excluded_hashes", {
+    paths,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 /** Per-item adapter over {@link onFilesChanged}, for callers that only care that
  *  *something* changed (the graph, the HTML view, the open note's bridge). */
@@ -1321,13 +1413,13 @@ export interface SkillTargetInfo { target: SkillTarget; root: string; rootExists
 export interface InstalledSkill { name: string; status: "managed" | "edited" | "unmanaged";
   marker: SkillMarker | null; editedFiles: string[] }
 export interface SkillInstallOutcome { status: "installed" | "unchanged" | "conflict" | "edited" | "adopted";
-  backupPath: string | null; detail: string | null }
-export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict"; backupPath: string | null }
+  detail: string | null }
+export interface SkillRemoveOutcome { status: "removed" | "released" | "notFound" | "conflict" }
 export interface SkillBundle { suggestedName: string; files: SkillFilePayload[]; skipped: string[] }
 
 export const skillsTargets = () => invoke<SkillTargetInfo[]>("skills_targets");
 export const skillsScan = (target: SkillTarget) => invoke<InstalledSkill[]>("skills_scan", { target });
-/** `replaceUnmanaged`: back up and replace a folder that carries no marker
+/** `replaceUnmanaged`: replace (no copy kept) a folder that carries no marker
  *  (never another owner's copy, never a symlink). An identical unmanaged
  *  folder is `adopted` (marker written, files untouched) without it. */
 export const skillsInstall = (target: SkillTarget, name: string, marker: SkillMarker,
@@ -1339,7 +1431,6 @@ export const skillsReadFolder = (path: string) => invoke<SkillBundle>("skills_re
 export const skillsReadZip = (path: string) => invoke<SkillBundle>("skills_read_zip", { path });
 export const skillsExportZip = (dest: string, name: string, files: SkillFilePayload[]) =>
   invoke<void>("skills_export_zip", { dest, name, files });
-export const skillsBackupsDir = () => invoke<string>("skills_backups_dir");
 
 /** Read-only inventory of every skill the AI tools on this machine can see. */
 export type SkillLocation = "claudePersonal" | "claudeSynced" | "agentsPersonal" | "codexPersonal"

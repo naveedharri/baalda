@@ -379,8 +379,10 @@ export interface Share {
   resource_type?: "folder" | "file" | "vault";
   resourceId?: string;
   resource_id?: string;
-  principalType?: "user" | "org";
-  principal_type?: "user" | "org";
+  /** `group`: an access group's grant (migration 097), only ever an `edit`
+   *  lift in `GET /vaults/:id/locks`. */
+  principalType?: "user" | "org" | "group";
+  principal_type?: "user" | "org" | "group";
   principalId?: string;
   principal_id?: string;
   permission: "view" | "edit" | "readonly" | "locked" | "denied";
@@ -447,8 +449,66 @@ export interface MemberOverview {
   /** Who invited them, when the server knows (absent on older servers). */
   invitedBy?: MemberRef | null;
   /** Only for owner/admin callers. */
-  access?: { level: MemberAccessLevel };
+  /** `own`: they have their own vault-wide level, so groups change nothing for them. */
+  access?: { level: MemberAccessLevel; own?: boolean; ownLevel?: "edit" | "view" | "none" | null; personal?: boolean };
+  /** The access groups they are in (absent on servers without groups). */
+  groupIds?: string[];
 }
+
+/** A grant an access group holds (owners/admins only). */
+export interface GroupGrant {
+  resourceType: "vault" | "folder" | "file";
+  resourceId: string;
+  /** "denied" = No access for this group below a folder it otherwise reaches (migration 100). */
+  permission: "edit" | "view" | "denied";
+  /** The folder/note/file path; null for the whole vault. */
+  path: string | null;
+}
+
+/** One access group (`GET /api/orgs/:orgId/groups`). */
+export interface AccessGroup {
+  id: string;
+  name: string;
+  color: string | null;
+  /** New members join it automatically. */
+  autoJoin: boolean;
+  createdAt: string;
+  memberIds: string[];
+  /** Pending invitations that join it on acceptance. */
+  invited: { invitationId: string; email: string }[];
+  /** Owners/admins only. */
+  grants: GroupGrant[] | null;
+  /** Owners/admins only: how many skills it gets. */
+  skillCount: number | null;
+}
+
+export interface AccessGroupsList {
+  groups: AccessGroup[];
+  canManage: boolean;
+}
+
+/** One skill on a group's Skills tab. */
+export interface GroupSkill {
+  skillId: string;
+  name: string;
+  description: string;
+  latestVersion: number | null;
+  /** The group's row; null = the group adds nothing for this skill. */
+  level: "required" | "optional" | null;
+}
+
+/** One row of a group's Activity tab, newest first. */
+export type GroupActivityEvent =
+  | { kind: "created" | "updated" | "deleted"; at: string; by: { userId: string; name: string | null } | null; name: string | null }
+  | { kind: "memberAdded" | "memberRemoved"; at: string; by: { userId: string; name: string | null } | null; person: MemberRef }
+  | {
+      kind: "accessGranted" | "accessRemoved";
+      at: string;
+      by: { userId: string; name: string | null } | null;
+      permission: "edit" | "view" | null;
+      resourceType: "vault" | "folder" | "file" | null;
+      path: string | null;
+    };
 
 /** A person named inside another record (an inviter, a grantor). */
 export interface MemberRef {
@@ -480,12 +540,30 @@ export interface InvitationOverview {
   createdAt: string | null;
   expiresAt: string | null;
   access: TeamAccessMode | null;
+  /** Groups the invitee joins on acceptance (absent on servers without groups). */
+  groupIds?: string[];
 }
 
 export interface MembersOverview {
   members: MemberOverview[];
   invitations: InvitationOverview[];
   canManage: boolean;
+  /** The level new invites start on (the vault's old team-wide level; owner/admin only). */
+  newMemberLevel?: "edit" | "view" | null;
+}
+
+/** Someone a group change would not reach: a setting just for them decides there. */
+export interface HeldPerson {
+  userId: string;
+  resourceType: "vault" | "folder" | "file";
+  resourceId: string;
+  current: "edit" | "view" | "none";
+  groupGives: "edit" | "view" | "none";
+  /** "here": their own setting sits on this place; "above": it comes from higher up. */
+  ownAt: "here" | "above";
+  ownPlace: { resourceType: string; resourceId: string };
+  /** The place's name; null for the whole vault (absent on older servers). */
+  placeName?: string | null;
 }
 
 export interface InviteManyInput {
@@ -493,6 +571,12 @@ export interface InviteManyInput {
   role: "member" | "admin";
   /** null = whatever the vault's New members setting says. */
   access: TeamAccessMode | null;
+  /** Access groups the invitee joins on acceptance. Mutually exclusive with
+   *  `access` (a personal level ignores groups); the server refuses both. */
+  groupIds?: string[];
+  /** "Only what's shared" picked on purpose: without it, a server from
+   *  2026-11-27 on gives a choiceless invite the vault's old team level. */
+  onlyShared?: boolean;
   /** Seamless keys B1: the vault key wrapped per invitee under a one-time
    *  secret (sent with `X-Baalda-VK`). Omitted by a device without the key. */
   vaultKeys?: {
@@ -546,7 +630,10 @@ export interface BulkAccessResource {
 
 export type BulkAccessAudience =
   | { type: "org" }
-  | { type: "users"; userIds: string[] };
+  | { type: "users"; userIds: string[] }
+  /** One access group: open/readonly grant Can edit/Can view to its members,
+   *  private removes what the group gave there. */
+  | { type: "group"; groupId: string };
 
 export interface BulkAccessInput {
   resources: BulkAccessResource[];
@@ -2569,8 +2656,38 @@ export class ApiClient {
 
   /** The active vault's shareable join code (owner/admin; lazily created). */
   async getJoinCode(): Promise<string> {
-    const { data } = await this.request<{ code: string }>("GET", "/api/orgs/join-code");
-    return data.code;
+    return (await this.getJoinCodeInfo()).code;
+  }
+
+  /** The join code plus the access groups it adds people to. `groupIds` is
+   *  null on a server that cannot set them (it answers the code alone). */
+  async getJoinCodeInfo(): Promise<{ code: string; groupIds: string[] | null; level?: "edit" | "view" | null }> {
+    const { data } = await this.request<{ code: string; groupIds?: string[]; level?: "edit" | "view" | null }>("GET", "/api/orgs/join-code");
+    return {
+      code: data.code,
+      groupIds: Array.isArray(data.groupIds) ? data.groupIds : null,
+      ...(data.level !== undefined ? { level: data.level } : {}),
+    };
+  }
+
+  /** The level people who join by the code start on (null = only what's shared or their groups). */
+  async setJoinCodeLevel(orgId: string, level: "edit" | "view" | null): Promise<"edit" | "view" | null> {
+    const { data } = await this.request<{ level: "edit" | "view" | null }>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/join-code/level`,
+      { body: { level } },
+    );
+    return data.level;
+  }
+
+  /** Choose the access groups the vault's join code adds people to (owner/admin). */
+  async setJoinCodeGroups(orgId: string, groupIds: string[]): Promise<string[]> {
+    const { data } = await this.request<{ groupIds: string[] }>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/join-code/groups`,
+      { body: { groupIds } },
+    );
+    return data.groupIds;
   }
 
   /** Join a vault by its shared code (any signed-in user). */
@@ -2725,11 +2842,13 @@ export class ApiClient {
     organizationId: string,
     userId: string,
     role: "member" | "admin",
+    /** On a demotion: "groups" removes their own settings so their groups decide. */
+    ownSettings?: "keep" | "groups",
   ): Promise<void> {
     await this.request<{ updated: boolean }>(
       "PATCH",
       `/api/orgs/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`,
-      { body: { role } },
+      { body: ownSettings ? { role, ownSettings } : { role } },
     );
   }
 
@@ -3099,10 +3218,14 @@ export class ApiClient {
    * `m` mixed. Null when the server predates the route (404/405).
    */
   async getAccessBoard(vaultId: string, userId: string): Promise<AccessBoardResponse | null> {
+    // `group:<id>` asks for an access group's board (what its own rows give).
+    const query = userId.startsWith("group:")
+      ? `groupId=${encodeURIComponent(userId.slice("group:".length))}`
+      : `userId=${encodeURIComponent(userId)}`;
     try {
       const { data } = await this.request<AccessBoardResponse>(
         "GET",
-        `/api/vaults/${encodeURIComponent(vaultId)}/access-board?userId=${encodeURIComponent(userId)}`,
+        `/api/vaults/${encodeURIComponent(vaultId)}/access-board?${query}`,
       );
       return {
         folders: data.folders ?? [],
@@ -3834,7 +3957,7 @@ export class ApiClient {
   }
 
   /**
-   * Back to the vault default for one member: deletes every per-user share row
+   * Back to groups only for one member: deletes every per-user share row
    * of theirs in the org (vault and items). Owner/admin only; the server kicks
    * affected sockets and refreshes ACLs.
    */
@@ -3902,6 +4025,52 @@ export class ApiClient {
     };
   }
 
+  // ---- Sync rules (#401) --------------------------------------------------
+
+  /** The vault's sync rules (any member). A server without the feature 404s. */
+  async getSyncRules(orgId: string): Promise<VaultSyncRulesResponse> {
+    const { data } = await this.request<VaultSyncRulesResponse>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/sync-rules`,
+    );
+    return normalizeSyncRules(data);
+  }
+
+  /** Replace the vault's sync rules (owner/admin). 409 `stale_sync_rules`
+   *  carries the current state in `current`. */
+  async putSyncRules(
+    orgId: string,
+    patterns: string,
+    baseRevision: number,
+    types?: { code: boolean; extra: boolean },
+    folders?: { hidden: boolean; build: boolean },
+  ): Promise<VaultSyncRulesResponse> {
+    // Each switch group only when one is on: a server without the feature
+    // refuses the key, and an all-off set means the same as none.
+    const rules: Record<string, unknown> = { version: 1, patterns };
+    if (types && (types.code || types.extra)) rules.types = { code: types.code, extra: types.extra };
+    if (folders && (folders.hidden || folders.build)) {
+      rules.folders = { hidden: folders.hidden, build: folders.build };
+    }
+    const { data } = await this.request<VaultSyncRulesResponse>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/sync-rules`,
+      { body: { rules, baseRevision } },
+    );
+    return normalizeSyncRules(data);
+  }
+
+  /** Replace the vault's rules with its `.baaldaignore` text (version 2,
+   *  owner/admin; server feature `baaldaignore`). Same answers as {@link putSyncRules}. */
+  async putSyncRulesFile(orgId: string, text: string, baseRevision: number): Promise<VaultSyncRulesResponse> {
+    const { data } = await this.request<VaultSyncRulesResponse>(
+      "PUT",
+      `/api/orgs/${encodeURIComponent(orgId)}/sync-rules`,
+      { body: { rules: { version: 2, patterns: text }, baseRevision } },
+    );
+    return normalizeSyncRules(data);
+  }
+
   // ---- Skills (docs/SKILLS.md §3.3) --------------------------------------
 
   /** Every vault this user belongs to on this server, with the skills to install. */
@@ -3941,7 +4110,12 @@ export class ApiClient {
   async putSkillAccess(
     orgId: string,
     skillId: string,
-    change: { everyone?: SkillAccessLevel; people?: { userId: string; level: SkillAccessLevel | null }[] },
+    change: {
+      everyone?: SkillAccessLevel;
+      people?: { userId: string; level: SkillAccessLevel | null }[];
+      /** A group's level; `null` removes the group's row. */
+      groups?: { groupId: string; level: "required" | "optional" | null }[];
+    },
   ): Promise<SkillAccessList> {
     return (await this.request<SkillAccessList>("PUT", `${skillPath(orgId, skillId)}/access`, { body: change })).data;
   }
@@ -4046,6 +4220,94 @@ export class ApiClient {
       invitations: data.invitations ?? [],
       canManage: data.canManage === true,
     };
+  }
+
+  // ── Access groups (`access-groups` feature) ────────────────────────────
+
+  async listGroups(orgId: string): Promise<AccessGroupsList> {
+    const { data } = await this.request<AccessGroupsList>("GET", `/api/orgs/${encodeURIComponent(orgId)}/groups`);
+    return { groups: data.groups ?? [], canManage: data.canManage === true };
+  }
+
+  async createGroup(
+    orgId: string,
+    input: { name: string; color?: string | null; autoJoin?: boolean; memberIds?: string[] },
+  ): Promise<{ id: string }> {
+    return (await this.request<{ id: string }>("POST", `/api/orgs/${encodeURIComponent(orgId)}/groups`, { body: input })).data;
+  }
+
+  async updateGroup(
+    orgId: string,
+    groupId: string,
+    change: { name?: string; color?: string | null; autoJoin?: boolean },
+  ): Promise<void> {
+    await this.request("PATCH", `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}`, { body: change });
+  }
+
+  /** Who a proposed group change would not reach (writes nothing). */
+  async groupHeld(
+    orgId: string,
+    groupId: string,
+    input: { access: { resources: BulkAccessResource[]; mode: TeamAccessMode } } | { addUserIds: string[] },
+  ): Promise<HeldPerson[]> {
+    return (await this.request<{ held: HeldPerson[] }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/held`,
+      { body: input },
+    )).data.held;
+  }
+
+  /** "Let the group decide" for chosen people and places. */
+  async groupLetDecide(
+    orgId: string,
+    groupId: string,
+    entries: Array<{ userId: string; resourceType: "vault" | "folder" | "file"; resourceId: string }>,
+  ): Promise<Array<{ userId: string; action: "removed" | "marked" | "skipped"; before: string; after: string }>> {
+    return (await this.request<{ results: Array<{ userId: string; action: "removed" | "marked" | "skipped"; before: string; after: string }> }>(
+      "POST",
+      `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/let-decide`,
+      { body: { entries } },
+    )).data.results;
+  }
+
+  async deleteGroup(orgId: string, groupId: string): Promise<void> {
+    await this.request("DELETE", `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}`);
+  }
+
+  async addGroupMembers(orgId: string, groupId: string, userIds: string[]): Promise<{ added: number }> {
+    return (
+      await this.request<{ added: number }>(
+        "POST",
+        `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/members`,
+        { body: { userIds } },
+      )
+    ).data;
+  }
+
+  async removeGroupMember(orgId: string, groupId: string, userId: string): Promise<{ removed: boolean }> {
+    return (
+      await this.request<{ removed: boolean }>(
+        "DELETE",
+        `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`,
+      )
+    ).data;
+  }
+
+  /** Every live skill and this group's level for it (owners/admins). */
+  async getGroupSkills(orgId: string, groupId: string): Promise<GroupSkill[]> {
+    const { data } = await this.request<{ skills: GroupSkill[] }>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/skills`,
+    );
+    return data.skills ?? [];
+  }
+
+  async getGroupActivity(orgId: string, groupId: string, limit = 50): Promise<GroupActivityEvent[]> {
+    const { data } = await this.request<{ events: GroupActivityEvent[] }>(
+      "GET",
+      `/api/orgs/${encodeURIComponent(orgId)}/groups/${encodeURIComponent(groupId)}/activity?limit=${limit}`,
+    );
+    return data.events ?? [];
   }
 
   /** One member's recent activity in this vault, newest first. */
@@ -4672,6 +4934,38 @@ export function skillErrorCode(e: unknown): string | null {
     : null;
 }
 
+/** `GET|PUT /api/orgs/:orgId/sync-rules` (#401). */
+export interface VaultSyncRulesResponse {
+  rules: {
+    /** 1 = the old Sync tab's shape (or nothing saved), 2 = a `.baaldaignore` text. */
+    version: number;
+    patterns: string;
+    types: { code: boolean; extra: boolean };
+    folders: { hidden: boolean; build: boolean };
+  };
+  /** 0 = never saved. */
+  revision: number;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+function normalizeSyncRules(data: Partial<VaultSyncRulesResponse> | null | undefined): VaultSyncRulesResponse {
+  const patterns = typeof data?.rules?.patterns === "string" ? data.rules.patterns : "";
+  const t = (data?.rules as { types?: Record<string, unknown> } | undefined)?.types ?? {};
+  const f = (data?.rules as { folders?: Record<string, unknown> } | undefined)?.folders ?? {};
+  return {
+    rules: {
+      version: data?.rules?.version === 2 ? 2 : 1,
+      patterns,
+      types: { code: t.code === true, extra: t.extra === true },
+      folders: { hidden: f.hidden === true, build: f.build === true },
+    },
+    revision: typeof data?.revision === "number" ? data.revision : 0,
+    updatedAt: data?.updatedAt ?? null,
+    updatedBy: data?.updatedBy ?? null,
+  };
+}
+
 export function noteDocId(n: RegisteredNote): string {
   return n.docId ?? n.doc_id ?? n.id;
 }
@@ -4709,7 +5003,7 @@ export function vaultRootFrozen(v: Vault): boolean {
 export function sharePrincipalId(s: Share): string {
   return s.principalId ?? s.principal_id ?? "";
 }
-export function sharePrincipalType(s: Share): "user" | "org" {
+export function sharePrincipalType(s: Share): "user" | "org" | "group" {
   return s.principalType ?? s.principal_type ?? "user";
 }
 export function shareResourceType(s: Share): "folder" | "file" | "vault" {

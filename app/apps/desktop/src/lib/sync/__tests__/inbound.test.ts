@@ -269,6 +269,39 @@ describe("planInbound — renames", () => {
     expect(p.trash).toEqual([]);
   });
 
+  it("a chain (mv B C && mv A B) moves the note leaving a path before the one taking it", () => {
+    const p = plan({
+      baseline: new Map([["oa", "A/overview.md"], ["ob", "B/overview.md"]]),
+      local: new Map([["oa", "A/overview.md"], ["ob", "B/overview.md"]]),
+      server: new Map([["oa", "B/overview.md"], ["ob", "C/overview.md"]]),
+    });
+    expect(p.renames).toEqual([
+      { docId: "ob", from: "B/overview.md", to: "C/overview.md" },
+      { docId: "oa", from: "A/overview.md", to: "B/overview.md" },
+    ]);
+    expect(p.rejected).toEqual([]);
+  });
+
+  it("two notes swapping places have no safe order: both stay, refused", () => {
+    const p = plan({
+      baseline: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      local: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      server: new Map([["x", "B/n.md"], ["y", "A/n.md"]]),
+    });
+    expect(p.renames).toEqual([]);
+    expect(p.rejected.map((r) => r.docId).sort()).toEqual(["x", "y"]);
+  });
+
+  it("a destination another note keeps is refused as before", () => {
+    const p = plan({
+      baseline: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      local: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      server: new Map([["x", "B/n.md"], ["y", "B/n.md"]]),
+    });
+    expect(p.renames).toEqual([]);
+    expect(p.rejected.map((r) => r.docId)).toEqual(["x"]);
+  });
+
   it("leaves a note WE moved for the outbound half to push", () => {
     const p = plan({
       baseline: new Map([["d1", "old.md"]]),
@@ -523,20 +556,19 @@ describe("planInbound — circuit breakers", () => {
     return { baseline, local, server };
   }
 
-  it("abandons the whole trash category past the safety limit", () => {
-    // A teammate tidying up deletes a few notes. A bug in this file, a permission
-    // glitch, or a truncated response "deletes" most of the vault — and nothing
-    // inside can tell those apart, so cap the blast radius instead.
+  it("follows a teammate's delete of the whole vault: deletions have no limit", () => {
+    // Every one is an explicit tombstone matched by id, so a truncated listing
+    // cannot produce it. Refused, the notes stayed on this disk for good,
+    // unsyncable (the old 20% cap refused them again on every pass).
     const { baseline, local } = manyDocs(100, true);
     const p = plan({
       baseline,
       local,
       tombstones: new Set([...baseline.keys()]),
     });
-    expect(p.trash).toEqual([]);
-    expect(p.rejected).toHaveLength(100);
-    expect(p.rejected[0].reason).toContain("safety limit");
-    expect(p.rejected[0].reason).toContain("deletions");
+    expect(p.trash).toHaveLength(100);
+    expect(p.trash.every((t) => t.reason === "deleted")).toBe(true);
+    expect(p.rejected).toEqual([]);
   });
 
   it("allows a small delete under the limit", () => {
@@ -623,9 +655,8 @@ describe("planInbound — circuit breakers", () => {
       expect(p.rejected[0].reason).toContain("access removals");
     });
 
-    it("never lifts the DELETION cap, however authoritative the pass", () => {
-      // The revocation cap disbelieves a shrunken listing; the deletion cap
-      // guards work. Only the first has an answer good enough to overrule.
+    it("deletes tombstoned notes on an authoritative pass without an access check", () => {
+      // Deletions have no cap to lift; only revocations owe a second opinion.
       const { baseline, local } = manyDocs(100, true);
       const p = plan({
         baseline,
@@ -633,9 +664,9 @@ describe("planInbound — circuit breakers", () => {
         tombstones: new Set([...baseline.keys()]),
         authoritative: true,
       });
-      expect(p.trash).toEqual([]);
-      expect(p.rejected).toHaveLength(100);
-      expect(p.rejected[0].reason).toContain("deletions");
+      expect(p.trash).toHaveLength(100);
+      expect(p.rejected).toEqual([]);
+      expect(p.needsAccessCheck ?? []).toEqual([]);
     });
 
     it("takes the folders with it", () => {
@@ -747,9 +778,9 @@ describe("planInbound — circuit breakers", () => {
       expect(p.rejected).toHaveLength(100);
     });
 
-    it("named revocations never buy a deletion past its cap", () => {
-      // Same ids, but the server TOMBSTONED them: a different category with a
-      // different cap, and this list exempts nothing there.
+    it("a tombstone outranks a named revocation: the note is deleted, not revoked", () => {
+      // Same ids, but the server TOMBSTONED them: a deletion, which needs no
+      // access check and has no cap.
       const { baseline, local } = manyDocs(100, true);
       const named = new Set(Array.from({ length: 100 }, (_, i) => `d${i}`));
       const p = plan({
@@ -759,9 +790,9 @@ describe("planInbound — circuit breakers", () => {
         authoritative: true,
         authoritativeRevoked: named,
       });
-      expect(p.trash).toEqual([]);
-      expect(p.rejected).toHaveLength(100);
-      expect(p.rejected[0].reason).toContain("deletions");
+      expect(p.trash).toHaveLength(100);
+      expect(p.trash.every((t) => t.reason === "deleted")).toBe(true);
+      expect(p.rejected).toEqual([]);
     });
 
     it("still refuses when the server did not answer about deletions", () => {

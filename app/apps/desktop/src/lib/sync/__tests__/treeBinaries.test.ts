@@ -402,15 +402,23 @@ describe("tree binaries register as `files` rows", () => {
     expect(log.legacyUploads).toEqual([{ relPath: "Team/report.docx", docId: "local-id-0" }]);
   });
 
-  it("registers nothing when the local index has no `files` row yet", async () => {
-    // The extraction worker is seconds behind a drop; the next pass has the id.
+  it("waits, sending nothing, until the local index has the file's id", async () => {
+    // The index is seconds behind a drop (a cloned repo: thousands of files).
+    // Sent without an id the server cannot place the bytes (400
+    // invalid_rel_path), and that used to be remembered as permanent.
+    let ids = new Map<string, string>();
     const { sync, log } = makeVault([{ relPath: "Team/report.docx" }], {
-      localFileIds: async () => new Map(),
+      localFileIds: async () => ids,
     });
     await sync.reconcile();
-
     expect(log.registered).toEqual([]);
-    expect(log.intents[0].docId).toBeUndefined();
+    expect(log.intents).toEqual([]);
+
+    ids = new Map([["Team/report.docx", "local-id-0"]]);
+    await sync.reconcile();
+    expect(log.registered).toEqual([{ relPath: "Team/report.docx", id: "local-id-0" }]);
+    expect(log.intents).toHaveLength(1);
+    expect(log.intents[0].docId).toBe("local-id-0");
   });
 });
 
@@ -716,6 +724,59 @@ describe("extracted text upload", () => {
     sync.handleFilesIndexed(["Team/report.docx"]);
     await fire();
     expect(log.texts).toHaveLength(1);
+  });
+
+  it("sends no text for files this user can only view, and asks the lock view once per batch", async () => {
+    // A view-only member's device got a refused 403 for every file it downloaded.
+    const lockReads: number[] = [];
+    const { sync, log, fire } = makeVault([{ relPath: "View/a.docx" }, { relPath: "Edit/b.docx" }], {
+      readOnlyPaths: async () => {
+        lockReads.push(1);
+        return (p: string) => p.startsWith("View/");
+      },
+    });
+    await sync.reconcile();
+    await fire();
+    expect(log.texts.map((t) => t.blobId)).toEqual(["blob-for-Edit/b.docx"]);
+    expect(lockReads).toHaveLength(1);
+  });
+
+  it("sends as before when the lock view cannot answer", async () => {
+    const { sync, log, fire } = makeVault([{ relPath: "View/a.docx" }], {
+      readOnlyPaths: async () => {
+        throw new Error("offline");
+      },
+    });
+    await sync.reconcile();
+    await fire();
+    expect(log.texts.map((t) => t.blobId)).toEqual(["blob-for-View/a.docx"]);
+  });
+
+  it("a 404 for ONE blob skips that blob only; a missing route stops the session", async () => {
+    // One stale blob id (a file deleted since the listing) used to switch off
+    // file search text for every upload until the app restarted.
+    const gone = (body: unknown) => Object.assign(new Error("404"), { status: 404, body });
+    let routeMissing = false;
+    const sent: string[] = [];
+    const { sync, fire } = makeVault([{ relPath: "A/gone.docx" }, { relPath: "B/kept.docx" }], {
+      uploadText: async (input) => {
+        if (routeMissing) throw gone("404 Not Found");
+        if (input.blobId === "blob-for-A/gone.docx") throw gone({ error: "Blob not found" });
+        sent.push(input.blobId);
+      },
+    });
+    await sync.reconcile();
+    await fire();
+    expect(sent).toEqual(["blob-for-B/kept.docx"]);
+
+    // An old server without the route: plain 404 ⇒ stop asking for this session.
+    routeMissing = true;
+    sync.handleFilesIndexed(["A/gone.docx"]);
+    await fire();
+    routeMissing = false;
+    sync.handleFilesIndexed(["A/gone.docx"]);
+    await fire();
+    expect(sent).toEqual(["blob-for-B/kept.docx"]);
   });
 
   it("skips a file whose extraction has not finished, or produced nothing", async () => {

@@ -248,7 +248,12 @@ fn linked_paths(vault: &Path) -> VaultCheckResult {
         .follow_links(false)
         .min_depth(1)
         .into_iter()
-        .filter_entry(|e| !crate::vault::is_ignored_name(&e.file_name().to_string_lossy()));
+        .filter_entry(|e| {
+            !crate::vault::is_ignored_name(&e.file_name().to_string_lossy())
+                && crate::vault::rel_from_abs(vault, e.path())
+                    .map(|rel| !crate::sync_rules::excludes(vault, &rel, e.file_type().is_dir()))
+                    .unwrap_or(true)
+        });
     for entry in walker.filter_map(|e| e.ok()) {
         if !entry.path_is_symlink() {
             continue;

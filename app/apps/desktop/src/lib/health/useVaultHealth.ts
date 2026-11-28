@@ -486,7 +486,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         const openPath = st.openNote?.path;
         const pinned = openPath ? [st.docIdByPath[openPath]].filter(Boolean) : [];
         const out = await collectCrdtGarbage(
-          { registryDocIds: () => syncManager.registry.allDocIds() },
+          { registryDocIds: () => syncManager.registry.crdtKeepIds() },
           { epoch: st.vault?.epoch ?? undefined, pinned: pinned as string[] },
         );
         refresh();

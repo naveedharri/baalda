@@ -36,6 +36,15 @@ const realTick = () => new Promise<void>((r) => realSetTimeout(r, 1));
 
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
+    // Sync rules (#401): these fixtures have none.
+    isParked: () => false,
+    filterBlobListing: <T,>(b: T[]) => b,
+    isFrozenPath: () => false,
+    isExcludedPath: () => false,
+    frozenFilePaths: () => [] as string[],
+    setSyncRules: () => {},
+    syncRules: () => ({ source: "", types: { code: false, extra: false }, isEmpty: true, sameAs: () => true }),
+    parkedCount: () => ({ notes: 0, files: 0 }),
     vaultId: "collection-1" as string | null,
     pushed: new Set<string>(),
     // Phase A of `enable`: nothing to prime from in these fixtures (the mapping
@@ -50,6 +59,7 @@ const fakeRegistry = vi.hoisted(() => {
     emptyOnDisk: new Set<string>(),
     isNoteEmptyOnDisk: vi.fn(async (relPath: string) => reg.emptyOnDisk.has(relPath)),
     allDocIds: vi.fn((): string[] => []),
+    crdtKeepIds: (): string[] => reg.allDocIds(),
     setProgressSink: vi.fn(),
     setMapListener: vi.fn(),
     setNoteMetaListener: vi.fn(),
@@ -87,7 +97,26 @@ const fakeRegistry = vi.hoisted(() => {
         })),
     ),
     renamePath: vi.fn(async (_from: string, _to: string): Promise<boolean> => true),
+    /** The production entry point the drain calls; delegates to the
+     *  `renamePath` mock so tests keep asserting on it. Refusal shape opt-in
+     *  via `refuseMove`. */
+    refuseMove: null as null | { code: string | null },
+    moveOnServer: vi.fn(async (from: string, to: string) => {
+      const ok = await reg.renamePath(from, to);
+      if (ok) return { ok: true as const };
+      return reg.refuseMove
+        ? { ok: false as const, refused: true, code: reg.refuseMove.code }
+        : { ok: false as const, refused: false, code: null };
+    }),
+    revertRefusedMove: vi.fn(async (_from: string, _to: string) => true),
     recordFailure: vi.fn((_f: unknown) => {}),
+    restoreRefusedDelete: vi.fn(async (_p: string, _d: string, _detail?: string) => true),
+    // ---- #419: paths the registry removed from disk ITSELF ----
+    ownRemovals: new Set<string>(),
+    isOwnRemoval: vi.fn((relPath: string) => reg.ownRemovals.has(relPath)),
+    markOwnRemovals: vi.fn((paths: readonly string[]) => {
+      for (const p of paths) reg.ownRemovals.add(p);
+    }),
     // ---- #221: folders and the closed-app drift report ----
     /** Registered folder ids by path. */
     folders: new Map<string, string>(),
@@ -169,10 +198,19 @@ vi.mock("../../ipc", () => ({
   noteExists: vi.fn(async (path: string) => fakeDisk.files.has(path)),
   vaultRootState: vi.fn(async () => fakeDisk.root),
   listTree: vi.fn(async () => fakeTree()),
-  materializeNotesBatch: vi.fn(async (items: Array<{ relPath: string; docId: string | null }>) => {
-    fakeDisk.materialized.push(items);
-    return items.map((i) => ({ relPath: i.relPath, created: false, rebound: true, error: null }));
-  }),
+  materializeNotesBatch: vi.fn(
+    async (items: Array<{ relPath: string; docId: string | null }>, _epoch?: unknown, opts?: { indexOnly?: boolean }) => {
+      fakeDisk.materialized.push(items);
+      // Like Rust: create-only by default (a missing path is written EMPTY),
+      // `indexOnly` never creates one.
+      return items.map((i) => {
+        const there = fakeDisk.files.has(i.relPath);
+        if (!there && opts?.indexOnly) return { relPath: i.relPath, created: false, rebound: false, error: null };
+        if (!there) fakeDisk.files.set(i.relPath, "");
+        return { relPath: i.relPath, created: !there, rebound: true, error: null };
+      });
+    },
+  ),
   readNote: vi.fn(async (path: string) => fakeDisk.files.get(path) ?? ""),
   getNoteMeta: vi.fn(async (path: string) =>
     fakeDisk.shas.has(path) ? { path, sha256: fakeDisk.shas.get(path) } : null,
@@ -358,7 +396,7 @@ vi.mock("../syncManager", () => ({
 
 import type { SessionInfo } from "../../api";
 import * as ipc from "../../ipc";
-import { REGISTRY_FRAME_PULL_MIN_GAP_MS, SyncManager } from "../docSession";
+import { GONE_FOLDER_SETTLE_MS, REGISTRY_FRAME_PULL_MIN_GAP_MS, SyncManager, goneFolderRetryDelay } from "../docSession";
 import { vaultScopes, type SyncProgress } from "../vaultScope";
 
 function session(): SessionInfo {
@@ -413,6 +451,7 @@ beforeEach(() => {
   fakeRegistry.emptyOnDisk = new Set();
   fakeRegistry.isNoteEmptyOnDisk.mockClear();
   fakeRegistry.materialized = new Set();
+  fakeRegistry.ownRemovals = new Set();
   fakeRegistry.consumeMaterialized.mockClear();
   fakeRegistry.deletePath.mockClear().mockResolvedValue(undefined);
   fakeRegistry.deletePaths.mockClear().mockImplementation(async (paths: readonly string[]) =>
@@ -1337,6 +1376,32 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
   });
 
+  it("a file beside notes held over the cap is not deleted for everyone either", async () => {
+    // A folder deleted in Finder: its notes come back, so its files must stay on
+    // the server too (the binary queue asks `binaryBesideNoteDeletes`).
+    const sm = new SyncManager();
+    const notes = Array.from({ length: 20 }, (_, i) => ({ docId: `m${i}`, relPath: `Docs/sub/N${i}.md` }));
+    fakeRegistry.mappedNotes.mockReturnValue(notes);
+    fakeRegistry.getMapping.mockImplementation((p: string) => {
+      const hit = notes.find((n) => n.relPath === p);
+      return hit ? { vaultId: "collection-1", docId: hit.docId } : null;
+    });
+    for (const n of notes) fakeRegistry.pushed.add(n.docId);
+    await live(sm);
+    const verdict = (p: string) =>
+      (sm as unknown as { binaryBesideNoteDeletes(p: string): string | null }).binaryBesideNoteDeletes(p);
+
+    sm.handleLocalFilesChanged(notes.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    // The note window is open: a file in it waits for that decision.
+    expect(verdict("Docs/names.yml")).toBe("wait");
+    await drain();
+
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(verdict("Docs/names.yml")).toBe("held"); // above the held notes
+    expect(verdict("Docs/sub/x.pdf")).toBe("held"); // beside them
+    expect(verdict("Elsewhere/x.pdf")).toBeNull(); // unrelated: decided as before
+  });
+
   it("holds the WHOLE batch for the user when too many notes vanish at once", async () => {
     // An unmounted volume, a `git checkout`, an iCloud eviction: hundreds of
     // removals in one batch, each individually plausible. The cap is a fifth of
@@ -1500,6 +1565,139 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.pull).toHaveBeenCalled();
   });
 
+  it("moving a note back onto the name a teammate's move took it from is a rename, never a delete", async () => {
+    // A teammate moved the note Old.md → New.md; this device followed (own
+    // move: Old.md the source, New.md the target). The person moves it straight
+    // back. Old.md is theirs again: the pair must be a rename. Skipping it as an
+    // own move sent New.md out as a delete for everyone (2026-11-28).
+    const sm = new SyncManager();
+    mapOne("New.md");
+    await live(sm);
+    const r = fakeRegistry as unknown as { isOwnMove?: (p: string) => boolean; isOwnMoveSource?: (p: string) => boolean };
+    r.isOwnMove = (p) => p === "Old.md" || p === "New.md";
+    r.isOwnMoveSource = (p) => p === "Old.md";
+    try {
+      const sha = createHash("sha256").update("content", "utf8").digest("hex");
+      fakeDisk.files.set("Old.md", "content");
+      fakeDisk.shas.set("Old.md", sha);
+      sm.handleLocalFilesChanged([
+        { path: "Old.md", kind: "modified" },
+        { path: "New.md", kind: "removed" },
+      ]);
+      await drain();
+      expect(fakeRegistry.renamePath).toHaveBeenCalledWith("New.md", "Old.md");
+      expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+      expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    } finally {
+      delete r.isOwnMove;
+      delete r.isOwnMoveSource;
+    }
+  });
+
+  it("a note moved off the path an own move put it on, then straight back, is a rename both ways", async () => {
+    // A teammate's rename put the note at F/B.md here (own-move target). The
+    // person moves it to Top.md, then straight back to F/B.md within the mark's
+    // life. The first leg found F/B.md empty, so the mark ended: the way back
+    // pairs too, instead of a delete plus a new note under a new id (2026-11-28).
+    const sm = new SyncManager();
+    mapOne("Top.md");
+    await live(sm);
+    const marks = new Map<string, boolean>([["F/B.md", false]]);
+    const r = fakeRegistry as unknown as {
+      isOwnMove?: (p: string) => boolean;
+      isOwnMoveSource?: (p: string) => boolean;
+      releaseOwnMoveTarget?: (p: string) => void;
+    };
+    r.isOwnMove = (p) => marks.has(p);
+    r.isOwnMoveSource = (p) => marks.get(p) === true;
+    r.releaseOwnMoveTarget = (p) => {
+      if (marks.get(p) === false) marks.delete(p);
+    };
+    try {
+      // The first leg's removal of F/B.md (unmapped in this fake) ends the mark.
+      sm.handleLocalFilesChanged([{ path: "F/B.md", kind: "removed" }]);
+      expect(marks.has("F/B.md")).toBe(false);
+      const sha = createHash("sha256").update("content", "utf8").digest("hex");
+      fakeDisk.files.set("F/B.md", "content");
+      fakeDisk.shas.set("F/B.md", sha);
+      sm.handleLocalFilesChanged([
+        { path: "F/B.md", kind: "modified" },
+        { path: "Top.md", kind: "removed" },
+      ]);
+      await drain();
+      expect(fakeRegistry.renamePath).toHaveBeenCalledWith("Top.md", "F/B.md");
+      expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    } finally {
+      delete r.isOwnMove;
+      delete r.isOwnMoveSource;
+      delete r.releaseOwnMoveTarget;
+    }
+  });
+
+  it("a file on the path an own move put it onto never pairs into a rename", async () => {
+    const sm = new SyncManager();
+    mapOne("Old.md");
+    await live(sm);
+    const r = fakeRegistry as unknown as { isOwnMove?: (p: string) => boolean; isOwnMoveSource?: (p: string) => boolean };
+    r.isOwnMove = (p) => p === "New.md";
+    r.isOwnMoveSource = () => false;
+    try {
+      const sha = createHash("sha256").update("content", "utf8").digest("hex");
+      fakeDisk.files.set("New.md", "content");
+      fakeDisk.shas.set("New.md", sha);
+      sm.handleLocalFilesChanged([
+        { path: "New.md", kind: "modified" },
+        { path: "Old.md", kind: "removed" },
+      ]);
+      await drain();
+      expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
+    } finally {
+      delete r.isOwnMove;
+      delete r.isOwnMoveSource;
+    }
+  });
+
+  it("a refused disk rename is put back AND its edits are queued to send", async () => {
+    // A member renames a teammate's note in Finder and types into it under the
+    // new name. The server refuses the rename and the old name comes back, but
+    // the put-back is an own move the watcher ignores: without queueing the
+    // note here, the edit stayed on this disk until the next launch.
+    const sm = new SyncManager();
+    mapOne("Old.md");
+    await live(sm);
+    fakeDisk.files.set("New.md", "edited under the new name");
+    fakeDisk.shas.set("New.md", "e".repeat(64));
+    const meta = vi.mocked(ipc.getNoteMeta);
+    const original = meta.getMockImplementation()!;
+    meta.mockImplementation(async (path: string) =>
+      path === "New.md"
+        ? ({ id: "d1", path, sha256: "e".repeat(64) } as Awaited<ReturnType<typeof ipc.getNoteMeta>>)
+        : original(path),
+    );
+    const queued: Array<[string, string]> = [];
+    const internals = sm as unknown as { localChanges: Map<string, string>; armLocalChangeDrain: () => void };
+    const arm = vi.spyOn(internals, "armLocalChangeDrain").mockImplementation(() => {
+      queued.push(...internals.localChanges);
+    });
+    fakeRegistry.renamePath.mockResolvedValueOnce(false);
+    fakeRegistry.refuseMove = { code: "rename_not_creator" };
+    try {
+      sm.handleLocalFilesChanged([
+        { path: "New.md", kind: "modified" },
+        { path: "Old.md", kind: "removed" },
+      ]);
+      await drain();
+    } finally {
+      fakeRegistry.refuseMove = null;
+      meta.mockImplementation(original);
+      arm.mockRestore();
+    }
+    expect(fakeRegistry.revertRefusedMove).toHaveBeenCalledWith("Old.md", "New.md");
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(queued).toContainEqual(["d1", "Old.md"]);
+    fakeRegistry.revertRefusedMove.mockClear();
+  });
+
   it("pairs a move by the index's file identity even when the text changed too (#410)", async () => {
     // A script moves a note into a new folder and rewrites it in the same
     // breath: no text matches, but the index followed the file itself and
@@ -1586,6 +1784,85 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeDisk.trashed).toEqual([]);
   });
 
+  // #419 / #420. An access change takes revoked notes off this disk, and the
+  // watcher reports those removals exactly like a user's. The registry only
+  // prunes the mappings at the END of the pass that removed the files, so the
+  // echo found them still mapped and pushed and queued them as user deletes:
+  // refused while access was off, accepted the moment it came back, and an
+  // owner's Everyone → No access followed by folder grants soft-deleted 1,038
+  // notes for the whole team. A path the registry marked as its own removal is
+  // never a user delete, at any of the drain's steps.
+  it("never sends the app's own access-change cleanup to the server as user deletes (#419)", async () => {
+    const sm = new SyncManager();
+    const notes = mapMany(200); // cap 40: unguarded, 30 would be sent as ONE batch
+    await live(sm);
+    const revoked = notes.slice(0, 30);
+    // What `applyInbound` does before `deleteFilesBatch`. The mappings are
+    // still in place, exactly as they are while the pass is running.
+    fakeRegistry.markOwnRemovals(revoked.map((n) => n.relPath));
+
+    sm.handleLocalFilesChanged(revoked.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(sm.pendingDeleteDecision()).toBeFalsy();
+  });
+
+  it("a revocation larger than the cap is not held as 'you removed N notes' (#420)", async () => {
+    // The fast-machine half of the same bug: one window over the cap was held
+    // for the user's answer, with a banner saying they had removed notes they
+    // never touched.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    const revoked = notes.slice(0, 150);
+    fakeRegistry.markOwnRemovals(revoked.map((n) => n.relPath));
+
+    sm.handleLocalFilesChanged(revoked.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(sm.pendingDeleteDecision()).toBeFalsy();
+    expect(sm.structureNotice().pendingDelete).toBeFalsy();
+  });
+
+  it("a removal the registry claims while the window is still open never leaves either", async () => {
+    // The second rail, at the drain itself: whatever queued the path, the
+    // registry's word that it removed the file wins before any request.
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    const gone = notes.slice(0, 30);
+
+    sm.handleLocalFilesChanged(gone.map((n) => ({ path: n.relPath, kind: "removed" as const })));
+    fakeRegistry.markOwnRemovals(gone.map((n) => n.relPath));
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
+  it("a user's own delete in the same window as a revocation still propagates, alone", async () => {
+    const sm = new SyncManager();
+    const notes = mapMany(200);
+    await live(sm);
+    const revoked = notes.slice(0, 30);
+    const mine = notes.slice(30, 33);
+    fakeRegistry.markOwnRemovals(revoked.map((n) => n.relPath));
+
+    sm.handleLocalFilesChanged(
+      [...revoked, ...mine].map((n) => ({ path: n.relPath, kind: "removed" as const })),
+    );
+    await drain();
+
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePath.mock.calls.map((c) => c[0]).sort()).toEqual(
+      mine.map((n) => n.relPath).sort(),
+    );
+  });
+
   it("keeps the per-note call below the bulk threshold", async () => {
     // 10 deletes: one request each is already sub-second, and a rarely-exercised
     // safety path IS the bug — so the small case stays on the path it has
@@ -1622,10 +1899,34 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     );
   });
 
-  it("reports a note the server refused, and leaves the rest deleted", async () => {
+  it("a folder waiting only for its contents does not hold its own files back", () => {
+    const sm = new SyncManager() as unknown as {
+      goneFolders: Map<string, number>;
+      goneFolderAttempts: Map<string, { n: number; since: number }>;
+      pendingDiskDeletes: Map<string, unknown>;
+      binaryBesideNoteDeletes(p: string): "wait" | "held" | null;
+    };
+    sm.goneFolders.set("Big", Date.now());
+    expect(sm.binaryBesideNoteDeletes("Big/sub/video.mp4")).toBe("wait"); // still being decided
+    sm.goneFolderAttempts.set("Big", { n: 1, since: Date.now() });
+    expect(sm.binaryBesideNoteDeletes("Big/sub/video.mp4")).toBeNull(); // only waiting for this file
+    sm.pendingDiskDeletes.set("d1", { relPath: "Other.md" });
+    expect(sm.binaryBesideNoteDeletes("Big/sub/video.mp4")).toBe("wait"); // a new note delete is undecided
+  });
+
+  it("a vanished folder keeps waiting for its contents' deletes, then gives up after a minute", () => {
+    expect(goneFolderRetryDelay(1, 0)).toBe(2500);
+    expect(goneFolderRetryDelay(2, 2500)).toBe(5000);
+    expect(goneFolderRetryDelay(3, 7500)).toBe(10_000);
+    expect(goneFolderRetryDelay(9, 50_000)).toBe(10_000);
+    expect(goneFolderRetryDelay(5, 14_000)).not.toBeNull(); // a 120 MB file's delete took 14 s
+    expect(goneFolderRetryDelay(9, GONE_FOLDER_SETTLE_MS)).toBeNull();
+  });
+
+  it("puts back a note the server refused as view-only, and leaves the rest deleted", async () => {
     // The batch answers per item. A `denied` note keeps its mapping inside the
     // registry (pinned by `registryDeleteBatch.test.ts`); here the session must
-    // report it and NOT treat it as propagated.
+    // put it back (the delete did not happen) and NOT treat it as propagated.
     const sm = new SyncManager();
     const notes = mapMany(200);
     await live(sm);
@@ -1643,9 +1944,8 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     );
     await drain();
 
-    const refusals = fakeRegistry.recordFailure.mock.calls.map((c) => c[0] as { path: string });
-    expect(refusals).toHaveLength(1);
-    expect(refusals[0].path).toBe("D3.md");
+    expect(fakeRegistry.recordFailure).not.toHaveBeenCalled();
+    expect(fakeRegistry.restoreRefusedDelete.mock.calls.map((c) => c[0])).toEqual(["D3.md"]);
   });
 
   it("takes the OPEN note's provider down with the delete, not just its file", async () => {
@@ -1770,6 +2070,218 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(armed).toHaveBeenCalled();
     // …and only then does the deferred pull run.
     expect(fakeRegistry.pull).toHaveBeenCalled();
+  });
+
+  it("a folder moved into a NEW parent folder is still ONE folder move (New Folder with Selection)", async () => {
+    // `mkdir Box && mv Old Box/`: the watcher names only the new parent. Judged
+    // against `Box` alone nothing matched, every note went over as a rename of
+    // its own and the folder's binaries stayed at the old path on the server.
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Box", "Box/Old", "Box/Old/sub", "Keep"]);
+    for (const n of oldNotes) fakeDisk.files.set(`Box/${n.relPath}`, textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Box", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Box/Old"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeDisk.materialized[0]).toEqual(
+      oldNotes.map((n) => ({ relPath: `Box/${n.relPath}`, docId: n.docId })),
+    );
+  });
+
+  it("a folder three levels deep renamed at the top is ONE folder move, never a sub-folder onto the top", async () => {
+    // Every level pairs first; counted under any candidate ABOVE its landing, a
+    // sub-folder paired with the renamed top folder and scrambled the ids.
+    const sm = new SyncManager();
+    const deep: Array<{ docId: string; relPath: string }> = [];
+    for (const l of ["L0", "L1"]) for (const m of ["M0", "M1"]) for (const i of [0, 1]) deep.push({ docId: `${l}${m}${i}`, relPath: `Top/${l}/${m}/n${i}.md` });
+    for (const n of deep) storeHooks.texts.set(n.docId, textOf(n.docId));
+    mapNotes([...deep, ...others], ["Top", "Top/L0", "Top/L1", "Top/L0/M0", "Top/L0/M1", "Top/L1/M0", "Top/L1/M1", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Top2", "Top2/L0", "Top2/L1", "Top2/L0/M0", "Top2/L0/M1", "Top2/L1/M0", "Top2/L1/M1", "Keep"]);
+    for (const n of deep) fakeDisk.files.set(n.relPath.replace(/^Top\//, "Top2/"), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Top2", kind: "tree", gone: false },
+      { path: "Top", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Top", "Top2"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
+  it("a rotation (mv B C && mv A B) moves B to C first, then A to B — never A's notes into B's sharing", async () => {
+    const sm = new SyncManager();
+    const a = [
+      { docId: "oa", relPath: "A/overview.md" },
+      { docId: "a1", relPath: "A/a1.md" },
+    ];
+    const b = [
+      { docId: "ob", relPath: "B/overview.md" },
+      { docId: "b1", relPath: "B/b1.md" },
+    ];
+    for (const n of [...a, ...b]) storeHooks.texts.set(n.docId, textOf(n.docId));
+    // The CRDT's own text, read without a bridge (the harness keeps no Yjs state).
+    vi.spyOn(sm, "localText").mockImplementation(async (id) => storeHooks.texts.get(id) ?? null);
+    mapNotes([...a, ...b, ...others], ["A", "B", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["B", "C", "Keep"]);
+    for (const n of a) fakeDisk.files.set(n.relPath.replace(/^A\//, "B/"), textOf(n.docId));
+    for (const n of b) fakeDisk.files.set(n.relPath.replace(/^B\//, "C/"), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "C", kind: "tree", gone: false },
+      { path: "B", kind: "tree", gone: false },
+      { path: "A", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([
+      ["B", "C"],
+      ["A", "B"],
+    ]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
+  it("a folder still on disk that the watcher named is swept for changed notes AFTER the folder-move drain", async () => {
+    // A whole directory moved is ONE event: `mv A t; mv B A; mv t B` changed the
+    // bytes under both folders and no file event said so. The sweep must run
+    // after the drain: ingesting A's bytes into B's notes first would make a
+    // rotation read B as still at home.
+    const sm = new SyncManager();
+    const a = [
+      { docId: "oa", relPath: "A/overview.md" },
+      { docId: "a1", relPath: "A/a1.md" },
+    ];
+    const b = [
+      { docId: "ob", relPath: "B/overview.md" },
+      { docId: "b1", relPath: "B/b1.md" },
+    ];
+    for (const n of [...a, ...b]) storeHooks.texts.set(n.docId, textOf(n.docId));
+    vi.spyOn(sm, "localText").mockImplementation(async (id) => storeHooks.texts.get(id) ?? null);
+    mapNotes([...a, ...b, ...others], ["A", "B", "Keep"]);
+    await live(sm);
+    const internals = sm as unknown as { closedEditsPass: (s: unknown, only?: (p: string) => boolean) => Promise<void> };
+    const seen: Array<{ movesBefore: number; only?: (p: string) => boolean }> = [];
+    const pass = vi.spyOn(internals, "closedEditsPass").mockImplementation(async (_s, only) => {
+      seen.push({ movesBefore: fakeRegistry.renamePath.mock.calls.length, only });
+    });
+    fakeDisk.dirs = new Set(["B", "C", "Keep"]);
+    for (const n of a) fakeDisk.files.set(n.relPath.replace(/^A\//, "B/"), textOf(n.docId));
+    for (const n of b) fakeDisk.files.set(n.relPath.replace(/^B\//, "C/"), textOf(n.docId));
+    try {
+      sm.handleLocalFilesChanged([
+        { path: "C", kind: "tree", gone: false },
+        { path: "B", kind: "tree", gone: false },
+        { path: "A", kind: "tree", gone: true },
+      ]);
+      await drain();
+    } finally {
+      pass.mockRestore();
+    }
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].movesBefore).toBe(2);
+    expect(seen[0].only?.("B/overview.md")).toBe(true);
+    expect(seen[0].only?.("Keep/k.md")).toBe(false);
+    expect(seen[0].only?.("C/b1.md")).toBe(false);
+  });
+
+  it("a folder and its sub-folder renamed in the same breath are two folder moves, parent first", async () => {
+    // `mv Old/sub Old/sub2 && mv Old Archive`: by position alone the renamed
+    // sub-folder sank the parent, its notes went over one by one into a new
+    // folder and the old one was deleted with its sharing rows.
+    const sm = new SyncManager();
+    const kids = [
+      { docId: "t1", relPath: "Old/t1.md" },
+      { docId: "t2", relPath: "Old/t2.md" },
+      { docId: "t3", relPath: "Old/t3.md" },
+      { docId: "k1", relPath: "Old/sub/x.md" },
+      { docId: "k2", relPath: "Old/sub/y.md" },
+    ];
+    for (const n of kids) storeHooks.texts.set(n.docId, textOf(n.docId));
+    mapNotes([...kids, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    const moved = (p: string) => p.replace(/^Old\/sub\//, "Archive/sub2/").replace(/^Old\//, "Archive/");
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub2", "Keep"]);
+    for (const n of kids) fakeDisk.files.set(moved(n.relPath), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Archive", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([
+      ["Old", "Archive"],
+      ["Archive/sub", "Archive/sub2"],
+    ]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
+  it("a sub-folder moved out with its emptied parent deleted in the same breath is still ONE move", async () => {
+    // `mv Old/sub Sub && rm -r Old`: the watcher names `Old` gone and `Sub`
+    // new. Judged against `Old` alone nothing matched and `Sub` went over note
+    // by note into a folder without its sharing rows.
+    const sm = new SyncManager();
+    const kids = [
+      { docId: "k1", relPath: "Old/sub/x.md" },
+      { docId: "k2", relPath: "Old/sub/y.md" },
+    ];
+    for (const n of kids) storeHooks.texts.set(n.docId, textOf(n.docId));
+    mapNotes([...kids, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Sub", "Keep"]);
+    for (const n of kids) fakeDisk.files.set(n.relPath.replace(/^Old\/sub/, "Sub"), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Sub", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old/sub", "Sub"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalledWith("Old/sub/x.md");
+    expect(fakeDisk.materialized[0]).toEqual(kids.map((n) => ({ relPath: n.relPath.replace(/^Old\/sub/, "Sub"), docId: n.docId })));
+  });
+
+  it("deletes a note removed inside a moved folder while the move is still being paired", async () => {
+    // The note was still mapped at its OLD path when its removal arrived, so the
+    // event matched nothing, the delete was dropped, and the pull that followed
+    // wrote it back as an empty file.
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub", "Keep"]);
+    for (const n of oldNotes) fakeDisk.files.set(n.relPath.replace(/^Old/, "Archive"), textOf(n.docId));
+    fakeRegistry.renamePath.mockImplementationOnce(async () => {
+      mapNotes(
+        [...oldNotes.map((n) => ({ ...n, relPath: n.relPath.replace(/^Old/, "Archive") })), ...others],
+        ["Archive", "Archive/sub", "Keep"],
+      );
+      return true;
+    });
+    vi.spyOn(sm as unknown as { armLocalChangeDrain: () => void }, "armLocalChangeDrain").mockImplementation(() => {});
+
+    sm.handleLocalFilesChanged([
+      { path: "Archive", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    // The drain has started pairing the folder when the user deletes a note in it.
+    await vi.advanceTimersByTimeAsync(2_600);
+    fakeDisk.files.delete("Archive/d.md");
+    sm.handleLocalFilesChanged([{ path: "Archive/d.md", kind: "removed" }]);
+    await drain(30);
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    const deleted = [
+      ...fakeRegistry.deletePath.mock.calls.map((c) => c[0]),
+      ...fakeRegistry.deletePaths.mock.calls.flatMap((c) => c[0] as string[]),
+    ];
+    expect(deleted).toContain("Archive/d.md");
   });
 
   it("holds a registry frame's pull while a moved folder is still being paired", async () => {
@@ -1944,6 +2456,29 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     // No notes to re-index under the new folder.
     expect(fakeDisk.materialized).toEqual([]);
     expect(fakeRegistry.pull).toHaveBeenCalled();
+  });
+
+  it("puts a folder rename the server refuses back on disk, never a delete or a second folder", async () => {
+    const sm = new SyncManager();
+    mapNotes(others, ["Old", "Old/sub", "Keep"]);
+    mapBinaries(pdfs);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub", "Keep"]);
+    moveBinaries(pdfs);
+    // View-only folder: PATCH /folders/:id answers 403.
+    fakeRegistry.renamePath.mockResolvedValueOnce(false);
+    fakeRegistry.refuseMove = { code: "no_write_access" };
+    try {
+      folderMoved(sm);
+      await drain();
+    } finally {
+      fakeRegistry.refuseMove = null;
+    }
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.revertRefusedMove.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
   });
 
   it("counts binaries beside notes: a mixed folder pairs on their combined evidence (#266)", async () => {

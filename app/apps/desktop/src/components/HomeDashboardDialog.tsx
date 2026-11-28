@@ -14,6 +14,7 @@ import { requestDashboardAgent } from "../lib/dashboard/agentLaunch";
 import "./HomeDashboardDialog.css";
 import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { DashboardTemplateGallery, templateHtml } from "./DashboardTemplateGallery";
+import { CheckIcon } from "./CheckIcon";
 
 function existingPaths(): Set<string> {
   const state = useStore.getState();
@@ -49,11 +50,22 @@ function availableName(
   return candidate;
 }
 
+/** A template title as a file name: "Orbit: Agentic OS" → "Orbit - Agentic OS". A colon (and the
+ *  other characters no file system accepts everywhere) would only be refused on Create. */
+export function fileNameFromTitle(title: string): string {
+  const safe = title
+    .replace(/\s*:\s*/g, " - ")
+    .replace(/[\\/*?"<>|\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s.]+|[\s.]+$/g, "");
+  return safe || "Dashboard";
+}
+
 function templateName(id: string): string {
   if (id === "daily") return "Home";
   if (id === "blank") return "Dashboard";
-  return (
-    DASHBOARD_TEMPLATES.find((template) => template.id === id)?.name ?? "Home"
+  return fileNameFromTitle(
+    DASHBOARD_TEMPLATES.find((template) => template.id === id)?.name ?? "Home",
   );
 }
 
@@ -203,7 +215,7 @@ function DashboardFolderPicker({
               <FolderIcon />
               <span>{path || "Vault root"}</span>
               <span className="dashboard-folder-check" aria-hidden="true">
-                {value === path ? "✓" : ""}
+                {value === path ? <CheckIcon /> : null}
               </span>
             </button>
           ))}
@@ -342,11 +354,12 @@ export function HomeDashboardDialog() {
       useStore.getState().vault?.epoch === requestEpoch;
     setError(null);
     setNameError(null);
-    if (
-      !name.trim() ||
-      /[\\/:*?"<>|\x00-\x1f]/.test(name) ||
-      name.trim().startsWith(".")
-    ) {
+    if (/[\\/:*?"<>|\x00-\x1f]/.test(name)) {
+      setNameError('A file name can\'t contain \\ / : * ? " < > |');
+      nameInput.current?.focus();
+      return;
+    }
+    if (!name.trim() || name.trim().startsWith(".")) {
       setNameError("Choose a valid file name.");
       nameInput.current?.focus();
       return;

@@ -12,6 +12,7 @@ import { forgetAccessBoardSupport } from "../../lib/accessBoardLoad";
 const api = vi.hoisted(() => ({
   listAccessTree: vi.fn(), resolveAccessSummary: vi.fn(), resolveAccessSummaries: vi.fn(), setBulkAccess: vi.fn(),
   resetMemberAccess: vi.fn(), getAccessBoard: vi.fn(), getHealth: vi.fn(), getBaseUrl: vi.fn(() => "http://test.invalid"),
+  groupHeld: vi.fn(async () => []), groupLetDecide: vi.fn(async () => []),
 }));
 vi.mock("../../lib/auth/authManager", () => ({ authManager: { api, getServerUrl: () => "http://test.invalid" } }));
 vi.mock("../FileTree", () => ({ iconForPath: () => null }));
@@ -77,6 +78,115 @@ describe("Access board, one request", () => {
       await act(async () => { await Promise.resolve(); });
     }
   };
+
+  it("the third column is always No access, whether or not anything is set", async () => {
+    const renderPerson = () => act(async () => root.render(createElement(MemberAccessBoard, {
+      orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
+      everyoneMode: "private", personVaultMode: "custom", accessSource: "group",
+      onItemWritten: vi.fn(), onChanged: vi.fn(async () => {}),
+    } as never)));
+    const third = () => host.querySelector<HTMLElement>('.access-board-column[data-mode="private"]')!;
+    // Nothing gives them anything and nothing is set: still No access.
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "nnnn", complete: true });
+    await renderPerson();
+    await waitForColumns();
+    await settle();
+    expect(third().textContent).toContain("No access");
+    expect(third().textContent).not.toContain("Not shared");
+    // A group gives them something: the rest is No access.
+    act(() => root.unmount());
+    resetMembersAccessCaches();
+    root = createRoot(host);
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "vvnn", complete: true });
+    await renderPerson();
+    await waitForColumns();
+    await settle();
+    expect(third().textContent).toContain("No access");
+  });
+
+  it("a group's board moves a row below the group's whole-vault Can edit (its deepest row decides)", async () => {
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "eeee", complete: true });
+    await act(async () => root.render(createElement(MemberAccessBoard, {
+      orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
+      everyoneMode: "open", personVaultMode: "custom", onItemWritten: vi.fn(), onChanged: vi.fn(async () => {}),
+      group: { id: "g1", name: "Everyone", grants: [{ resourceType: "vault", permission: "edit", path: null }], includesMe: false },
+    } as never)));
+    await waitForColumns();
+    await settle();
+    const arrow = host.querySelector<HTMLButtonElement>('button[aria-label="Move Welcome right"]');
+    expect(arrow).not.toBeNull();
+    await act(async () => arrow!.click());
+    await settle();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
+    expect(api.setBulkAccess.mock.calls[0][1]).toEqual({
+      resources: [{ resourceType: "file", resourceId: "n2" }],
+      audience: { type: "group", groupId: "g1" },
+      mode: "readonly",
+    });
+  });
+
+  it("on a group's board a row moved to No access asks first; Can view does not", async () => {
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "eeee", complete: true });
+    await act(async () => root.render(createElement(MemberAccessBoard, {
+      orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
+      everyoneMode: "open", personVaultMode: "custom", onItemWritten: vi.fn(), onChanged: vi.fn(async () => {}),
+      group: { id: "g1", name: "Everyone", grants: [{ resourceType: "vault", permission: "view", path: null }], includesMe: false },
+    } as never)));
+    await waitForColumns();
+    await settle();
+    // Welcome: Can edit → Can view → No access.
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Move Welcome right"]')!.click());
+    await settle();
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Move Welcome right"]')!.click());
+    const d = document.querySelector<HTMLElement>('[role="alertdialog"]');
+    expect(d?.textContent).toContain("Remove what Everyone gives on Welcome?");
+    expect(d?.textContent).toContain("leaves their computers");
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
+    await act(async () => [...d!.querySelectorAll("button")].find((b) => b.textContent === "Remove")!.click());
+    await settle();
+    expect(api.setBulkAccess).toHaveBeenCalledTimes(2);
+    expect(api.setBulkAccess.mock.calls[1][1]).toMatchObject({ audience: { type: "group", groupId: "g1" }, mode: "private" });
+  });
+
+  it("No access → Add all on a group that opens the whole vault says what leaves people's computers (no Set everything to)", async () => {
+    api.getAccessBoard.mockResolvedValue({ ...tree, modes: "eeee", complete: true });
+    const renderGroup = (vaultPermission: "edit" | null) => act(async () => root.render(createElement(MemberAccessBoard, {
+      orgId: "org-1", vaultId: "v1", member, isSelf: false, canSetAccess: true,
+      everyoneMode: "open", personVaultMode: "open", onItemWritten: vi.fn(), onChanged: vi.fn(async () => {}),
+      group: { id: "g1", name: "Everyone", includesMe: false,
+        grants: vaultPermission ? [{ resourceType: "vault", permission: vaultPermission, path: null }] : [{ resourceType: "folder", permission: "edit", path: "Specs" }] },
+    } as never)));
+    const noAccess = async () => {
+      expect(host.querySelector('button[aria-label="Set everything to"]')).toBeNull();
+      await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="No access actions"]')!.click());
+      const none = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((li) => li.textContent?.startsWith("Add all"))!;
+      await act(async () => none.click());
+      return document.querySelector<HTMLElement>('[role="alertdialog"]');
+    };
+    await renderGroup("edit");
+    await waitForColumns();
+    await settle();
+    const d1 = await noAccess();
+    expect(d1?.textContent).toContain("Everyone opens the whole vault");
+    expect(d1?.textContent).toContain("what Everyone gave everywhere leaves their computers, notes they wrote included");
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    // A group that opens only some folders keeps the plain copy.
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')].find((b) => /keep|cancel/i.test(b.textContent ?? ""))?.click());
+    await renderGroup(null);
+    await settle();
+    const d2 = await noAccess();
+    expect(d2?.textContent).toContain("Only what Everyone gave everywhere goes");
+    expect(d2?.textContent).not.toContain("opens the whole vault");
+  });
+
+  it("a group removal confirm says when the person clicking loses it too", async () => {
+    const { groupRemoveCopy } = await import("../MemberAccessBoard");
+    expect(groupRemoveCopy("Everyone", "on HR", true, true).outcome).toContain("Its members, you included, keep only their own access");
+    expect(groupRemoveCopy("Design", "on HR", false, true).outcome).toContain("Members of Design, you included, keep");
+    expect(groupRemoveCopy("Design", "on HR").outcome).toBe("Members of Design keep their own access and what other groups give. Only what Design gave on HR goes.");
+  });
 
   it("fills the tree and every count from one access-board call, with no summary reads", async () => {
     await render();

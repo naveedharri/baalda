@@ -291,7 +291,7 @@ adds `member.last_seen_at` and `invitation_access`; `GET /api/orgs/:orgId/member
 Later the same day: the member profile has Personal info / Access / Activity tabs, and the Access
 tab toggles (per device, `context.memberAccess.view`) between **List**, the checkbox tree,
 and **Board**, the default (Can edit / Can view / No access columns, drag-and-drop or arrows, Set everything to
-+ Reset to vault default; same one-resource bulk-access writes; single-row moves need no confirm
++ Reset to groups only; same one-resource bulk-access writes; single-row moves need no confirm
 and report through the standard toast, with no undo; pointer-event drag, since Tauri swallows
 native HTML5 drag-and-drop). The overview
 now carries `invitedBy`, and `GET /api/orgs/:orgId/members/:userId/activity` (owner/admin or self;
@@ -344,3 +344,18 @@ and hover/pressed colours are one accent tint (`--bg-hover`/`--bg-active`).
   GitHub bridge that publishes a Claude plugin marketplace so claude.ai's org sync reaches
   Chat/Cowork. `/health` advertises `skills`.
 - **Settings.** Vault Settings → Skills (catalog) and Account Settings → AI tools (this machine).
+
+## Sync rules: what syncs in a vault (#401, 2026-11-22, local)
+
+- One per-vault setting (`vault_sync_rules`, `GET|PUT /api/orgs/:orgId/sync-rules`, owners/admins write,
+  409 `stale_sync_rules`, `sync-rules-changed` frame); local-only vaults keep it in `.context/sync-rules.json`.
+- Since 2026-11-22 the setting is a `.baaldaignore` file at the vault root (no settings tab): owners/admins
+  edit it and every device follows (`{version: 2, patterns}`, feature `baaldaignore`); a member's edit is
+  put back. The default file hides dot names, build/dependency folders (exact lowercase names) and
+  `*.tfvars`, and every supported type syncs (code and the extra types included). The file itself never syncs
+  and is hidden from the sidebar. Round trip verified for 153 code extensions (`.tfvars` is ignored by default) and all 24 extra ones.
+- A rule never deletes: hidden items are PARKED (`registry.parkedDocs/parkedFiles/frozenFiles`), the
+  server copy stays frozen, un-hiding rebinds the same ids. Parked docs stay on the CRDT GC keep list
+  (`registry.crdtKeepIds`) so edits made while hidden survive.
+- Floor (never syncs): `.context`, `.git`, lock files, Baalda temp files, OS bookkeeping, symlinks.
+- Known gaps: extensionless and 0-byte files never sync; a re-shown binary returns to its server path.

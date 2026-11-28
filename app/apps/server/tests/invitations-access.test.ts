@@ -143,6 +143,65 @@ describe("invitations with access", () => {
     expect(await personalVaultRows(orgId, invitee.userId)).toEqual([]);
   });
 
+  it("an invited level is not lifted by groups that take every new member", async () => {
+    // A Can edit group on the whole vault that takes new members automatically.
+    const gid = "g-auto-" + Date.now();
+    await pool.query("INSERT INTO access_groups (id, organization_id, name, auto_join) VALUES ($1, $2, 'Everyone', true)", [gid, orgId]);
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ($1, $2, 'vault', $2, 'group', $3, 'edit')`,
+      ["s-" + gid, orgId, gid],
+    );
+    const groupsOf = async (userId: string) =>
+      (await pool.query("SELECT group_id FROM access_group_members WHERE organization_id = $1 AND user_id = $2", [orgId, userId])).rows.map((r) => r.group_id);
+
+    for (const [access, row] of [["readonly", "view"], ["private", "denied"], ["open", "edit"]] as const) {
+      const invitee = await signUp(`lvl-${access}@inv-access.test`);
+      await inviteMany(owner, orgId, { emails: [invitee.email], role: "member", access });
+      expect((await joinByCode(owner, invitee)).status).toBe(200);
+      expect(await personalVaultRows(orgId, invitee.userId)).toEqual([row]);
+      expect(await groupsOf(invitee.userId), access).toEqual([]);
+    }
+    // Better Auth accept: same.
+    const viaAccept = await signUp("lvl-accept@inv-access.test");
+    const { results } = (await (
+      await inviteMany(owner, orgId, { emails: [viaAccept.email], role: "member", access: "readonly" })
+    ).json()) as InviteResponse;
+    await auth.api.acceptInvitation({ headers: bearerHeaders(viaAccept), body: { invitationId: results[0].invitationId! } });
+    expect(await groupsOf(viaAccept.userId)).toEqual([]);
+    // No level on the invite: the group still takes them.
+    const plain = await signUp("lvl-plain@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [plain.email], role: "member", access: null });
+    expect((await joinByCode(owner, plain)).status).toBe(200);
+    expect(await groupsOf(plain.userId)).toEqual([gid]);
+  });
+
+  it("an admin invite that names no level starts at Can edit everything (older apps, the API)", async () => {
+    const viaAccept = await signUp("admin-accept@inv-access.test");
+    const { results } = (await (
+      await inviteMany(owner, orgId, { emails: [viaAccept.email], role: "admin" })
+    ).json()) as InviteResponse;
+    await auth.api.acceptInvitation({ headers: bearerHeaders(viaAccept), body: { invitationId: results[0].invitationId! } });
+    expect(await personalVaultRows(orgId, viaAccept.userId)).toEqual(["edit"]);
+
+    const viaCode = await signUp("admin-code@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [viaCode.email], role: "admin" });
+    expect((await joinByCode(owner, viaCode)).status).toBe(200);
+    expect(await personalVaultRows(orgId, viaCode.userId)).toEqual(["edit"]);
+
+    // A level the invite did choose is kept as it is.
+    const chose = await signUp("admin-view@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [chose.email], role: "admin", access: "readonly" });
+    expect((await joinByCode(owner, chose)).status).toBe(200);
+    expect(await personalVaultRows(orgId, chose.userId)).toEqual(["view"]);
+
+    // A plain member invited with nothing still gets nothing of their own.
+    const plain = await signUp("member-none@inv-access.test");
+    await inviteMany(owner, orgId, { emails: [plain.email], role: "member" });
+    expect((await joinByCode(owner, plain)).status).toBe(200);
+    expect(await personalVaultRows(orgId, plain.userId)).toEqual([]);
+  });
+
   it("Better Auth accept applies the invite's access too", async () => {
     const invitee = await signUp("accept@inv-access.test");
     const { results } = (await (

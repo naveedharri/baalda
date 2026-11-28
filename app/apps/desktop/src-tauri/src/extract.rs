@@ -157,6 +157,8 @@ pub fn extractor_for(ext: &str) -> Extractor {
         // The file name is what search gets (#407).
         "tar" | "tgz" | "gz" | "7z" => Extractor::NameOnly,
         "pdf" => Extractor::Unsupported,
+        // The optional "Code and text files" group (#401): all plain text.
+        _ if crate::vault::CODE_EXTS.contains(&ext) => Extractor::Utf8,
         // Images, audio, video — and anything new that reaches here before this
         // table learns about it. Name-only is the safe default: it indexes
         // something true and reads nothing.
@@ -178,7 +180,14 @@ pub fn kind_for(ext: &str) -> &'static str {
         "pptx" => "presentation",
         "mp4" | "m4v" | "mov" | "webm" => "video",
         "mp3" | "wav" | "m4a" | "ogg" | "aac" | "flac" => "audio",
-        "zip" | "tar" | "tgz" | "gz" | "7z" => "archive",
+        "zip" | "tar" | "tgz" | "gz" | "7z" | "rar" | "bz2" | "xz" => "archive",
+        // The optional "More file types" group (#401), as `EXTRA_TABLE` files them.
+        "psd" | "ai" | "eps" | "sketch" => "image",
+        "doc" | "odt" | "rtf" | "epub" => "office-doc",
+        "xls" | "ods" => "spreadsheet",
+        "ppt" | "odp" => "presentation",
+        "mkv" | "avi" => "video",
+        "opus" | "aiff" | "aif" => "audio",
         _ => "data",
     }
 }

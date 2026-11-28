@@ -9,7 +9,7 @@
 //! twice.
 
 use desktop_lib::commands::{
-    apply_bootstrap_entries, materialize_notes, BootstrapEntry, MaterializeItem,
+    apply_bootstrap_entries, index_existing_notes, materialize_notes, BootstrapEntry, MaterializeItem,
 };
 use desktop_lib::index::Index;
 use desktop_lib::notefile;
@@ -419,6 +419,33 @@ fn materialize_creates_only_and_rebinds_in_one_pass() {
     let again = materialize_notes(&vault, &index, &items).unwrap();
     assert!(again.iter().all(|o| !o.created));
     assert!(again[0].rebound && again[1].rebound);
+}
+
+#[test]
+fn index_only_never_creates_a_missing_note() {
+    // A folder moved outside the app is indexed under its kept ids AFTER the
+    // server took the move; a note deleted meanwhile must stay deleted.
+    let (_tmp, vault, index) = fresh_vault("index-only");
+    notefile::write_note(&vault, "Moved/kept.md", "still here").unwrap();
+    let items = vec![
+        MaterializeItem {
+            rel_path: "Moved/kept.md".into(),
+            doc_id: Some("doc-kept".into()),
+        },
+        MaterializeItem {
+            rel_path: "Moved/deleted.md".into(),
+            doc_id: Some("doc-deleted".into()),
+        },
+    ];
+    let out = index_existing_notes(&vault, &index, &items).unwrap();
+
+    assert!(!out[0].created && out[0].rebound);
+    assert_eq!(notefile::read_note(&vault, "Moved/kept.md").unwrap(), "still here");
+    assert_eq!(path_for_id(&index, "doc-kept").as_deref(), Some("Moved/kept.md"));
+
+    assert!(!out[1].created && !out[1].rebound);
+    assert!(!vault.join("Moved/deleted.md").exists(), "a missing note is never re-created");
+    assert_eq!(path_for_id(&index, "doc-deleted"), None);
 }
 
 #[test]

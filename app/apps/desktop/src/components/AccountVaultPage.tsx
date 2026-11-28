@@ -111,11 +111,6 @@ export function AccountVaultPage({
 
       <div className="subhead">Actions</div>
       <ul className="account-vault-actions">
-        {!isCurrent && (
-          <ActionRow title="Switch here" description="Open this vault in the sidebar.">
-            {switchChip}
-          </ActionRow>
-        )}
         {folderMissing && (
           <ActionRow title="Folder missing" description="This vault's folder is gone from this device.">
             {folderMissing}
@@ -126,7 +121,7 @@ export function AccountVaultPage({
           description={
             settingsAction === "unavailable"
               ? VAULT_SETTINGS_UNAVAILABLE_HINT
-              : "Members and access, appearance and more."
+              : "People and access, appearance and more."
           }
         >
           <AsyncButton

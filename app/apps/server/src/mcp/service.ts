@@ -5,11 +5,14 @@ import { orgRole, resolveResource } from "../permissions/lookup.js";
 import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
 import { listReadableDocsInVault, listVisibleFolders, readsWholeVault } from "../permissions/vault-docs.js";
 import {
+  canCreateIn,
   canEditFolder,
   canReadAttachment,
   filterReadableBlobs,
   vaultRootWritable,
   canDeleteItem,
+  canRenameItem,
+  RENAME_NOT_CREATOR_MESSAGE,
   billingReadOnly,
   ACCOUNT_READ_ONLY,
   ACCOUNT_READ_ONLY_MESSAGE,
@@ -27,7 +30,10 @@ import {
   resolveFolderParent,
   resolveParentFolder,
 } from "../registry/tree-ops.js";
-import { indexDoc, purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
+import { indexDoc, newSearchStats, purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
+
+/** A search slower than this logs where its time went. */
+const SLOW_SEARCH_MS = 5_000;
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import type { McpAuth } from "./tokens.js";
 import {
@@ -157,6 +163,22 @@ async function writeRefusal(orgId: string, message: string, code?: string): Prom
     if (await billingReadOnly(orgId)) return new McpToolError(ACCOUNT_READ_ONLY_MESSAGE, ACCOUNT_READ_ONLY.code);
   } catch { /* fall through to the ordinary refusal */ }
   return new McpToolError(message, code);
+}
+
+/** Members rename/move only what they created; owners/admins anything (`canRenameItem`). */
+async function requireRenamable(
+  ctx: McpContext,
+  kind: "note" | "file" | "folder",
+  id: string,
+): Promise<void> {
+  const gate = await canRenameItem(pool, {
+    orgId: ctx.auth.organizationId,
+    userId: ctx.auth.userId,
+    kind,
+    id,
+  });
+  if (gate.ok) return;
+  throw await writeRefusal(ctx.auth.organizationId, RENAME_NOT_CREATOR_MESSAGE, gate.code);
 }
 
 /** Members delete only what they created; owners/admins delete anything (`canDeleteItem`). */
@@ -576,6 +598,7 @@ export async function moveFolderTool(
   if ((await folderWritePermission(ctx.auth, input.folderId)) !== "edit") {
     throw await writeRefusal(ctx.auth.organizationId, "You do not have edit access to move this folder", "no_access");
   }
+  await requireRenamable(ctx, "folder", input.folderId);
   // Re-parenting must not be a way to change inherited access, so edit on the
   // destination is required too — but only for a real folder. `parentId: null`
   // means the vault root, which `folderWritePermission` treats as admin-only;
@@ -601,6 +624,10 @@ export async function moveFolderTool(
   // same latch the HTTP registry honours (a rename in place at root is fine).
   if (plan.parentId === null && folder.parent_id !== null) {
     await assertRootNotFrozen(folder.vault_id, null, "move");
+    // ...and needs the right to create at the root, as over HTTP.
+    if (!(await canCreateIn(ctx.auth.userId, folder.vault_id, null))) {
+      throw await writeRefusal(ctx.auth.organizationId, "You do not have permission to move this folder to the top of the vault", "no_access");
+    }
   }
   try {
     const moved = await moveFolder(pool, input.folderId, moveInput);
@@ -618,10 +645,15 @@ export async function moveNoteTool(
   input: { docId: string; relPath?: string; title?: string; folderId?: string | null },
 ) {
   const note = await requireEditableNote(ctx.auth, input.docId);
+  if ((input.relPath !== undefined && input.relPath !== note.rel_path) || input.folderId !== undefined) {
+    await requireRenamable(ctx, "note", input.docId);
+  }
   const moveInput = { relPath: input.relPath, title: input.title, folderId: input.folderId };
   // Judge the RESOLVED destination: `relPath` alone can move the note to another
   // folder or out to the root, and both gates below must see that.
-  const row = (await findNote(pool, input.docId))!;
+  // Deleted while the gates above ran: the same answer as an unknown note.
+  const row = await findNote(pool, input.docId);
+  if (!row) throw notFound("note", input.docId);
   let plan;
   try {
     plan = await planNoteMove(pool, row, moveInput);
@@ -643,6 +675,10 @@ export async function moveNoteTool(
   // to a frozen root is refused; a rename in place at root is allowed.
   if (plan.folderId === null && note.folder_id !== null) {
     await assertRootNotFrozen(note.vault_id, null, "move");
+    // ...and needs the right to create at the root, as over HTTP.
+    if (!(await canCreateIn(ctx.auth.userId, note.vault_id, null))) {
+      throw await writeRefusal(ctx.auth.organizationId, "You do not have permission to move this note to the top of the vault", "no_access");
+    }
   }
   try {
     const moved = await moveNote(pool, input.docId, moveInput);
@@ -1417,7 +1453,12 @@ export async function moveFileTool(ctx: McpContext, fileId: string, path: string
     docId: fileId,
     folderId: null,
   });
-  if (out.status === "error") throw new McpToolError(out.message ?? "move refused", "invalid_target");
+  if (out.status === "error") {
+    if (out.code === "rename_not_creator" || out.code === "account_read_only") {
+      throw await writeRefusal(ctx.auth.organizationId, out.message ?? RENAME_NOT_CREATOR_MESSAGE, out.code);
+    }
+    throw new McpToolError(out.message ?? "move refused", "invalid_target");
+  }
   if (out.wrote) ctx.onRegistryChanged?.(row.vault_id);
   return { fileId: out.row.id, path: out.row.path, folderId: out.row.folderId };
 }
@@ -1451,20 +1492,39 @@ export async function searchNotes(
   //    decides whether the doc-less `attachments/` blobs are candidates, which
   //    mirrors what the download gate would answer for them.
   // W3: a keyed vault's sealed rows are scored with this call's own key.
+  const started = Date.now();
   const crypto = await vaultCrypto(ctx.auth, vaultId);
+  const keyMs = Date.now() - started;
   const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
+  const readableMs = Date.now() - started - keyMs;
   const wholeVault = await readsWholeVault(pool, ctx.auth.userId, vaultId);
-  return writeOrToolError(() =>
-    searchNoteIndex({
-      vaultId,
-      query,
-      k: limit,
-      readableDocIds: readable,
-      includeFiles,
-      vaultWideReader: wholeVault,
-      crypto,
-    }),
-  );
+  const stats = newSearchStats();
+  const beforeScore = Date.now();
+  try {
+    return await writeOrToolError(() =>
+      searchNoteIndex({
+        vaultId,
+        query,
+        k: limit,
+        readableDocIds: readable,
+        includeFiles,
+        vaultWideReader: wholeVault,
+        crypto,
+        stats,
+      }),
+    );
+  } finally {
+    // Where a slow search went (production showed 9-25 s with no breakdown).
+    // Ids and counts only.
+    if (Date.now() - started > SLOW_SEARCH_MS) {
+      console.warn(
+        `[mcp] search_notes timing vault=${vaultId} keyed=${!!crypto} files=${includeFiles} keyMs=${keyMs} readableMs=${readableMs} ` +
+          `wholeVaultMs=${beforeScore - started - keyMs - readableMs} scoreMs=${Date.now() - beforeScore} candidates=${stats.candidates} ` +
+          `fromPages=${stats.fromPages} fromRows=${stats.fromRows} bodyFetches=${stats.bodyFetches} pagesMs=${stats.pagesMs} ` +
+          `notesMs=${stats.notesMs} filesMs=${stats.filesMs}`,
+      );
+    }
+  }
 }
 
 // ── attachments / files ───────────────────────────────────────────────────
