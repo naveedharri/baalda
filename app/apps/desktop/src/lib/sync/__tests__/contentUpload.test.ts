@@ -22,6 +22,8 @@ import {
   type DocPush,
 } from "../contentUpload";
 import { UPLOAD_CONCURRENCY } from "../pool";
+import { READ_ONLY_DETAIL, resetReadOnlyAnnouncements } from "../readOnlyRejections";
+import { reconcileReport } from "../reconcileReport";
 import type { SyncProgressSink } from "../progress";
 import { VaultDocStore } from "../vaultDocStore";
 import type { DocSyncState, SyncProgressPhase } from "../vaultScope";
@@ -382,6 +384,8 @@ describe("ContentUploader — pushing local content", () => {
     // disk exist nowhere but disk — and `flushEgest` is about to write the
     // server's copy over them. The server's copy IS the content for a doc you
     // cannot write, but the edit may not vanish without a copy and a word.
+    reconcileReport.clear();
+    resetReadOnlyAnnouncements();
     const server = new FakeServer();
     server.seed("d1", "theirs");
     const r = rig({
@@ -403,6 +407,11 @@ describe("ContentUploader — pushing local content", () => {
     // nothing more this device can do for it.
     expect(r.harness.fs.get("Note.md")).toBe("theirs");
     expect(r.marked).toEqual(["d1"]);
+    // And the person is told, like a rejected live edit (the failure row alone
+    // reached no screen).
+    expect(reconcileReport.items()).toEqual([
+      expect.objectContaining({ kind: "keptLocally", docId: "d1", path: "Note.md", detail: READ_ONLY_DETAIL }),
+    ]);
   });
 
   it("keeps no copy when the file already matches a read-only doc", async () => {

@@ -41,6 +41,7 @@ import { encodeStateAsUpdate, encodeStateVector } from "yjs";
 import type { NoteBridge } from "../bridge";
 import { UPLOAD_CONCURRENCY, runPool } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
+import { announceUnsendableEdit } from "./readOnlyRejections";
 
 /**
  * `DocPush.whenSynced` rejected because the doc reached a status no reconnect
@@ -788,7 +789,10 @@ export class ContentUploader {
     // disk. The caller's provenance callback is deliberately stricter than
     // `fileText.length === 0`: a real user truncation must still be recovered.
     if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return "replace";
-    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced.
+    // No copy is kept (decided 2026-11-19): the edit is reported, then replaced,
+    // and the person is told (the failure row alone reached no screen).
+    console.info(`[upload] ${relPath} is view-only for you; your edit there is replaced by the team's text`);
+    announceUnsendableEdit(docId, relPath);
     this.report({
       docId,
       relPath,

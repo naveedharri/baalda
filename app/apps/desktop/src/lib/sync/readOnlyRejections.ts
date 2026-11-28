@@ -184,8 +184,33 @@ export class ReadOnlyRejections {
   }
 }
 
+let unsendableToastAt = 0;
+
+/**
+ * A file edit to a note this person can only view, put back to the team's text
+ * by the content push (`ContentUploader`: an edit made offline or while the app
+ * was closed, refused once the grant turned out to be view-only). The same
+ * review entry as a rejected live edit, once per note per session, so the words
+ * never vanish unsaid; the toast at most once per {@link REJECTION_WINDOW_MS},
+ * since one catch-up pass can put back many notes.
+ */
+export function announceUnsendableEdit(
+  docId: string,
+  path: string,
+  notify: (text: string) => void = (t) => toast(t, "neutral"),
+): void {
+  if (announced.has(docId)) return;
+  announced.add(docId);
+  reconcileReport.record({ kind: "keptLocally", docId, path, detail: READ_ONLY_DETAIL });
+  const now = Date.now();
+  if (now - unsendableToastAt < REJECTION_WINDOW_MS) return;
+  unsendableToastAt = now;
+  notify(READ_ONLY_TOAST);
+}
+
 /** Test/teardown helper: forget which notes were announced. */
 export function resetReadOnlyAnnouncements(): void {
+  unsendableToastAt = 0;
   announced.clear();
   rebased.clear();
   copied.clear();
