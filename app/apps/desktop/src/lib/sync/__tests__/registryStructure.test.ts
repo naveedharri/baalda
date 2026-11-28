@@ -196,6 +196,19 @@ describe("VaultRegistry.renamePath — a folder (#221)", () => {
     expect(reg.getFileId("Old/report.pdf")).toBeNull();
   });
 
+  it("into a parent made in the same breath: registers the parent first, then moves under it", async () => {
+    const api = fakeApi([{ id: "n1", rel_path: "Old/a.md" }], [{ id: "f-old", path: "Old" }]);
+    const reg = new VaultRegistry(api as unknown as ApiClient);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(["Old/a.md"], ["Old"]));
+    api.createFolder.mockClear();
+
+    expect(await reg.renamePath("Old", "Box/Old")).toBe(true);
+    expect(api.createFolder).toHaveBeenCalledTimes(1);
+    expect(api.createFolder).toHaveBeenCalledWith(expect.objectContaining({ path: "Box", parentId: null }));
+    expect(api.updateFolder).toHaveBeenCalledWith("f-old", { name: "Old", path: "Box/Old", parentId: "folder-Box" });
+    expect(reg.getMapping("Box/Old/a.md")?.docId).toBe("n1");
+  });
+
   it("answers false when the server refuses, and changes nothing", async () => {
     const api = fakeApi([{ id: "n1", rel_path: "Old/a.md" }], [{ id: "f-old", path: "Old" }]);
     api.updateFolder.mockRejectedValue(new Error("root_frozen"));

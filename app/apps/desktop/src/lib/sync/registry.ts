@@ -7177,7 +7177,12 @@ export class VaultRegistry {
     const folderId = this.folderByPath.get(oldPath);
     if (folderId) {
       // Folder move: rewrite the server subtree, then the local prefix maps.
-      const parentId = this.folderByPath.get(parentDir(newPath)) ?? null;
+      // Into a parent made in the same breath, as a note move does (#410):
+      // without its row the server answers `path_folder_mismatch`.
+      await this.ensureFolderChain(parentDir(newPath));
+      if (this.stale() || this.serverVaultId !== vaultId) return fail(null);
+      const parentId =
+        this.folderByPath.get(this.canonicalFolderPath(parentDir(newPath)) ?? parentDir(newPath)) ?? null;
       try {
         try {
           await this.api.updateFolder(folderId, { name: baseName(newPath), path: newPath, parentId });

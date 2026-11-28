@@ -3566,9 +3566,18 @@ export class SyncManager implements InboundHost {
     const gone = topmost(
       goneFolders.filter((g) => !dirsCi.has(g.toLowerCase()) && this.registry.getFolderId?.(g)),
     );
-    const cands = topmost(
-      candidateFolders.filter((c) => dirs.has(c) && !this.registry.getFolderId?.(c)),
-    );
+    const unregistered = (d: string) => !this.registry.getFolderId?.(d);
+    const tops = topmost(candidateFolders.filter((c) => dirs.has(c) && unregistered(c)));
+    // A folder moved into a NEW parent (Finder's "New Folder with Selection",
+    // `mkdir -p dst && mv src dst/`) shows up as that parent alone; the moved
+    // folder sits below it. Judged against the parent only, nothing matched,
+    // every note went over as a separate rename and its binaries stayed behind
+    // at the old path on the server (2026-11-28 five-app test). Every
+    // unregistered folder under a candidate is a candidate too; the parent
+    // still comes first, so a plain rename to it wins a tie.
+    const cands = [
+      ...new Set([...tops, ...[...dirs].filter((d) => unregistered(d) && tops.some((t) => isUnder(d, t)))]),
+    ];
     if (gone.length === 0 || cands.length === 0) return out;
 
     const mapped = this.registry.mappedNotes();
@@ -3669,10 +3678,13 @@ export class SyncManager implements InboundHost {
     }
     // What appeared and was not a move target: its notes may still be renames.
     if (out.fallbackDeletes.length > 0) {
-      for (const c of cands) {
-        if (usedCands.has(c)) continue;
+      const used = [...usedCands];
+      const seen = new Set<string>();
+      for (const c of tops) {
         for (const p of notesOnDisk) {
-          if (isUnder(p, c) && !this.registry.getMapping(p)) out.fallbackCandidates.push(p);
+          if (seen.has(p) || !isUnder(p, c) || used.some((u) => isUnder(p, u))) continue;
+          seen.add(p);
+          if (!this.registry.getMapping(p)) out.fallbackCandidates.push(p);
         }
       }
     }

@@ -2072,6 +2072,29 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.pull).toHaveBeenCalled();
   });
 
+  it("a folder moved into a NEW parent folder is still ONE folder move (New Folder with Selection)", async () => {
+    // `mkdir Box && mv Old Box/`: the watcher names only the new parent. Judged
+    // against `Box` alone nothing matched, every note went over as a rename of
+    // its own and the folder's binaries stayed at the old path on the server.
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Box", "Box/Old", "Box/Old/sub", "Keep"]);
+    for (const n of oldNotes) fakeDisk.files.set(`Box/${n.relPath}`, textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Box", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Box/Old"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    expect(fakeDisk.materialized[0]).toEqual(
+      oldNotes.map((n) => ({ relPath: `Box/${n.relPath}`, docId: n.docId })),
+    );
+  });
+
   it("deletes a note removed inside a moved folder while the move is still being paired", async () => {
     // The note was still mapped at its OLD path when its removal arrived, so the
     // event matched nothing, the delete was dropped, and the pull that followed
