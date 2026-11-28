@@ -9,6 +9,7 @@ import {
   openSearchRow,
   sealScoreRow,
   sealSearchRow,
+  sealRefText,
   type SealedScoreRow,
 } from "./sealed-index.js";
 import { KeyRequiredError, loadVkCheck } from "../crypto/transport.js";
@@ -253,19 +254,19 @@ async function indexNoteRow(
     // (and vector + tokens again into `search_score_enc`, what ranking opens).
     // The plaintext columns are not written, and never nulled here: an old row
     // keeps its stale plaintext until the separate null-out step (W3 rule).
-    // `ref_text` is not written either: the attachment rule decides a sealed
-    // row from its decrypted body in memory (`permissions/sealed-refs.ts`),
-    // which is the same answer the excerpt gives.
+    // The reference excerpt goes sealed into `ref_enc` (never `ref_text`): the
+    // attachment rule opens it instead of the body (`permissions/sealed-refs.ts`).
     await db.query(
-      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc, search_score_enc)
-       VALUES ($1, $2, $3, now(), $4::text[], $5, $6)
+      `INSERT INTO note_index (doc_id, vault_id, title, updated_at, ref_heads, search_enc, search_score_enc, ref_enc)
+       VALUES ($1, $2, $3, now(), $4::text[], $5, $6, $7)
        ON CONFLICT (doc_id) DO UPDATE
          SET vault_id = EXCLUDED.vault_id,
              title = EXCLUDED.title,
              updated_at = now(),
              ref_heads = EXCLUDED.ref_heads,
              search_enc = EXCLUDED.search_enc,
-             search_score_enc = EXCLUDED.search_score_enc`,
+             search_score_enc = EXCLUDED.search_score_enc,
+             ref_enc = EXCLUDED.ref_enc`,
       [
         docId,
         note.vault_id,
@@ -273,6 +274,7 @@ async function indexNoteRow(
         heads,
         sealSearchRow(crypto, docId, { body: content, vector, tokens }),
         sealScoreRow(crypto, docId, { vector, tokens }),
+        sealRefText(crypto, docId, refText(content, heads)),
       ],
     );
   } else await db.query(

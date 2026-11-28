@@ -8,7 +8,7 @@ import { indexDoc, pendingSearchPasses, searchNoteIndex } from "../src/index/ind
 import { backfillVault } from "../src/crypto/backfill.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { aadFor, open, seal } from "../src/crypto/envelope.js";
-import { isUncompressedScore, openScoreRow, openSearchRow, sealScoreRow, sealSearchRow } from "../src/index/sealed-index.js";
+import { isUncompressedScore, openRefText, openScoreRow, openSearchRow, sealScoreRow, sealSearchRow } from "../src/index/sealed-index.js";
 import { SEARCH_TOKENS_MAX } from "../src/index/search-tokens.js";
 import { vaultKeyCache } from "../src/crypto/key-cache.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
@@ -85,6 +85,20 @@ describe("sealed note_index (W3)", () => {
       expect(r.search_tokens).toBeNull();
       expect(r.search_enc.includes(Buffer.from("revenue"))).toBe(false);
     }
+  });
+
+  it("keyed indexing seals the attachment reference excerpt beside the body", async () => {
+    const k = await corpus(true);
+    const docId = await seedNote(k.vaultId, null, "with-pic.md");
+    await appendUpdate(docId, updateWith("See ![](attachments/pic.png) and more"), pool, 1000, k.crypto);
+    const release = vaultKeyCache.acquire(k.vaultId, k.key, 1);
+    expect(await indexDoc(docId)).toBe(true);
+    release();
+    const { rows } = await pool.query("SELECT ref_text, ref_enc, ref_heads FROM note_index WHERE doc_id = $1", [docId]);
+    expect(rows[0].ref_text).toBeNull();
+    expect(rows[0].ref_enc.includes(Buffer.from("pic.png"))).toBe(false);
+    expect(rows[0].ref_heads).toContain("attachments/");
+    expect(openRefText(k.crypto!, docId, rows[0].ref_enc)).toContain("attachments/pic.png");
   });
 
   it("search ranks a keyed vault exactly like an unkeyed copy of the same notes", async () => {

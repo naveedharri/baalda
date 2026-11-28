@@ -86,6 +86,35 @@ export function openScorePlain(c: DocCrypto, docId: string, sealed: Buffer): Buf
   return open(c.key, scoreAad(c.vaultId, docId), sealed);
 }
 
+function refAad(vaultId: string, docId: string): Buffer {
+  return aadFor("note_index", "ref_enc", vaultId, docId);
+}
+
+/** Leading byte of a sealed excerpt: deflated UTF-8 follows. */
+const REF_DEFLATED = 0x00;
+/**
+ * Excerpts larger than this are not stored (the list reads that note's body,
+ * always correct). A real note's excerpt is a few KB; this only bounds a note
+ * made of nothing but references.
+ */
+export const REF_ENC_MAX_CHARS = 2 * 1024 * 1024;
+
+/**
+ * A note's attachment reference excerpt (`refText`), sealed apart from its body
+ * (`note_index.ref_enc`, migration 104), so the scoped attachment list opens a
+ * few KB per note instead of the whole search row. Null when too large.
+ */
+export function sealRefText(c: DocCrypto, docId: string, text: string): Buffer | null {
+  if (text.length > REF_ENC_MAX_CHARS) return null;
+  return seal(c.key, refAad(c.vaultId, docId), Buffer.concat([Buffer.of(REF_DEFLATED), deflateRawSync(text)]), c.generation);
+}
+
+export function openRefText(c: DocCrypto, docId: string, sealed: Buffer): string {
+  const plain = open(c.key, refAad(c.vaultId, docId), sealed);
+  if (plain[0] !== REF_DEFLATED) throw new Error("ref_enc: unknown encoding");
+  return inflateRawSync(plain.subarray(1), { maxOutputLength: REF_ENC_MAX_CHARS * 4 + 16 }).toString("utf8");
+}
+
 function blobAad(vaultId: string, blobId: string): Buffer {
   return aadFor("blob_text", "search_enc", vaultId, blobId);
 }
