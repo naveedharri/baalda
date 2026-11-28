@@ -67,7 +67,8 @@ type NoteBatchResultWithSeed = NoteBatchResult & Partial<SeedFields>;
  * A refusal is any item answered `error` or `conflict`; an item with no code
  * (a whole-batch statement failure) counts as `error`.
  */
-export function logNoteBatchRefusals(
+function logBatchRefusals(
+  tag: "notes-batch" | "folders-batch",
   vaultId: string,
   userId: string,
   results: ReadonlyArray<Pick<NoteBatchResult, "status" | "code"> | undefined>,
@@ -82,9 +83,17 @@ export function logNoteBatchRefusals(
   }
   if (refused === 0) return;
   console.info(
-    `[notes-batch] vault=${vaultId} user=${userId} items=${results.length} refused=${refused} ` +
+    `[${tag}] vault=${vaultId} user=${userId} items=${results.length} refused=${refused} ` +
       `refusedBy=${JSON.stringify(refusedBy)}`,
   );
+}
+
+export function logNoteBatchRefusals(
+  vaultId: string,
+  userId: string,
+  results: ReadonlyArray<Pick<NoteBatchResult, "status" | "code"> | undefined>,
+): void {
+  logBatchRefusals("notes-batch", vaultId, userId, results);
 }
 
 /**
@@ -311,6 +320,10 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       }
     });
     if (wrote) changed(c, auth.vaultId);
+    // The same one line notes/batch logs: production showed a refused folder's
+    // whole subtree answered "No folder at …" with nothing naming why its
+    // first folder was refused.
+    logBatchRefusals("folders-batch", auth.vaultId, auth.userId, results);
     return c.json({ results });
   });
 
