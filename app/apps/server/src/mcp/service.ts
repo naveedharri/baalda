@@ -648,7 +648,9 @@ export async function moveNoteTool(
   const moveInput = { relPath: input.relPath, title: input.title, folderId: input.folderId };
   // Judge the RESOLVED destination: `relPath` alone can move the note to another
   // folder or out to the root, and both gates below must see that.
-  const row = (await findNote(pool, input.docId))!;
+  // Deleted while the gates above ran: the same answer as an unknown note.
+  const row = await findNote(pool, input.docId);
+  if (!row) throw notFound("note", input.docId);
   let plan;
   try {
     plan = await planNoteMove(pool, row, moveInput);

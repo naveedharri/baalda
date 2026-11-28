@@ -793,7 +793,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Resolve where the folder will land BEFORE gating: a `path`-only move to
     // another directory (or to the root) is a re-parent whether or not the
     // caller said `parentId`, and both gates below must see the real target.
-    const current = (await findFolder(pool, id))!;
+    // Deleted while the gates above ran (a teammate's delete racing this move):
+    // the same answer as a folder that was already gone, never a 500.
+    const current = await findFolder(pool, id);
+    if (!current) return c.json({ error: "Unknown folder" }, 404);
     let plan;
     try {
       plan = await planFolderMove(pool, current, moveInput);
@@ -1162,7 +1165,10 @@ export function createRegistryRoutes(deps: RegistryDeps = {}): Hono {
     // Resolve the destination from the PATH first: a `relPath`-only move to
     // another folder (or out to the root) is a re-parent whether or not the
     // client also said `folderId`, and both gates below must judge the real one.
-    const note = (await findNote(pool, id))!;
+    // Deleted while the gates above ran (a teammate's delete racing this move):
+    // the same answer as a note that was already gone, never a 500.
+    const note = await findNote(pool, id);
+    if (!note) return c.json({ error: "Unknown note" }, 404);
     let plan;
     try {
       plan = await planNoteMove(pool, note, moveInput);
