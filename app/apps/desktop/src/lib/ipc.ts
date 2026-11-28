@@ -466,6 +466,10 @@ export const writeTrashCopy = (
  */
 export const rebindNoteId = (path: string, docId: string, expectedEpoch?: VaultEpoch) =>
   invoke<boolean>("rebind_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
+/** {@link rebindNoteId} for the fork heal: a row holding `docId` under another
+ *  spelling of the same path (an older build's case twin) is dropped first. */
+export const healNoteId = (path: string, docId: string, expectedEpoch?: VaultEpoch) =>
+  invoke<boolean>("heal_note_id", { path, docId, expectedEpoch: expectedEpoch ?? null });
 /** Atomic write + re-index. `docId` (the bridge's egest) also records the
  *  written bytes as that doc's disk base in the same Rust call (#200). */
 /** What `write_note` did. `stale` = the compare-and-swap refused: the file no

@@ -541,6 +541,14 @@ export class VaultDocStore implements DocUpdateSink {
 
   // ---- durable manifest --------------------------------------------------
 
+  /** A doc's local log grew outside a bridge (the fork heal folded history in):
+   *  the manifest the next `hello` sends must say so, or the server never
+   *  learns this device holds ops it lacks. An open doc's bridge is the truth. */
+  noteLocalState(docId: string, sv: Uint8Array): void {
+    if (this.hot.has(docId)) return;
+    this.rememberSv(docId, sv);
+  }
+
   private rememberSv(docId: string, sv: Uint8Array): void {
     this.svCache.set(docId, sv);
     if (this.destroyed) return;

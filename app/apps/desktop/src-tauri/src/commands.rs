@@ -1973,6 +1973,20 @@ pub async fn rebind_note_id(
     rebound
 }
 
+/// The sync layer's fork heal: key the note at `path` by `doc_id`
+/// (`Index::heal_note_id`). False when refused.
+#[tauri::command]
+pub async fn heal_note_id(
+    state: State<'_, AppState>,
+    path: String,
+    doc_id: String,
+    expected_epoch: Option<u64>,
+) -> AppResult<bool> {
+    let (_vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    guard.heal_note_id(&path, &doc_id)
+}
+
 #[tauri::command]
 pub async fn write_note(
     state: State<'_, AppState>,

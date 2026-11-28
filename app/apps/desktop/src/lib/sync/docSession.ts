@@ -83,6 +83,7 @@ import {
   serverFeatures as cachedServerFeatures,
 } from "../serverFeatures";
 import { collectCrdtGarbage } from "./crdtGc";
+import { healForkedIds } from "./forkHeal";
 import { pickUniqueEmptyRename } from "./emptyRename";
 import {
   IPC_CONCURRENCY,
@@ -5654,6 +5655,7 @@ export class SyncManager implements InboundHost {
       if (!ready()) return;
       this.lastCrdtSweepAt = Date.now();
       console.info("[crdt-gc] idle sweep");
+      void this.healForks(scope);
       void collectCrdtGarbage(
         { registryDocIds: () => this.registry.crdtKeepIds() },
         {
@@ -5665,6 +5667,51 @@ export class SyncManager implements InboundHost {
         },
       );
     }, delay);
+  }
+
+  /**
+   * One note, one id (`forkHeal.ts`): re-key index rows whose id is not the
+   * registry's, folding a fork's local history in when it is provably the same
+   * note's. Runs beside each CRDT sweep: the sweep keeps every id the index
+   * still holds, and the heal clears a fork's log itself once folded. Never
+   * throws.
+   */
+  private async healForks(scope: VaultScope): Promise<void> {
+    if (!scope.isCurrent() || !this.syncable()) return;
+    const epoch = scope.vaultEpoch ?? undefined;
+    const vaultId = this.registry.vaultId;
+    try {
+      const { folded } = await healForkedIds({
+        titles: () => ipc.listNoteTitles(epoch),
+        registeredId: (path) => {
+          const m = this.registry.getMappingCi(path);
+          return m && m.vaultId === vaultId ? m.docId : null;
+        },
+        busy: (docId) =>
+          !scope.isCurrent() ||
+          bridgeManager.currentBridge()?.docId === docId ||
+          this.docStore?.suppressedDoc() === docId ||
+          this.docStore?.peekResident(docId) != null,
+        load: (docId) => ipc.loadYjsState(docId, epoch),
+        acked: (docId) => this.registry.ackedSvOf?.(docId) ?? null,
+        append: (docId, update) => ipc.appendYjsUpdate(docId, update, epoch),
+        heal: (path, docId) => ipc.healNoteId(path, docId, epoch),
+        clear: (docId) => ipc.clearYjsDoc(docId, epoch),
+        stateVector: (docId, sv) => this.docStore?.noteLocalState?.(docId, sv),
+        log: (line) => console.info(line),
+      });
+      // History folded in that the server may lack: push it the way a
+      // `ready.behind` doc is pushed.
+      if (folded.length > 0 && scope.isCurrent()) {
+        for (const id of folded) {
+          this.serverBehind.add(id);
+          this.divergedDocs.add(id);
+        }
+        this.startContentRunIfNeeded(scope);
+      }
+    } catch (e) {
+      console.warn("[sync] fork heal failed", e);
+    }
   }
 
   /** True while an idle CRDT sweep is armed (tests / teardown assertions). */
@@ -6639,6 +6686,7 @@ export class SyncManager implements InboundHost {
       // must still open. See `crdtGc.ts` for why the allow-list is built from
       // two id spaces.
       this.lastCrdtSweepAt = Date.now();
+      void this.healForks(scope);
       void collectCrdtGarbage(
         { registryDocIds: () => registry.crdtKeepIds() },
         {

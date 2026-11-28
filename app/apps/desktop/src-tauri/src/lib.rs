@@ -287,6 +287,7 @@ pub fn run() {
             commands::write_trash_copy,
             commands::copy_to_trash,
             commands::rebind_note_id,
+            commands::heal_note_id,
             commands::write_note,
             commands::write_note_if_missing,
             commands::materialize_notes_batch,

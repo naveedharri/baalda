@@ -164,6 +164,19 @@ fn link_key(s: &str) -> String {
     s.nfc().collect::<String>().to_lowercase()
 }
 
+/// Whether a doc id has anything of its own on this device: local CRDT history
+/// or a recorded disk base. An id with none is a fresh local mint nothing else
+/// knows, safe to give way to the note's real id.
+fn id_has_history(conn: &Connection, id: &str) -> AppResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM yjs_updates WHERE doc_id = ?1)
+             OR EXISTS(SELECT 1 FROM yjs_snapshot WHERE doc_id = ?1)
+             OR EXISTS(SELECT 1 FROM yjs_disk_base WHERE doc_id = ?1)",
+        params![id],
+        |r| r.get(0),
+    )?)
+}
+
 fn read_yjs_state_vectors(conn: &Connection) -> AppResult<Vec<YjsStateVector>> {
     let mut stmt =
         conn.prepare("SELECT doc_id, state_vector FROM yjs_snapshot WHERE state_vector IS NOT NULL")?;
@@ -839,10 +852,56 @@ impl Index {
         }
 
         // Drop notes whose files are gone from disk.
+        let mut seen_folded: Option<HashMap<String, Option<String>>> = None;
         for (path, (id, _, rowid)) in &indexed {
             // A new path may already have claimed this ID by filesystem
             // identity. Never delete that relocated row from the old snapshot.
             if !seen_notes.contains(path) && self.id_for_path(&tx, path)?.as_ref() == Some(id) {
+                // The same file under this disk's spelling (`casef/b.md` on a
+                // disk whose folder is `CaseF/`): older builds indexed it a
+                // second time under a fresh id, and dropping THIS row kept the
+                // fresh one, so the note lost the id the server knows it by.
+                // When only this row has history, it takes the disk's spelling
+                // and the fresh row goes.
+                let folded = seen_folded.get_or_insert_with(|| {
+                    let mut m: HashMap<String, Option<String>> = HashMap::new();
+                    for p in &seen_notes {
+                        m.entry(link_key(p))
+                            .and_modify(|v| *v = None)
+                            .or_insert_with(|| Some(p.clone()));
+                    }
+                    m
+                });
+                if let Some(Some(twin)) = folded.get(&link_key(path)) {
+                    let twin_id = self.id_for_path(&tx, twin)?;
+                    let takes_over = match twin_id.as_deref() {
+                        None => true,
+                        Some(t) => t != id.as_str() && !id_has_history(&tx, t)?,
+                    };
+                    if takes_over && id_has_history(&tx, id)? {
+                        if let Some(t) = twin_id.as_deref() {
+                            let twin_rowid: i64 = tx.query_row(
+                                "SELECT rowid FROM notes WHERE id = ?1",
+                                params![t],
+                                |r| r.get(0),
+                            )?;
+                            Self::delete_note_rows(&tx, t, twin_rowid)?;
+                            tx.execute("DELETE FROM note_file_identity WHERE doc_id = ?1", params![t])?;
+                        }
+                        // Re-keyed in place (the upsert is by id), never deleted
+                        // first: an unreadable file keeps this row for the next open.
+                        let twin_abs = vault.join(twin);
+                        if skip_unreadable(self.index_one(&tx, vault, &twin_abs, Some(id.clone())), &twin_abs)?.is_some() {
+                            log::info!(
+                                "[index] {twin}: one row again, keyed by {id} (dropped the fresh twin {} left under another spelling)",
+                                twin_id.as_deref().unwrap_or("-")
+                            );
+                            notes_changed = true;
+                            stale += 1;
+                        }
+                        continue;
+                    }
+                }
                 Self::delete_note_rows(&tx, id, *rowid)?;
                 notes_changed = true;
                 stale += 1;
@@ -1448,6 +1507,40 @@ impl Index {
         )?)
     }
 
+    /// Give the note at `rel` the id the registry knows it by (the sync layer's
+    /// fork heal). Like `rebind_note_id`, but a row holding `doc_id` under
+    /// another spelling of the SAME path (a case/Unicode twin an older build
+    /// left) is dropped first instead of refusing. Any other holder refuses.
+    pub fn heal_note_id(&self, rel: &str, doc_id: &str) -> AppResult<bool> {
+        let Some(current) = self.id_for_path(&self.conn, rel)? else {
+            return Ok(false);
+        };
+        if current == doc_id {
+            return Ok(true);
+        }
+        let holder: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT path, rowid FROM notes WHERE id = ?1",
+                params![doc_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((held_at, rowid)) = holder {
+            if held_at == rel || link_key(&held_at) != link_key(rel) {
+                return Ok(false);
+            }
+            let tx = self.conn.unchecked_transaction()?;
+            Self::delete_note_rows(&tx, doc_id, rowid)?;
+            tx.commit()?;
+        }
+        let rebound = self.rebind_note_id(rel, doc_id)?;
+        if rebound {
+            log::info!("[index] {rel}: keyed by its registered id {doc_id} (was {current})");
+        }
+        Ok(rebound)
+    }
+
     /// Key the note at `rel` by the doc a bridge just wrote it for.
     ///
     /// `write_note` re-indexes the bytes it lands, and `index_one` reuses an id
@@ -1466,14 +1559,7 @@ impl Index {
         if current == doc_id {
             return Ok(true);
         }
-        let has_history: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM yjs_updates WHERE doc_id = ?1)
-                 OR EXISTS(SELECT 1 FROM yjs_snapshot WHERE doc_id = ?1)
-                 OR EXISTS(SELECT 1 FROM yjs_disk_base WHERE doc_id = ?1)",
-            params![current],
-            |r| r.get(0),
-        )?;
-        if has_history {
+        if id_has_history(&self.conn, &current)? {
             return Ok(false);
         }
         let rebound = self.rebind_note_id(rel, doc_id)?;
@@ -4712,6 +4798,67 @@ mod tests {
     /// An out-of-app rename on a filesystem without stable identity: the
     /// watcher indexes a fresh uuid, so sync must put the registry's
     /// doc_id back onto the row. Backlinks must survive the re-key.
+    #[test]
+    fn heal_note_id_drops_a_case_twin_holding_the_id_but_refuses_another_note() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        std::fs::create_dir_all(v.join("CaseF")).unwrap();
+        std::fs::write(v.join("CaseF/b.md"), "# b\n").unwrap();
+        idx.rebuild(&v).unwrap();
+        idx.conn
+            .execute("INSERT INTO notes (id, path, title, mtime) VALUES ('server-id', 'casef/b.md', 'b', 0)", [])
+            .unwrap();
+        assert!(idx.heal_note_id("CaseF/b.md", "server-id").unwrap());
+        let rows: Vec<(String, String)> = idx
+            .conn
+            .prepare("SELECT id, path FROM notes WHERE lower(path) = 'casef/b.md'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("server-id".to_string(), "CaseF/b.md".to_string())]);
+        // An id another note holds is refused.
+        let alpha = idx.get_note_meta("Alpha.md").unwrap().map(|m| m.id);
+        if let Some(alpha) = alpha {
+            assert!(!idx.heal_note_id("CaseF/b.md", &alpha).unwrap());
+            assert_eq!(idx.get_note_meta("CaseF/b.md").unwrap().unwrap().id, "server-id");
+        }
+    }
+
+    #[test]
+    fn a_reopen_heals_a_case_twin_left_by_an_older_build() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+        // The disk folder is CaseF/; an older build left the server's spelling
+        // (casef/b.md, with history) AND a fresh row for the disk's spelling.
+        std::fs::create_dir_all(v.join("CaseF")).unwrap();
+        std::fs::write(v.join("CaseF/b.md"), "# b\n").unwrap();
+        idx.rebuild(&v).unwrap();
+        let fresh = idx.get_note_meta("CaseF/b.md").unwrap().unwrap().id;
+        idx.conn
+            .execute(
+                "INSERT INTO notes (id, path, title, mtime, sha256) VALUES ('server-id', 'casef/b.md', 'b', 0, NULL)",
+                [],
+            )
+            .unwrap();
+        idx.set_disk_base("server-id", "abc").unwrap();
+        idx.rebuild(&v).unwrap();
+        let rows: Vec<(String, String)> = idx
+            .conn
+            .prepare("SELECT id, path FROM notes WHERE lower(path) = 'casef/b.md'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("server-id".to_string(), "CaseF/b.md".to_string())], "fresh was {fresh}");
+        // A second reopen changes nothing.
+        idx.rebuild(&v).unwrap();
+        assert_eq!(idx.get_note_meta("CaseF/b.md").unwrap().unwrap().id, "server-id");
+    }
+
     #[test]
     fn a_bridge_write_keys_a_new_file_by_the_writers_doc_id() {
         let (_tmp, v) = seed_vault();
