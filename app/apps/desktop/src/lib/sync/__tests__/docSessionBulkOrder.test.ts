@@ -2095,6 +2095,27 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     );
   });
 
+  it("a folder three levels deep renamed at the top is ONE folder move, never a sub-folder onto the top", async () => {
+    // Every level pairs first; counted under any candidate ABOVE its landing, a
+    // sub-folder paired with the renamed top folder and scrambled the ids.
+    const sm = new SyncManager();
+    const deep: Array<{ docId: string; relPath: string }> = [];
+    for (const l of ["L0", "L1"]) for (const m of ["M0", "M1"]) for (const i of [0, 1]) deep.push({ docId: `${l}${m}${i}`, relPath: `Top/${l}/${m}/n${i}.md` });
+    for (const n of deep) storeHooks.texts.set(n.docId, textOf(n.docId));
+    mapNotes([...deep, ...others], ["Top", "Top/L0", "Top/L1", "Top/L0/M0", "Top/L0/M1", "Top/L1/M0", "Top/L1/M1", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Top2", "Top2/L0", "Top2/L1", "Top2/L0/M0", "Top2/L0/M1", "Top2/L1/M0", "Top2/L1/M1", "Keep"]);
+    for (const n of deep) fakeDisk.files.set(n.relPath.replace(/^Top\//, "Top2/"), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Top2", kind: "tree", gone: false },
+      { path: "Top", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Top", "Top2"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
   it("a rotation (mv B C && mv A B) moves B to C first, then A to B — never A's notes into B's sharing", async () => {
     const sm = new SyncManager();
     const a = [

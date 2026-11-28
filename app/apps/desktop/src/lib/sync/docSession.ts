@@ -3653,14 +3653,26 @@ export class SyncManager implements InboundHost {
       filesTotal: number;
     };
     const plans: Plan[] = [];
-    /** The deepest planned folder strictly below `g` that holds `p`. */
+    /** The TOPMOST planned folder strictly below `g` that holds `p`: the one
+     *  whose own landing says where `p` went relative to `g`. */
     const ownerBelow = (p: string, g: string): Plan | undefined => {
       let best: Plan | undefined;
       for (const pl of plans) {
         if (pl.g === g || !isUnder(pl.g, g) || !isUnder(p, pl.g)) continue;
-        if (!best || pl.g.length > best.g.length) best = pl;
+        if (!best || pl.g.length < best.g.length) best = pl;
       }
       return best;
+    };
+    /** A paired sub-folder is evidence for `g` → `c` only when it landed where
+     *  its parent would be under `c` (renamed in place or carried along). Any
+     *  candidate ABOVE that spot also "contains" it; counted there, a folder two
+     *  levels down paired with the renamed top folder and scrambled every id
+     *  beneath it (2026-11-28 scale test). */
+    const landsUnder = (o: Plan, g: string, c: string): boolean => {
+      const rel = o.g.slice(g.length + 1);
+      const i = rel.lastIndexOf("/");
+      const want = i === -1 ? c : c + "/" + rel.slice(0, i);
+      return (parentDirOf(o.to) ?? "") === want;
     };
     const planFor = async (g: string): Promise<boolean> => {
       for (const s of goneBelow(g)) if (!(await planFor(s))) return false;
@@ -3684,7 +3696,7 @@ export class SyncManager implements InboundHost {
           if (!o) {
             notesTotal++;
             if (notesOnDisk.has(c + n.relPath.slice(g.length))) present.push(n);
-          } else if (isUnder(o.to + n.relPath.slice(o.g.length), c)) {
+          } else if (landsUnder(o, g, c)) {
             notesTotal++;
             if (o.matched.has(n.docId)) matched.add(n.docId);
           }
@@ -3694,7 +3706,7 @@ export class SyncManager implements InboundHost {
           if (!o) {
             filesTotal++;
             if (shas?.has(c + f.relPath.slice(g.length))) filesPresent.push(f);
-          } else if (isUnder(o.to + f.relPath.slice(o.g.length), c)) {
+          } else if (landsUnder(o, g, c)) {
             filesTotal++;
             if (o.matchedFiles.has(f.relPath)) matchedFiles.add(f.relPath);
           }
@@ -3870,7 +3882,7 @@ export class SyncManager implements InboundHost {
       for (const d of done) if (d.g !== p.g && isUnder(p.g, d.g) && (!anc || d.g.length > anc.g.length)) anc = d;
       const at = (q: string) => (anc ? anc.to + q.slice(anc.g.length) : q);
       const from = at(p.g);
-      console.info(`[sync] ${p.g} → ${p.to}: ${p.files}/${p.filesTotal} binaries matched their agreed bytes`);
+      if (from !== p.to) console.info(`[sync] ${p.g} → ${p.to}: ${p.files}/${p.filesTotal} binaries matched their agreed bytes`);
       const res =
         from === p.to
           ? true

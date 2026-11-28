@@ -210,6 +210,35 @@ describe("VaultRegistry — a folder renamed while the app was closed (#276)", (
     expect(api.updateFolder).not.toHaveBeenCalled();
   });
 
+  it("a folder three levels deep renamed while closed is ONE folder move", async () => {
+    const notes: Array<{ id: string; rel_path: string }> = [];
+    const dirs = ["Top"];
+    for (const l of ["L0", "L1"]) {
+      dirs.push(`Top/${l}`);
+      for (const m of ["M0", "M1"]) {
+        dirs.push(`Top/${l}/${m}`);
+        for (const i of [0, 1]) notes.push({ id: `${l}${m}${i}`, rel_path: `Top/${l}/${m}/n${i}.md` });
+      }
+    }
+    const api = fakeApi(notes, dirs.map((p) => ({ id: `f-${p}`, path: p })));
+    const reg = new VaultRegistry(api as unknown as ApiClient);
+    reg.setInboundHost(host({ localText: async (id) => `text ${id}` }));
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(notes.map((n) => n.rel_path), dirs));
+    api.createFolder.mockClear();
+    const moved = (p: string) => p.replace(/^Top/, "Top2");
+    vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree(notes.map((n) => moved(n.rel_path)), dirs.map(moved))));
+    vi.mocked(ipc.readNote).mockImplementation(async (p: string) => {
+      const n = notes.find((x) => moved(x.rel_path) === p);
+      return n ? `text ${n.id}` : "";
+    });
+
+    await reg.pull();
+
+    expect(api.updateFolder.mock.calls).toEqual([["f-Top", { name: "Top2", path: "Top2", parentId: null }]]);
+    expect(created(api)).toEqual([]);
+    expect(reg.getFolderId("Top2/L1/M1")).toBe("f-Top/L1/M1");
+  });
+
   it("a folder and its sub-folder renamed together are two folder moves, parent first", async () => {
     // `mv Old/sub Old/sub2 && mv Old Archive` (a git checkout, an agent's two mvs).
     // By position alone the renamed sub-folder sank the parent below the ratio.

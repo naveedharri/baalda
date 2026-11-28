@@ -4069,13 +4069,23 @@ export class VaultRegistry {
       total: number;
     };
     const plans: Plan[] = [];
+    // The TOPMOST planned folder below `g` holding `p`, counted only where it
+    // landed at its parent's spot under the candidate (see the live drain's
+    // `landsUnder`: counted under any candidate above, a folder two levels
+    // down paired with the renamed top folder).
     const ownerBelow = (p: string, g: string): Plan | undefined => {
       let best: Plan | undefined;
       for (const pl of plans) {
         if (pl.g === g || !under(pl.g, g) || !under(p, pl.g)) continue;
-        if (!best || pl.g.length > best.g.length) best = pl;
+        if (!best || pl.g.length < best.g.length) best = pl;
       }
       return best;
+    };
+    const landsUnder = (o: Plan, g: string, c: string): boolean => {
+      const rel = o.g.slice(g.length + 1);
+      const i = rel.lastIndexOf("/");
+      const want = i === -1 ? c : c + "/" + rel.slice(0, i);
+      return parentDir(o.to) === want;
     };
     const goneBelow = (g: string) => topmost(allGone.filter((p) => p !== g && under(p, g)));
     const planFor = async (g: string): Promise<boolean> => {
@@ -4100,7 +4110,7 @@ export class VaultRegistry {
           if (!o) {
             total++;
             if (notesOnDisk.has(at(n.relPath))) present.push(n);
-          } else if (under(o.to + n.relPath.slice(o.g.length), c)) {
+          } else if (landsUnder(o, g, c)) {
             total++;
             if (o.matched.has(n.docId)) matched.add(n.docId);
           }
@@ -4110,7 +4120,7 @@ export class VaultRegistry {
           if (!o) {
             total++;
             if (shas?.has(at(f.relPath))) filesPresent.push(f);
-          } else if (under(o.to + f.relPath.slice(o.g.length), c)) {
+          } else if (landsUnder(o, g, c)) {
             total++;
             if (o.matchedFiles.has(f.relPath)) matchedFiles.add(f.relPath);
           }
@@ -4286,9 +4296,11 @@ export class VaultRegistry {
           if (n.rel_path !== undefined || n.relPath === undefined) n.rel_path = remap(rp);
         }
       }
-      console.info(
-        `[registry] ${p.g} → ${to} (folder moved while the app was closed; ${p.score}/${p.total} items matched, keeping folder and file ids)`,
-      );
+      if (from !== to) {
+        console.info(
+          `[registry] ${p.g} → ${to} (folder moved while the app was closed; ${p.score}/${p.total} items matched, keeping folder and file ids)`,
+        );
+      }
       done.push(p);
       out.set(p.g, to);
     }
