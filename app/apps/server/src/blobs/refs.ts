@@ -36,13 +36,25 @@ type Queryable = Pick<pg.Pool, "query">;
  *  `ensure_attachment_rel`, and the blob routes' own `safeAttachmentRelPath`). */
 const ATTACHMENT_DIR = "attachments";
 
-/** `![alt](src)` — an image embed. Mirrors `render/note-html.ts`'s own rule. */
-const IMAGE_RE = /!\[[^\]\n]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
+/**
+ * A link destination as CommonMark reads it: `<…>` (the form a path with
+ * spaces takes, title allowed after it), or a bare run holding at most one
+ * level of balanced parentheses (`pic(1).png`). Group 1 or group 2.
+ * Missing any of these left a picture a note shows unrecorded, and the purge
+ * of ANOTHER note embedding it the plain way deleted it for everyone.
+ */
+const DEST = String.raw`\s*(?:<([^<>\n]+)>|((?:[^()\s]|\([^()\s]*\))+))(?:\s+[^)]*)?\)`;
+
+/** `![alt](src)` — an image embed. */
+const IMAGE_RE = new RegExp(String.raw`!\[[^\]\n]*\]\(` + DEST, "g");
 
 /** `[text](src)` — a plain link. Every attachment that is not an image (a PDF,
  *  a docx, a zip) is embedded as one of these by the desktop, so a reference
  *  extractor that only read images would call every one of them an orphan. */
-const LINK_RE = /\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
+const LINK_RE = new RegExp(String.raw`\[[^\]\n]+\]\(` + DEST, "g");
+
+/** `[label]: src` — the definition a reference-style `![alt][label]` uses. */
+const REFDEF_RE = /^[ ]{0,3}\[[^\]\n]+\]:[ \t]*(?:<([^<>\n]+)>|(\S+))/gm;
 
 /** `![[target]]` / `[[target|alias]]` — the wiki form Obsidian vaults (and
  *  notes written by AI tools) use. Missing it left every such note referencing
@@ -50,7 +62,7 @@ const LINK_RE = /\[[^\]\n]+\]\(([^)\s]+)(?:\s+[^)]*)?\)/g;
 const WIKI_RE = /\[\[([^\]\n|#^]+)(?:[|#^][^\]\n]*)?\]\]/g;
 
 /** `<img src="…">` and friends in inline HTML. */
-const SRC_RE = /\b(?:src|href)\s*=\s*["']([^"'\s>]+)["']/gi;
+const SRC_RE = /\b(?:src|href)\s*=\s*(?:"([^"\n>]+)"|'([^'\n>]+)')/gi;
 
 /**
  * The attachment paths a note's markdown references, lowercased and deduped.
@@ -72,7 +84,7 @@ export function assetRefsFromMarkdown(markdown: string): string[] {
     // `../attachments/x.png` from a note in a folder: attachments live at the
     // root, so leading parent steps are dropped (a superset, which is the safe
     // direction for a reference).
-    const rel = relAssetPath(raw.trim().replace(/^(?:\.\.\/)+/, ""));
+    const rel = relAssetPath(raw.trim().replace(/^(?:\.\.?\/)+/, ""));
     if (rel === null) return;
     const segments = rel.split("/");
     if (segments.length < 2 || segments[0].toLowerCase() !== ATTACHMENT_DIR) return;
@@ -87,9 +99,10 @@ export function assetRefsFromMarkdown(markdown: string): string[] {
 
   // Images first; the link pattern would otherwise also match `![](…)`'s tail,
   // but both funnel into the same set, so an overlap costs nothing.
-  for (const m of markdown.matchAll(IMAGE_RE)) take(m[1]);
-  for (const m of markdown.matchAll(LINK_RE)) take(m[1]);
-  for (const m of markdown.matchAll(SRC_RE)) take(m[1]);
+  for (const m of markdown.matchAll(IMAGE_RE)) take(m[1] ?? m[2]);
+  for (const m of markdown.matchAll(LINK_RE)) take(m[1] ?? m[2]);
+  for (const m of markdown.matchAll(REFDEF_RE)) take(m[1] ?? m[2]);
+  for (const m of markdown.matchAll(SRC_RE)) take(m[1] ?? m[2]);
   for (const m of markdown.matchAll(WIKI_RE)) {
     const target = m[1].trim();
     if (target.includes("/")) {

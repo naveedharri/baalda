@@ -10,8 +10,9 @@
  * removes the drops it embedded that no live note still references.
  *
  * "No live note references it" is only as good as `blob_refs`. Version 2 of the
- * extractor reads wiki embeds, and a note indexed before it may have recorded
- * nothing. So nothing is removed in a vault until its references are current:
+ * extractor reads wiki embeds, version 3 `<…>` destinations, `./`, balanced
+ * parentheses, reference definitions and quoted HTML values with spaces; a note
+ * indexed before either may have recorded nothing. So nothing is removed in a vault until its references are current:
  * an unkeyed vault rebuilds them from `note_index.content` on the spot; a keyed
  * one queues every note for a re-index (`index_pending`), drained while a
  * member's key is held. Until then the purge only queues the paths
@@ -28,7 +29,7 @@ type Queryable = {
 };
 
 /** The extractor version whose references a cleanup may trust. */
-export const BLOB_REFS_VERSION = 2;
+export const BLOB_REFS_VERSION = 3;
 
 let notifier: ((vaultId: string) => void) | null = null;
 /** Who tells the vault's devices to list attachments again (`registry-changed`). */
