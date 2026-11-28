@@ -215,6 +215,29 @@ describe("VaultRegistry.renamePath — a move into a brand-new folder (#410)", (
   });
 });
 
+describe("VaultRegistry.renamePath — a folder rename racing a teammate's move of its parent", () => {
+  it("renames under the parent's CURRENT server path", async () => {
+    const mismatch = () =>
+      new ApiError(400, 'Folder path "Docs/Specs2" is not inside its parent "Moved"', {
+        error: 'Folder path "Docs/Specs2" is not inside its parent "Moved"',
+        code: "path_folder_mismatch",
+      });
+    const { reg, api, updateFolder } = await registered(mismatch);
+    updateFolder.mockReset().mockRejectedValueOnce(mismatch()).mockResolvedValue({} as never);
+    vi.mocked(api.listFolderRegistry).mockResolvedValue({
+      folders: [{ id: "folder-Docs", path: "Moved" }] as never,
+      tombstones: [],
+    });
+    expect(await reg.renamePath("Docs/Specs", "Docs/Specs2")).toBe(true);
+    expect(updateFolder).toHaveBeenLastCalledWith("folder-Docs/Specs", {
+      name: "Specs2",
+      path: "Moved/Specs2",
+      parentId: "folder-Docs",
+    });
+    expect(reg.hasFailures()).toBe(false);
+  });
+});
+
 describe("VaultRegistry.renamePath — a rename racing a teammate's folder move", () => {
   const mismatch = () =>
     new ApiError(400, '"Docs/b.md" is not inside folder "Moved"', {

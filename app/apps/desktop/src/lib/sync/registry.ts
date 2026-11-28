@@ -7165,7 +7165,20 @@ export class VaultRegistry {
       // Folder move: rewrite the server subtree, then the local prefix maps.
       const parentId = this.folderByPath.get(parentDir(newPath)) ?? null;
       try {
-        await this.api.updateFolder(folderId, { name: baseName(newPath), path: newPath, parentId });
+        try {
+          await this.api.updateFolder(folderId, { name: baseName(newPath), path: newPath, parentId });
+        } catch (e) {
+          // The folder twin of the note retry below: a rename in place racing
+          // a teammate's move of the PARENT names the parent where it was.
+          const inPlace = samePath(parentDir(newPath), parentDir(oldPath));
+          if (!(inPlace && parentId && errorCode(e) === "path_folder_mismatch")) throw e;
+          const listing = await this.api.listFolderRegistry(vaultId);
+          if (this.stale() || this.serverVaultId !== vaultId) throw e;
+          const now = listing.folders.find((f) => f.id === parentId)?.path;
+          if (!now || samePath(now, parentDir(newPath))) throw e;
+          console.info(`[registry] ${oldPath} → ${newPath}: its parent is now ${now} on the server; renaming there`);
+          await this.api.updateFolder(folderId, { name: baseName(newPath), path: `${now}/${baseName(newPath)}`, parentId });
+        }
       } catch (e) {
         // REPORTED, not just logged. The server can refuse this move on its
         // merits — dragging a folder out to a frozen root is the common one —
