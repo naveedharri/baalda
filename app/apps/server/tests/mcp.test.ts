@@ -954,6 +954,25 @@ describe("MCP server", () => {
       registryBroadcasts.length = 0;
     });
 
+    it("a move naming nothing to change is refused, never answered as done", async () => {
+      // An assistant wrote `newPath`; the note stayed put and the tool said ok.
+      const note = await call(token, "create_note", { vaultId: vault, relPath: "stay.md", title: "Stay" });
+      const docId = note.data.docId as string;
+      registryBroadcasts.length = 0;
+      const res = await call(token, "move_note", { docId, newPath: "Elsewhere/stay.md" });
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain("relPath");
+      expect(res.text).toContain("not recognised: newPath");
+      const folder = await call(token, "create_folder", { vaultId: vault, name: "F", path: "F" });
+      const fres = await call(token, "move_folder", { folderId: folder.data.folderId as string, to: "G" });
+      expect(fres.isError).toBe(true);
+      expect(fres.text).toContain("not recognised: to");
+      const { rows } = await pool.query("SELECT rel_path FROM notes WHERE id = $1", [docId]);
+      expect(rows[0].rel_path).toBe("stay.md");
+      // A real move (folderId null = the root, where it already is) still answers.
+      expect((await call(token, "move_note", { docId, folderId: null })).isError).toBe(false);
+    });
+
     it("refuses moving a note or folder OUT to a frozen root (HTTP parity)", async () => {
       const folder = await call(token, "create_folder", {
         vaultId: vault,

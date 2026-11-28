@@ -101,6 +101,23 @@ function reqStr(args: Args, key: string): string {
   return v;
 }
 
+/**
+ * A move that names nothing to change. Answered with the item unchanged, it
+ * read as success: an assistant that wrote `newPath` (or any key the tool does
+ * not take) believed the note had moved (2026-11-28). Unknown keys are named,
+ * so the caller can see which word it got wrong.
+ */
+function requireOneChange(args: Args, tool: string, changes: string[], others: string[]): void {
+  if (changes.some((k) => args[k] !== undefined)) return;
+  const known = new Set([...changes, ...others, "vaultId"]);
+  const unknown = Object.keys(args).filter((k) => !known.has(k));
+  throw new McpToolError(
+    `${tool} changes nothing without one of: ${changes.join(", ")}` +
+      (unknown.length > 0 ? ` (not recognised: ${unknown.join(", ")})` : ""),
+    "invalid_argument",
+  );
+}
+
 function optStr(args: Args, key: string): string | undefined {
   const v = args[key];
   if (v === undefined || v === null) return undefined;
@@ -748,13 +765,15 @@ export const TOOLS: McpTool[] = [
       required: ["docId"],
       additionalProperties: false,
     },
-    handler: (ctx, a) =>
-      moveNoteTool(ctx, {
+    handler: (ctx, a) => {
+      requireOneChange(a, "move_note", ["relPath", "folderId", "title"], ["docId"]);
+      return moveNoteTool(ctx, {
         docId: reqStr(a, "docId"),
         relPath: optStr(a, "relPath"),
         title: optStr(a, "title"),
         folderId: optStrOrNull(a, "folderId"),
-      }),
+      });
+    },
   },
   {
     name: "move_folder",
@@ -776,13 +795,15 @@ export const TOOLS: McpTool[] = [
       required: ["folderId"],
       additionalProperties: false,
     },
-    handler: (ctx, a) =>
-      moveFolderTool(ctx, {
+    handler: (ctx, a) => {
+      requireOneChange(a, "move_folder", ["path", "name", "parentId"], ["folderId"]);
+      return moveFolderTool(ctx, {
         folderId: reqStr(a, "folderId"),
         path: optStr(a, "path"),
         name: optStr(a, "name"),
         parentId: optStrOrNull(a, "parentId"),
-      }),
+      });
+    },
   },
   {
     name: "list_skills",
