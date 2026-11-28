@@ -146,7 +146,12 @@ describe("Member access board", () => {
   it("says so, in error style, when the server's re-read disagrees with the move", async () => {
     await render();
     // The write is accepted but the server still resolves Welcome as view only.
-    api.setBulkAccess.mockResolvedValue({ mode: "open", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    // Held until the optimistic state is checked: a write that answers at once
+    // lets the re-read land inside the click's act() on a busy machine.
+    let answer!: () => void;
+    api.setBulkAccess.mockImplementation(() => new Promise((resolve) => {
+      answer = () => resolve({ mode: "open", resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 });
+    }));
     await act(async () => button("Move Welcome left").click());
     expect(api.setBulkAccess.mock.calls[0][1]).toEqual({
       resources: [{ resourceType: "file", resourceId: "n2" }],
@@ -155,6 +160,7 @@ describe("Member access board", () => {
     });
     // Optimistic first...
     expect(names("open")).toContain("Welcome");
+    await act(async () => answer());
     await settle();
     // ...then the truth.
     expect(names("readonly")).toContain("Welcome");
