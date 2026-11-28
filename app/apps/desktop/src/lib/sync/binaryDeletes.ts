@@ -502,6 +502,7 @@ export class BinaryDeleteQueue {
       // `blob: null` ⇒ a registered `files` row the server never received bytes
       // for (see below): only the row is removed.
       const deletes: Array<{ relPath: string; blob: RemoteBlob | null }> = [];
+      let followedElsewhere = false;
       for (const item of gone) {
         const blob = blobByPath.get(key(item.relPath));
         // The id this name maps to lives on at ANOTHER path on the server: the
@@ -515,6 +516,12 @@ export class BinaryDeleteQueue {
             `[attachments] ${item.relPath} moved to ${livesAt} on the server — not a delete`,
           );
           this.deps.forgetStalePath?.(item.relPath);
+          // The mirror owes a pass: whatever this device holds of that file now
+          // (a rename made here as the teammate's move landed, carried into the
+          // moved folder) pairs with the server's row only in a pass, and none
+          // was coming (five-app test, 2026-11-28: it waited for an unrelated
+          // change). Asked once, after the loop.
+          followedElsewhere = true;
           continue;
         }
         if (!blob) {
@@ -561,6 +568,7 @@ export class BinaryDeleteQueue {
         }
         deletes.push({ relPath: item.relPath, blob });
       }
+      if (followedElsewhere) this.deps.onServerChanged?.();
       if (deletes.length === 0) return;
 
       // 3. Blast radius, against the vault as it stands: the survivors are gone

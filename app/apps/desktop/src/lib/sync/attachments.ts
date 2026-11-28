@@ -105,6 +105,8 @@ export interface LocalAttachment {
  * quiet period.
  */
 export const UPLOAD_QUIET_MS = 3_000;
+/** How many extra passes one failed offline-rename move may ask for. */
+const MOVE_RETRY_MAX = 3;
 /** How soon a pass held back by a failed deleted-files listing asks again. */
 export const HELD_FILES_RETRY_MS = 15_000;
 /** First retry after a pass whose listing or downloads failed on the network;
@@ -1363,6 +1365,8 @@ export class AttachmentSync {
   private legacyListingBlocked = false;
   private legacyListingRetryAt = 0;
   private rerun = false;
+  /** Failed offline-rename moves, per from→to: each asks for a few more passes. */
+  private moveRetries = new Map<string, number>();
   /**
    * Does this server speak the intent flow? `null` = not asked, `false` = it
    * answered 404 and every later upload goes straight to the legacy route.
@@ -2500,13 +2504,30 @@ export class AttachmentSync {
     for (const m of items) {
       if (!this.current()) return;
       // A live window owns these paths; the delete queue pairs them itself.
-      if (this.deps.isDeletePending?.(m.from) || this.deps.isDeletePending?.(m.to)) continue;
-      if (this.deps.isRenamePending?.()) return;
+      // Either way the move is only postponed, and nothing else would come
+      // back for it (2026-11-28: a rename racing a teammate's folder move
+      // waited ~90 s for an unrelated pass), so ask again once it settles.
+      if (this.deps.isDeletePending?.(m.from) || this.deps.isDeletePending?.(m.to)) {
+        this.retryAfterSettle();
+        continue;
+      }
+      if (this.deps.isRenamePending?.()) {
+        this.retryAfterSettle();
+        return;
+      }
       let id: string | null = null;
       try {
         id = await register({ relPath: m.to, id: m.docId });
       } catch (e) {
         console.warn(`[attachments] couldn't move the files row ${m.from} → ${m.to}; leaving it`, e);
+        // Often a moment early, not wrong: a teammate's folder move is still
+        // carrying this file (`m.to` names the folder it just left), and the
+        // next pass sees it at its new place. Nothing else asks for that pass,
+        // so ask, a few times per move (five-app test, 2026-11-28).
+        const key = `${pathKey(m.from)}→${pathKey(m.to)}`;
+        const tries = (this.moveRetries.get(key) ?? 0) + 1;
+        this.moveRetries.set(key, tries);
+        if (tries <= MOVE_RETRY_MAX) this.retryAfterSettle();
         continue;
       }
       if (!this.current()) return;

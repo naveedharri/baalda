@@ -617,11 +617,16 @@ describe("suppressNext — the revocation's claim on its own echo", () => {
       fileIds: { "Old/small-12.csv": "file-1", "New/small-12.csv": "file-1" },
     });
     h.deps.forgetStalePath = (relPath) => stale.push(relPath);
+    let passes = 0;
+    h.deps.onServerChanged = () => void passes++;
     h.queue.noteChanged("Old/small-12.csv");
     await h.queue.drain();
     expect(h.deleted).toEqual([]);
     expect(h.blobsDeleted).toEqual([]);
     expect(stale).toEqual(["Old/small-12.csv"]);
+    // …and the mirror is asked for a pass: a copy this device renamed as the
+    // move landed pairs with the moved row only there (2026-11-28).
+    expect(passes).toBe(1);
 
     // The same id at THIS path on the server is an ordinary delete.
     const h2 = harness({

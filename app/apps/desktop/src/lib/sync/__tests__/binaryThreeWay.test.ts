@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AttachmentSync,
   planBinarySync,
@@ -430,6 +430,54 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     await a.sync.reconcile();
     expect(dec(a.files.get("Team/new.docx")!)).toBe("fresh");
     expect(a.notices).toEqual([]);
+  });
+
+  it("an offline-rename move that fails asks for another pass (a teammate's move still landing)", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = new FakeServer();
+      server.seed("D", "Old/r.docx", "V1");
+      const a = device("A", server, { "Old/r.docx": "V1" }, { "Old/r.docx": "D" });
+      await a.sync.reconcile();
+      // Renamed here while the row is being moved elsewhere: the first move
+      // names a folder that just went.
+      a.files.delete("Old/r.docx");
+      a.files.set("Old/renamed.docx", enc("V1"));
+      const sync = a.sync as unknown as { deps: AttachmentSyncDeps; scheduleReconcile: () => void };
+      let calls = 0;
+      sync.deps.registerFile = async () => {
+        calls++;
+        throw new Error('No folder at "Old". Create it first');
+      };
+      const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+      await a.sync.reconcile();
+      expect(calls).toBe(1);
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(again).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an offline-rename move postponed by a pending rename asks for another pass", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = new FakeServer();
+      server.seed("D", "Old/r.docx", "V1");
+      const a = device("A", server, { "Old/r.docx": "V1" }, { "Old/r.docx": "D" });
+      await a.sync.reconcile();
+      a.files.delete("Old/r.docx");
+      a.files.set("Old/renamed.docx", enc("V1"));
+      const sync = a.sync as unknown as { deps: AttachmentSyncDeps; scheduleReconcile: () => void };
+      sync.deps.isRenamePending = () => true;
+      const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+      await a.sync.reconcile();
+      expect(server.meta("D").relPath).toBe("Old/r.docx");
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(again).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a genuine local edit still uploads, carrying its base", async () => {
