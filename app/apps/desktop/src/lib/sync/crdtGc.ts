@@ -59,7 +59,13 @@ const defaultDeps: CrdtGcDeps = {
  */
 export async function collectCrdtGarbage(
   deps: Partial<CrdtGcDeps> & Pick<CrdtGcDeps, "registryDocIds">,
-  opts: { epoch?: VaultEpoch; pinned?: Iterable<string> } = {},
+  opts: {
+    epoch?: VaultEpoch;
+    pinned?: Iterable<string>;
+    /** After a successful prune: every doc outside `live` no longer has a local
+     *  CRDT, so in-memory caches of it must go too (the hello manifest). */
+    onPruned?: (live: ReadonlySet<string>) => void;
+  } = {},
 ): Promise<ipc.YjsPruneReport | null> {
   const d = { ...defaultDeps, ...deps };
   try {
@@ -70,6 +76,11 @@ export async function collectCrdtGarbage(
     // failed to learn what is live, and pruning against it would be a wipe.
     if (live.size === 0) return null;
     const report = await d.prune([...live], opts.epoch);
+    try {
+      opts.onPruned?.(live);
+    } catch {
+      /* a cache that stays is only a louder hello */
+    }
     if (report.docsRemoved > 0 || report.updatesRemoved > 0) {
       console.info(
         `[crdt-gc] removed ${report.docsRemoved} dead doc(s), ` +

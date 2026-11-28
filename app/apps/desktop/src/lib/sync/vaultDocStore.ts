@@ -254,6 +254,24 @@ export class VaultDocStore implements DocUpdateSink {
     return [...this.svCache.keys()];
   }
 
+  /**
+   * The CRDT sweep just removed every local doc outside `live` from SQLite.
+   * Forget their cached state vectors too: left here, every `hello` for the
+   * rest of the session claimed those dead docs, the server named them as
+   * tombstones on each reconnect, and each answer cost a registry pull. An open
+   * (hot) doc is never forgotten. Returns how many entries went.
+   */
+  forgetExcept(live: ReadonlySet<string>): number {
+    let gone = 0;
+    for (const docId of [...this.svCache.keys()]) {
+      if (live.has(docId) || this.hot.has(docId)) continue;
+      this.svCache.delete(docId);
+      this.dirtySv.delete(docId);
+      gone++;
+    }
+    return gone;
+  }
+
   async stateVector(docId: string): Promise<Uint8Array | null> {
     const entry = this.hot.get(docId);
     if (entry) return Y.encodeStateVector(entry.bridge.doc);

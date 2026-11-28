@@ -5365,7 +5365,13 @@ export class SyncManager implements InboundHost {
       console.info("[crdt-gc] idle sweep");
       void collectCrdtGarbage(
         { registryDocIds: () => this.registry.crdtKeepIds() },
-        { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
+        {
+          epoch: scope.vaultEpoch ?? undefined,
+          pinned: this.crdtSweepPinned(),
+          onPruned: (live) => {
+            if (scope.isCurrent()) this.docStore?.forgetExcept?.(live);
+          },
+        },
       );
     }, delay);
   }
@@ -6344,7 +6350,14 @@ export class SyncManager implements InboundHost {
       this.lastCrdtSweepAt = Date.now();
       void collectCrdtGarbage(
         { registryDocIds: () => registry.crdtKeepIds() },
-        { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
+        {
+          epoch: scope.vaultEpoch ?? undefined,
+          pinned: this.crdtSweepPinned(),
+          // The store hydrated its manifest from these rows before the sweep.
+          onPruned: (live) => {
+            if (scope.isCurrent()) this.docStore?.forgetExcept?.(live);
+          },
+        },
       );
       this.setupAttachments(scope);
       // Initial attachment reconcile (fire-and-forget; errors are logged rather

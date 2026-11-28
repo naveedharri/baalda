@@ -41,6 +41,20 @@ describe("VaultDocStore — server ops count as acknowledged", () => {
     expect(unseenWork({ localSv: Y.encodeStateVector(local), ackedSv: acked })).toBe(true);
   });
 
+  it("forgets the cached state vector of a doc the CRDT sweep removed, never an open one", async () => {
+    const server = new Y.Doc();
+    server.getText("content").insert(0, "x");
+    const { io } = makeHarness({ "a.md": "", "b.md": "", "c.md": "" });
+    const paths: Record<string, string> = { a: "a.md", b: "b.md", c: "c.md" };
+    const store = new VaultDocStore({ io, resolvePath: (id) => paths[id] ?? null });
+    for (const id of ["a", "b", "c"]) await store.applyUpdate(id, Y.encodeStateAsUpdate(server));
+    await store.promote("c", "c.md", { seedFromFile: false });
+    expect(store.knownDocs().sort()).toEqual(["a", "b", "c"]);
+    // The sweep kept only "a": "b" was deleted; "c" is open.
+    expect(store.forgetExcept(new Set(["a"]))).toBe(1);
+    expect(store.knownDocs().sort()).toEqual(["a", "c"]);
+  });
+
   it("reports even an update it parks (the server holds it either way)", async () => {
     const server = new Y.Doc();
     server.getText("content").insert(0, "x");
