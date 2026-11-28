@@ -138,9 +138,10 @@ export async function replaceBlobRefs(
   vaultId: string,
   markdown: string,
   db: Queryable = defaultPool,
+  opts: { announce?: boolean } = {},
 ): Promise<number> {
   const paths = assetRefsFromMarkdown(markdown);
-  await db.query(
+  const { rows: added } = await db.query<{ rel_path: string }>(
     `WITH incoming AS (
        SELECT DISTINCT unnest($3::text[]) AS rel_path
      ), del AS (
@@ -150,10 +151,68 @@ export async function replaceBlobRefs(
      )
      INSERT INTO blob_refs (vault_id, rel_path, doc_id)
      SELECT $2, i.rel_path, $1 FROM incoming i
-     ON CONFLICT (vault_id, rel_path, doc_id) DO NOTHING`,
+     ON CONFLICT (vault_id, rel_path, doc_id) DO NOTHING
+     RETURNING rel_path`,
     [docId, vaultId, paths],
   );
+  if (opts.announce && added.length > 0) await announceGainedRefs(vaultId, added.map((r) => r.rel_path), db);
   return paths.length;
+}
+
+// ── telling the vault a note now shows a picture that is already there ──
+
+let refsNotifier: ((vaultId: string) => void) | null = null;
+/** Who tells a vault's devices to list attachments again (`registry-changed`). */
+export function setBlobRefsNotifier(fn: ((vaultId: string) => void) | null): void {
+  refsNotifier = fn;
+}
+
+/** Frames for one vault within this window go out as one. */
+const ANNOUNCE_COALESCE_MS = 1_500;
+const announceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * A note just started embedding an `attachments/` drop the server already
+ * holds. A member who reads that note but not the whole vault may see the
+ * drop only from now on, and nothing else says so: the upload's own frame went
+ * out when its bytes landed, usually BEFORE the edit embedding it was indexed,
+ * so their list then did not include it and their device never asked again
+ * (an embed added to an existing shared note stayed missing for them). One
+ * frame per vault per {@link ANNOUNCE_COALESCE_MS}; a failure only costs the
+ * shortcut.
+ */
+async function announceGainedRefs(vaultId: string, added: string[], db: Queryable): Promise<void> {
+  if (!refsNotifier || announceTimers.has(vaultId)) return;
+  try {
+    const { rows } = await db.query(
+      `SELECT 1 FROM blobs
+        WHERE vault_id = $1 AND status = 'ready' AND doc_id IS NULL AND lower(rel_path) = ANY($2::text[])
+        LIMIT 1`,
+      [vaultId, added],
+    );
+    if (rows.length === 0 || announceTimers.has(vaultId)) return;
+    const t = setTimeout(() => {
+      announceTimers.delete(vaultId);
+      try {
+        refsNotifier?.(vaultId);
+      } catch (err) {
+        console.warn(`[blob-refs] vault=${vaultId} broadcast failed:`, err);
+      }
+    }, ANNOUNCE_COALESCE_MS);
+    if (typeof t.unref === "function") t.unref();
+    announceTimers.set(vaultId, t);
+  } catch (err) {
+    console.warn(`[blob-refs] vault=${vaultId} checking new references failed:`, (err as Error).message);
+  }
+}
+
+/** Test hook: send every pending frame now. */
+export function flushBlobRefsAnnouncements(): void {
+  for (const [vaultId, t] of announceTimers) {
+    clearTimeout(t);
+    announceTimers.delete(vaultId);
+    refsNotifier?.(vaultId);
+  }
 }
 
 /** Drop the references of docs that no longer exist. Paired with

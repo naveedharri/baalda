@@ -3,7 +3,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { seedBlob, seedNote, seedOrg, seedVault } from "./helpers/seed.js";
-import { replaceBlobRefs } from "../src/blobs/refs.js";
+import { flushBlobRefsAnnouncements, replaceBlobRefs, setBlobRefsNotifier } from "../src/blobs/refs.js";
 import { BLOB_REFS_VERSION, processAttachmentCleanup } from "../src/blobs/attachment-cleanup.js";
 import { purgeExpiredTrash } from "../src/trash/service.js";
 import { purgeNoteIndex } from "../src/index/indexer.js";
@@ -125,6 +125,30 @@ describe("attachments of a purged note", () => {
     expect(await processAttachmentCleanup()).toBe(1);
     expect(await blobAt("attachments/only-a.png")).toBe(0);
     for (const [rel] of forms) expect([rel, await blobAt(rel)]).toEqual([rel, 1]);
+  });
+
+  it("tells the vault once when a note starts embedding a drop the server already holds", async () => {
+    const heard: string[] = [];
+    setBlobRefsNotifier((v) => heard.push(v));
+    try {
+      await seedBlob(vaultId, orgId, "attachments/there.png");
+      const id = await seedNote(vaultId, null, "Shared.md");
+      // An edit that embeds nothing held, then the same embed again: silent.
+      await replaceBlobRefs(id, vaultId, "![](attachments/not-uploaded.png)", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([]);
+      // Now it embeds the held drop: one frame, however many edits follow.
+      await replaceBlobRefs(id, vaultId, "![](attachments/not-uploaded.png) ![](attachments/there.png)", pool, { announce: true });
+      await replaceBlobRefs(id, vaultId, "![](attachments/there.png) more text", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId]);
+      // Same references, new text: nothing new to say.
+      await replaceBlobRefs(id, vaultId, "![](attachments/there.png) and more text", pool, { announce: true });
+      flushBlobRefsAnnouncements();
+      expect(heard).toEqual([vaultId]);
+    } finally {
+      setBlobRefsNotifier(null);
+    }
   });
 
   it("rebuilds an unkeyed vault's references from the index before trusting them", async () => {

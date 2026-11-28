@@ -41,6 +41,7 @@ import { createPublicPageRoutes, publicLinkApiRoutes } from "./routes/public-lin
 import { ACCESS_BOARD_FEATURE } from "../permissions/access-board.js";
 import { blobRoutes, EMPTY_FILES_FEATURE, FILES_WITH_BYTES_FEATURE, setBlobRegistryNotifier } from "./routes/blobs.js";
 import { setAttachmentCleanupNotifier } from "../blobs/attachment-cleanup.js";
+import { setBlobRefsNotifier } from "../blobs/refs.js";
 import { createRegistryRoutes, ORIGIN_HEADER } from "./routes/registry.js";
 import { createBulkRoutes } from "./routes/bulk.js";
 import { bootstrapRoutes } from "./routes/bootstrap.js";
@@ -572,6 +573,7 @@ export function createApp(deps: AppDeps): Hono {
   setAttachmentCleanupNotifier(
     deps.onRegistryChanged ? (vaultId) => deps.onRegistryChanged?.(vaultId, null) : null,
   );
+  setBlobRefsNotifier(deps.onRegistryChanged ? (vaultId) => deps.onRegistryChanged?.(vaultId, null) : null);
   app.route("/api", blobRoutes);
   app.route(
     "/api",

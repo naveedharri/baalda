@@ -306,7 +306,9 @@ async function indexNoteRow(
   // SAME text `note_index.content` was just written from, so the two can never
   // disagree about what the note says, and written here because this is the one
   // place that sees a note's markdown after every edit.
-  await replaceBlobRefs(docId, note.vault_id, content, db);
+  // `announce`: a newly embedded drop the server already holds is news for
+  // members who see it only through this note (see `announceGainedRefs`).
+  await replaceBlobRefs(docId, note.vault_id, content, db, { announce: true });
 
   // Replace this doc's link edges wholesale (cheap; a doc has few links).
   await db.query("DELETE FROM note_links WHERE from_doc = $1", [docId]);
