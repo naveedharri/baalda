@@ -87,7 +87,7 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
   const items = group.every((it) => isNoteExt(it.path)) ? notes(n) : `${n.toLocaleString()} ${one ? "file" : "files"}`;
   switch (kind) {
     case "deletedByTeammate":
-      return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your ${one ? "version is" : "versions are"} in Trash.`;
+      return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your unsent changes went with ${one ? "it" : "them"}.`;
     case "restoredFromServer": {
       // A delete refused because a member may delete only what they created.
       const notMine = group.filter((it) => it.detail === NOT_CREATOR_DETAIL);

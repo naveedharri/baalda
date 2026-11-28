@@ -1382,7 +1382,7 @@ describe("inbound delete", () => {
     expect(disk.copies).toEqual([]);
     expect(disk.deleted).toEqual(["mine.md"]);
     expect(r.reg.failures().map((f) => f.kind)).not.toContain("orphan");
-    expect(reconcileReport.items()).toEqual([]);
+    expect(reconcileReport.items()).toEqual([expect.objectContaining({ kind: "deletedByTeammate", path: "mine.md" })]);
   });
 
   it("removes a stale device's copy outright, with no recovery copy", async () => {
@@ -2791,7 +2791,8 @@ describe("offline reconciliation — the acknowledged state vector gate", () => 
     const { disk } = await deleteWith(Y.encodeStateVector(doc), acked);
     expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
-    expect(reconcileReport.items()).toEqual([]);
+    // Removed, and said so (like an access removal's unsent work, 2026-11-26).
+    expect(reconcileReport.items()).toEqual([expect.objectContaining({ kind: "deletedByTeammate", path: "n.md" })]);
   });
 
   it("open-but-disconnected edit (never acknowledged at all): removed outright, no copy", async () => {
@@ -3520,7 +3521,7 @@ describe("offline reconciliation — ready.tombstones", () => {
     expect(reg.isServerTombstoned("d1")).toBe(true);
     expect(disk.copies).toEqual([]);
     expect(disk.notes.has("n.md")).toBe(false);
-    expect(reconcileReport.items()).toEqual([]);
+    expect(reconcileReport.items()).toEqual([expect.objectContaining({ kind: "deletedByTeammate", docId: "d1" })]);
   });
 
   it("without the field the pass is unchanged: the same absence reads as a revocation", async () => {

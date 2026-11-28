@@ -3409,10 +3409,13 @@ export class VaultRegistry {
       /** Revoked binaries whose bytes left their agreed base (edited here and
        *  not uploaded yet): judged again with the notes, removed after. */
       const unsentBinaries: InboundTrash[] = [];
-      // Revoked notes whose file left its disk base (edited on disk, not yet
-      // taken in): one index query per chunk, never a read per note. A failed
-      // query falls back to reading each one.
-      const revokedNotes = group.filter((g) => g.reason === "revoked" && !g.binary);
+      /** Notes a teammate deleted that held work the server never saw: they
+       *  leave all the same (deleted means deleted), and the person is told. */
+      const unsentDeleted = new Set<string>();
+      // Revoked or deleted notes whose file left its disk base (edited on disk,
+      // not yet taken in): one index query per chunk, never a read per note. A
+      // failed query falls back to reading each one.
+      const revokedNotes = group.filter((g) => (g.reason === "revoked" || g.reason === "deleted") && !g.binary);
       const drifted: Set<string> | null =
         revokedNotes.length === 0
           ? new Set()
@@ -3468,6 +3471,10 @@ export class VaultRegistry {
           if (gone.reason === "revoked" && verdict !== "none") {
             verdict = await this.revokedVerdict(gone, verdict, args.titles);
           }
+          // What this device holds that the server never saw, before "unknown"
+          // is promoted below: a never-opened file with no baseline is not an
+          // offline edit, and must not be reported as one.
+          const heldUnseen = verdict === "unseen";
           if (verdict === "unknown" && gone.reason === "deleted") {
             // No content baseline is not the same as no identity. Newly created
             // or never-opened files can lack CRDT/disk-base state, while the
@@ -3507,6 +3514,13 @@ export class VaultRegistry {
               (drifted ? drifted.has(gone.docId) : await this.fileAheadOfDiskBase(gone.docId, gone.path)))
           ) {
             unsentRevoked.add(gone.docId);
+          }
+          if (
+            gone.reason === "deleted" &&
+            !this.isOwnDelete(gone.path) &&
+            (heldUnseen || (drifted ? drifted.has(gone.docId) : await this.fileAheadOfDiskBase(gone.docId, gone.path)))
+          ) {
+            unsentDeleted.add(gone.docId);
           }
           if (!this.stopRun()) ready.push(gone);
         } catch (e) {
@@ -3621,6 +3635,12 @@ export class VaultRegistry {
         this.authoredDocs.delete(gone.docId);
         this.host?.noteRemoved(gone.docId, gone.path, null, gone.reason, bulkRemoval);
         if (gone.reason === "revoked" && unsentRevoked.has(gone.docId)) this.reportUnsentRemoved(gone);
+        if (gone.reason === "deleted" && unsentDeleted.has(gone.docId)) {
+          // Said once, like an access removal's unsent work: since the trash
+          // went (2026-11-19) the words just vanished with no notice.
+          console.info(`[sync] ${gone.path}: deleted by a teammate with unsent changes here; told the person`);
+          reconcileReport.record({ kind: "deletedByTeammate", docId: gone.docId, path: gone.path });
+        }
         if (gone.reason === "deleted" && gone.path.includes("/")) {
           deletedNoteParents.add(gone.path.slice(0, gone.path.lastIndexOf("/")));
         }

@@ -23,7 +23,7 @@ describe("summarizeReconcile", () => {
       item({ kind: "folderKept", path: "Projects/Q3" }),
     ]);
     expect(lines.map((l) => l.text)).toEqual([
-      "2 notes you edited offline were deleted by a teammate. Your versions are in Trash.",
+      "2 notes you edited offline were deleted by a teammate. Your unsent changes went with them.",
       "1 note is kept on this device only: you no longer have access.",
       "1 note you deleted didn't reach the server, so it was put back. Delete it again to remove it for everyone.",
       "1 note was renamed to avoid a clash: plan.md → plan (2).md.",
@@ -35,7 +35,7 @@ describe("summarizeReconcile", () => {
   it("uses singular wording for one and plural for many", () => {
     const one = summarizeReconcile([item({ kind: "deletedByTeammate", path: "a.md", docId: "1" })]);
     expect(one[0].text).toBe(
-      "1 note you edited offline was deleted by a teammate. Your version is in Trash.",
+      "1 note you edited offline was deleted by a teammate. Your unsent changes went with it.",
     );
     const many = summarizeReconcile([
       item({ kind: "restoredFromServer", path: "a.md", docId: "1" }),
