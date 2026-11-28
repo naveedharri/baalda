@@ -588,6 +588,24 @@ describe("suppressNext — the revocation's claim on its own echo", () => {
     expect(h.deleted).toEqual(["file-1"]);
   });
 
+  it("a file moved straight back onto the name a teammate's move took it from is a rename, never a delete", async () => {
+    // A teammate renamed a.png → b.png and this device followed (a.png is the
+    // own move's source). The person renames it straight back.
+    const h = harness({
+      local: [{ relPath: "F/a.png", sha256: "sha-b1" }],
+      server: [{ ...blob("b1", "F/b.png"), docId: "file-1" }],
+      onDisk: ["F/a.png"],
+      fileIds: { "F/b.png": "file-1" },
+    });
+    h.deps.isOwnMoveSource = (relPath) => relPath === "F/a.png";
+    h.queue.noteChanged("F/a.png");
+    h.queue.noteChanged("F/b.png");
+    await h.queue.drain();
+    expect(h.moved).toEqual([{ id: "file-1", relPath: "F/a.png" }]);
+    expect(h.deleted).toEqual([]);
+    expect(h.blobsDeleted).toEqual([]);
+  });
+
   it("a name whose id the server holds at another path is a stale mapping, not a delete", async () => {
     // The own-move mark can be gone (aged out, another device's pass). The
     // server listing is the evidence that does not age: the id moved.

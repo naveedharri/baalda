@@ -296,7 +296,11 @@ export class BinaryDeleteQueue {
     // A repeat report of the same removal (the claim above is spent by the
     // first event): still ours, still not a delete.
     if (this.deps.isOwnRemoval?.(relPath)) return;
-    if (this.deps.isOwnMoveSource?.(relPath)) return;
+    // The name an own move took a file FROM is NOT dropped here: the event may
+    // be that move's echo (the drain finds the path gone and skips it, below),
+    // or the person moving the file straight back, whose arrival must be in the
+    // window to pair with the other name's removal. Dropping it here sent that
+    // move out as a delete and the file came back under a new id (2026-11-28).
     // Not live ⇒ startup: a file that isn't there yet is a disk (or a pull)
     // catching up, not a deletion. Refused HERE rather than at drain time so
     // the window never starts and the path stays downloadable meanwhile.
