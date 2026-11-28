@@ -107,8 +107,16 @@ function reqStr(args: Args, key: string): string {
  * not take) believed the note had moved (2026-11-28). Unknown keys are named,
  * so the caller can see which word it got wrong.
  */
-function requireOneChange(args: Args, tool: string, changes: string[], others: string[]): void {
-  if (changes.some((k) => args[k] !== undefined)) return;
+function requireOneChange(
+  args: Args,
+  tool: string,
+  changes: string[],
+  others: string[],
+  /** The one key whose `null` means something ("to the vault root"); any
+   *  other key's `null` is dropped by `optStr` and changes nothing. */
+  nullable: string,
+): void {
+  if (changes.some((k) => args[k] !== undefined && (args[k] !== null || k === nullable))) return;
   const known = new Set([...changes, ...others, "vaultId"]);
   const unknown = Object.keys(args).filter((k) => !known.has(k));
   throw new McpToolError(
@@ -766,7 +774,7 @@ export const TOOLS: McpTool[] = [
       additionalProperties: false,
     },
     handler: (ctx, a) => {
-      requireOneChange(a, "move_note", ["relPath", "folderId", "title"], ["docId"]);
+      requireOneChange(a, "move_note", ["relPath", "folderId", "title"], ["docId"], "folderId");
       return moveNoteTool(ctx, {
         docId: reqStr(a, "docId"),
         relPath: optStr(a, "relPath"),
@@ -796,7 +804,7 @@ export const TOOLS: McpTool[] = [
       additionalProperties: false,
     },
     handler: (ctx, a) => {
-      requireOneChange(a, "move_folder", ["path", "name", "parentId"], ["folderId"]);
+      requireOneChange(a, "move_folder", ["path", "name", "parentId"], ["folderId"], "parentId");
       return moveFolderTool(ctx, {
         folderId: reqStr(a, "folderId"),
         path: optStr(a, "path"),

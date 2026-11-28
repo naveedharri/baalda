@@ -967,6 +967,8 @@ describe("MCP server", () => {
       const fres = await call(token, "move_folder", { folderId: folder.data.folderId as string, to: "G" });
       expect(fres.isError).toBe(true);
       expect(fres.text).toContain("not recognised: to");
+      // A null that `optStr` drops is no change either.
+      expect((await call(token, "move_note", { docId, newPath: "x.md", relPath: null })).isError).toBe(true);
       const { rows } = await pool.query("SELECT rel_path FROM notes WHERE id = $1", [docId]);
       expect(rows[0].rel_path).toBe("stay.md");
       // A real move (folderId null = the root, where it already is) still answers.
