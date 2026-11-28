@@ -394,6 +394,19 @@ export const auth = betterAuth({
         afterAddMember: async ({ member }) => {
           await attributeMembershipEvent(member.id, "insert", auditRequestActor.getStore() ?? null);
         },
+        // Removal must go through DELETE /api/orgs/:orgId/members/:userId, which
+        // enforces our matrix (only the owner removes an admin) and drops the
+        // person's own access rows and keys in the same transaction. Better
+        // Auth's endpoint did neither: an admin could remove another admin, and
+        // a removed member kept every per-person row and got that access back
+        // on rejoining (2026-11-28). Closed off like update-member-role.
+        beforeRemoveMember: async () => {
+          throw new APIError("FORBIDDEN", {
+            message: "remove_member_not_supported_here",
+          });
+        },
+        // Unreachable while the refusal above stands; kept so a lifted refusal
+        // still attributes, rekeys and announces.
         afterRemoveMember: async ({ organization, member }) => {
           await attributeMembershipEvent(member.id, "delete", auditRequestActor.getStore() ?? null);
           await onMembershipTrimmed(authPool, organization.id);

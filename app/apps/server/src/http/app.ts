@@ -488,6 +488,13 @@ export function createApp(deps: AppDeps): Hono {
     if (c.req.method !== "POST" || !c.req.path.startsWith("/api/auth/organization/")) {
       return auth.handler(c.req.raw);
     }
+    // Leaving goes through POST /api/orgs/:orgId/leave, which drops the
+    // leaver's own access rows and keys with the membership and refuses the
+    // owner. Better Auth's leave has no organization hook and did neither, so a
+    // member who left through it got every per-person row back on rejoining.
+    if (c.req.method === "POST" && c.req.path === "/api/auth/organization/leave") {
+      return c.json({ error: "leave_not_supported_here", message: "Leave a vault with POST /api/orgs/:orgId/leave." }, 403);
+    }
     const session = await getSession(c);
     const response = await auditRequestActor.run(session?.userId ?? null, () => auth.handler(c.req.raw));
     // Better Auth's leave endpoint bypasses its afterRemoveMember hook.
