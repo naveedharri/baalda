@@ -7211,7 +7211,24 @@ export class VaultRegistry {
       const newFolderId =
         this.folderByPath.get(this.canonicalFolderPath(parentDir(newPath)) ?? parentDir(newPath)) ?? null;
       try {
-        await this.api.updateNote(mapping.docId, { relPath: newPath, folderId: newFolderId });
+        try {
+          await this.api.updateNote(mapping.docId, { relPath: newPath, folderId: newFolderId });
+        } catch (e) {
+          // A rename in place racing a teammate's move of the folder (five-app
+          // test, 2026-11-28): our path still names the folder where it WAS, so
+          // the server refuses the pair as a mismatch, and the rename used to be
+          // lost while the note followed the folder under its old name. The
+          // folder id is the truth: rename under its CURRENT path, once; the
+          // next pull carries the local directory after it.
+          const inPlace = samePath(parentDir(newPath), parentDir(oldPath));
+          if (!(inPlace && newFolderId && errorCode(e) === "path_folder_mismatch")) throw e;
+          const listing = await this.api.listFolderRegistry(vaultId);
+          if (this.stale() || this.serverVaultId !== vaultId) throw e;
+          const now = listing.folders.find((f) => f.id === newFolderId)?.path;
+          if (!now || samePath(now, parentDir(newPath))) throw e;
+          console.info(`[registry] ${oldPath} → ${newPath}: its folder is now ${now} on the server; renaming there`);
+          await this.api.updateNote(mapping.docId, { relPath: `${now}/${baseName(newPath)}`, folderId: newFolderId });
+        }
       } catch (e) {
         // Same reason as the folder branch above. This one is the path an
         // EXTERNAL rename takes (`docSession.applyDiskRename`), which treats a
