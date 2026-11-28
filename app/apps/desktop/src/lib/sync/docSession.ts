@@ -2566,10 +2566,16 @@ export class SyncManager implements InboundHost {
       if (!mapping) {
         // Possibly the arrival half of a rename whose departure half is pending.
         // Recorded either way; `drainDiskDeletes` decides by content hash.
-        if (
-          (this.pendingDiskDeletes.size > 0 || this.goneFolders.size > 0) &&
-          !this.registry.isOwnMove?.(relPath)
-        ) {
+        // Only the path an own move put a file ONTO is skipped (a conflict
+        // copy, the name a followed move gave the note): pairing it renamed a
+        // teammate's note on the server. The name a move took a file FROM is
+        // the person's again at once, like `queueDiskDelete`: a note a
+        // teammate moved and this person moved straight back must pair as a
+        // rename, or its old path went out as a delete for everyone and the
+        // words came back as a new note (2026-11-28 five-app test).
+        const ownMoveTarget =
+          this.registry.isOwnMove?.(relPath) === true && this.registry.isOwnMoveSource?.(relPath) !== true;
+        if ((this.pendingDiskDeletes.size > 0 || this.goneFolders.size > 0) && !ownMoveTarget) {
           this.renameCandidates.set(relPath, Date.now());
           queuedDelete = true; // hold the pull until the drain has decided
         }
@@ -2661,6 +2667,9 @@ export class SyncManager implements InboundHost {
     // pairing it renamed their note on the server. The path a move put a file
     // ONTO is not skipped: deleting it right after is a real delete.
     if (this.registry.isOwnMoveSource?.(relPath) ?? this.registry.isOwnMove?.(relPath)) return false;
+    // The file a move put here is gone again: a later arrival here is the
+    // person's own (a move straight back), so it may pair as a rename.
+    this.registry.releaseOwnMoveTarget?.(relPath);
     const mapping = this.registry.getMapping(relPath);
     if (!mapping) {
       // Inside a folder that just moved on disk, before the move is paired: the

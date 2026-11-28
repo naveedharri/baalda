@@ -1758,6 +1758,19 @@ export class VaultRegistry {
   }
 
   /**
+   * The file an own move put onto `relPath` has left it again (the watcher
+   * found the path empty): whatever arrives there next is the person's, not
+   * our move's echo, so the mark ends now instead of aging out. Without this,
+   * a note moved away and straight back within {@link OWN_MOVE_TTL_MS} was not
+   * paired as a rename: the old path went out as a delete and the words came
+   * back under a new id (2026-11-28). Source marks are left alone.
+   */
+  releaseOwnMoveTarget(relPath: string): void {
+    const entry = this.ownMoves.get(pathKey(relPath));
+    if (entry !== undefined && entry.source === false) this.ownMoves.delete(pathKey(relPath));
+  }
+
+  /**
    * Did this device delete `relPath`, or a folder above it, in-app within
    * {@link OWN_DELETE_TTL_MS}? Not consumed, entries age out.
    */

@@ -1565,6 +1565,98 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.pull).toHaveBeenCalled();
   });
 
+  it("moving a note back onto the name a teammate's move took it from is a rename, never a delete", async () => {
+    // A teammate moved the note Old.md → New.md; this device followed (own
+    // move: Old.md the source, New.md the target). The person moves it straight
+    // back. Old.md is theirs again: the pair must be a rename. Skipping it as an
+    // own move sent New.md out as a delete for everyone (2026-11-28).
+    const sm = new SyncManager();
+    mapOne("New.md");
+    await live(sm);
+    const r = fakeRegistry as unknown as { isOwnMove?: (p: string) => boolean; isOwnMoveSource?: (p: string) => boolean };
+    r.isOwnMove = (p) => p === "Old.md" || p === "New.md";
+    r.isOwnMoveSource = (p) => p === "Old.md";
+    try {
+      const sha = createHash("sha256").update("content", "utf8").digest("hex");
+      fakeDisk.files.set("Old.md", "content");
+      fakeDisk.shas.set("Old.md", sha);
+      sm.handleLocalFilesChanged([
+        { path: "Old.md", kind: "modified" },
+        { path: "New.md", kind: "removed" },
+      ]);
+      await drain();
+      expect(fakeRegistry.renamePath).toHaveBeenCalledWith("New.md", "Old.md");
+      expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+      expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
+    } finally {
+      delete r.isOwnMove;
+      delete r.isOwnMoveSource;
+    }
+  });
+
+  it("a note moved off the path an own move put it on, then straight back, is a rename both ways", async () => {
+    // A teammate's rename put the note at F/B.md here (own-move target). The
+    // person moves it to Top.md, then straight back to F/B.md within the mark's
+    // life. The first leg found F/B.md empty, so the mark ended: the way back
+    // pairs too, instead of a delete plus a new note under a new id (2026-11-28).
+    const sm = new SyncManager();
+    mapOne("Top.md");
+    await live(sm);
+    const marks = new Map<string, boolean>([["F/B.md", false]]);
+    const r = fakeRegistry as unknown as {
+      isOwnMove?: (p: string) => boolean;
+      isOwnMoveSource?: (p: string) => boolean;
+      releaseOwnMoveTarget?: (p: string) => void;
+    };
+    r.isOwnMove = (p) => marks.has(p);
+    r.isOwnMoveSource = (p) => marks.get(p) === true;
+    r.releaseOwnMoveTarget = (p) => {
+      if (marks.get(p) === false) marks.delete(p);
+    };
+    try {
+      // The first leg's removal of F/B.md (unmapped in this fake) ends the mark.
+      sm.handleLocalFilesChanged([{ path: "F/B.md", kind: "removed" }]);
+      expect(marks.has("F/B.md")).toBe(false);
+      const sha = createHash("sha256").update("content", "utf8").digest("hex");
+      fakeDisk.files.set("F/B.md", "content");
+      fakeDisk.shas.set("F/B.md", sha);
+      sm.handleLocalFilesChanged([
+        { path: "F/B.md", kind: "modified" },
+        { path: "Top.md", kind: "removed" },
+      ]);
+      await drain();
+      expect(fakeRegistry.renamePath).toHaveBeenCalledWith("Top.md", "F/B.md");
+      expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+    } finally {
+      delete r.isOwnMove;
+      delete r.isOwnMoveSource;
+      delete r.releaseOwnMoveTarget;
+    }
+  });
+
+  it("a file on the path an own move put it onto never pairs into a rename", async () => {
+    const sm = new SyncManager();
+    mapOne("Old.md");
+    await live(sm);
+    const r = fakeRegistry as unknown as { isOwnMove?: (p: string) => boolean; isOwnMoveSource?: (p: string) => boolean };
+    r.isOwnMove = (p) => p === "New.md";
+    r.isOwnMoveSource = () => false;
+    try {
+      const sha = createHash("sha256").update("content", "utf8").digest("hex");
+      fakeDisk.files.set("New.md", "content");
+      fakeDisk.shas.set("New.md", sha);
+      sm.handleLocalFilesChanged([
+        { path: "New.md", kind: "modified" },
+        { path: "Old.md", kind: "removed" },
+      ]);
+      await drain();
+      expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
+    } finally {
+      delete r.isOwnMove;
+      delete r.isOwnMoveSource;
+    }
+  });
+
   it("a refused disk rename is put back AND its edits are queued to send", async () => {
     // A member renames a teammate's note in Finder and types into it under the
     // new name. The server refuses the rename and the old name comes back, but

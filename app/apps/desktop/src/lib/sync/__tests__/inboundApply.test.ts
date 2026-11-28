@@ -3369,6 +3369,12 @@ describe("offline reconciliation — same-path create (D4)", () => {
     // …but deleting the restored old name right after is a real delete.
     expect(reg.isOwnMoveSource("New.md")).toBe(true);
     expect(reg.isOwnMoveSource("Old.md")).toBe(false);
+    // Once that file has left the name the move put it on, the mark ends: a
+    // note moved straight back there is the person's, and pairs as a rename.
+    reg.releaseOwnMoveTarget("Old.md");
+    expect(reg.isOwnMove("Old.md")).toBe(false);
+    reg.releaseOwnMoveTarget("New.md");
+    expect(reg.isOwnMoveSource("New.md")).toBe(true);
   });
 
   it("the local note is later: it is renamed and never bound to the teammate's id", async () => {
