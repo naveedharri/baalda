@@ -3147,6 +3147,20 @@ export class VaultRegistry {
         claimed.add(path);
       }
     }
+    // Then the same file under this disk's spelling: `byPath` is keyed by the
+    // SERVER's path, so a teammate's `casef/b.md` that landed in this disk's
+    // `CaseF/` folder is named `CaseF/b.md` by the tree. Missed here, it fell
+    // to the index, whose older rows carry a fresh local id for it: a delete of
+    // the real id then found no local note and the file was re-registered as a
+    // new one, for everyone. One disk path per doc; exact matches win.
+    for (const path of localNotePaths) {
+      if (claimed.has(path)) continue;
+      const m = this.getMappingCi(path);
+      if (m && m.vaultId === vaultId && !local.has(m.docId)) {
+        local.set(m.docId, path);
+        claimed.add(path);
+      }
+    }
     // Only notes that are BOTH in the tree and in the index have a docId we can
     // match on. The index now covers the WHOLE note family (`index.rs` asks
     // `vault::is_note_file`), so a `.txt`/`.canvas` note is inbound-renameable

@@ -1486,6 +1486,83 @@ describe("inbound delete", () => {
 });
 
 
+describe("a teammate's delete of a note this disk spells in another case", () => {
+  it("removes the file instead of re-registering it as a new note", async () => {
+    // The registry maps the SERVER's spelling (casef/b.md); this disk's folder
+    // is CaseF/, so the tree names CaseF/b.md, and an older index holds it under
+    // a fresh local id beside the server's. An exact-case claim missed the
+    // mapping, the plan took the fresh id, found no local note for the
+    // tombstone, and the file came back for everyone as a new note.
+    const disk = new FakeDisk();
+    disk.folders.add("casef");
+    disk.notes.set("casef/b.md", "d1");
+    disk.bodies.set("casef/b.md", "# b");
+    install(disk);
+    const reg1 = new VaultRegistry(fakeApi({ notes: [{ id: "d1", rel_path: "casef/b.md" }], folders: [{ id: "f1", path: "casef" }] }));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+
+    disk.folders.delete("casef");
+    disk.folders.add("CaseF");
+    disk.notes.delete("casef/b.md");
+    disk.bodies.delete("casef/b.md");
+    disk.notes.set("CaseF/b.md", "fresh-local-id");
+    disk.bodies.set("CaseF/b.md", "# b");
+    // Rust keys `yjs_disk_base` by doc id, not by the index row, so d1 keeps
+    // the base it had before the second row appeared.
+    vi.mocked(ipc.getDiskBase).mockImplementation((async (docId: string) =>
+      docId === "d1" || docId === "fresh-local-id" ? sha256Hex("# b") : null) as never);
+
+    const api = fakeApi({ notes: [], tombstones: ["d1"], folders: [], folderTombstones: ["f1"] });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost(recordingHost().host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(reg.failures().map((f) => [f.kind, f.code, f.reason])).toEqual([]);
+    expect(disk.notes.has("CaseF/b.md")).toBe(false);
+    expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+    expect(reg.failures().map((f) => f.code)).not.toContain("resurrected_local_note");
+  });
+
+  it("while the server still lists it: no rename, no new note, and a second pass changes nothing", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("casef");
+    disk.notes.set("casef/b.md", "d1");
+    disk.bodies.set("casef/b.md", "# b");
+    install(disk);
+    const listed = { notes: [{ id: "d1", rel_path: "casef/b.md" }], folders: [{ id: "f1", path: "casef" }] };
+    const reg1 = new VaultRegistry(fakeApi(listed));
+    reg1.setInboundHost(recordingHost().host);
+    await reg1.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    disk.folders.delete("casef");
+    disk.folders.add("CaseF");
+    disk.notes.delete("casef/b.md");
+    disk.bodies.delete("casef/b.md");
+    disk.notes.set("CaseF/b.md", "fresh-local-id");
+    disk.bodies.set("CaseF/b.md", "# b");
+    vi.mocked(ipc.getDiskBase).mockImplementation((async (docId: string) =>
+      docId === "d1" || docId === "fresh-local-id" ? sha256Hex("# b") : null) as never);
+
+    for (let pass = 0; pass < 2; pass++) {
+      const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+      vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1]?.[0] as never);
+      vi.mocked(ipc.renamePath).mockClear();
+      const api = fakeApi(listed);
+      const reg = new VaultRegistry(api);
+      reg.setInboundHost(recordingHost().host);
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      expect(vi.mocked(ipc.renamePath)).not.toHaveBeenCalled();
+      expect(vi.mocked(api.createNote)).not.toHaveBeenCalled();
+      expect(reg.failures()).toEqual([]);
+      expect(disk.notes.get("CaseF/b.md")).toBe("fresh-local-id");
+      expect(reg.getMappingCi("CaseF/b.md")?.docId).toBe("d1");
+    }
+  });
+});
+
 describe("inbound folder deletion", () => {
   it("retries a failed remote folder removal without registering a replacement, including after restart", async () => {
     const disk = new FakeDisk();
