@@ -5870,7 +5870,21 @@ export class VaultRegistry {
     }
     for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
       if (this.stopRun()) break;
-      if (await this.registerFolderChunks(vaultId, chunked(byDepth.get(depth)!, BATCH_MAX_FOLDERS), checkpoint)) {
+      // Only folders whose parent the server holds (registered before this
+      // pass or at the depth above): a parent refused for ANY reason used to
+      // send its whole subtree anyway, every pass, each one answered "No
+      // folder at …" (production, 2026-11-20 → 27: ~9,000 refusals, 131 a
+      // batch, hourly, from one vault). The per-level path below has always
+      // held them back with the folder they sit in.
+      const all = byDepth.get(depth)!;
+      const level = all.filter((f) => {
+        if (this.isHeldRefusal(f.path)) return false;
+        const parent = parentDir(f.path);
+        return !parent || this.folderByPath.has(parent) || this.folderByPath.has(this.canonicalFolderPath(parent) ?? parent);
+      });
+      for (let i = level.length; i < all.length; i++) this.sink.item("failed");
+      if (level.length === 0) continue;
+      if (await this.registerFolderChunks(vaultId, chunked(level, BATCH_MAX_FOLDERS), checkpoint)) {
         mutated = true;
       }
     }
