@@ -13,7 +13,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { makeHarness } from "../../bridge/__tests__/helpers";
+import { makeHarness, sha256Hex } from "../../bridge/__tests__/helpers";
 import {
   ContentUploader,
   MAX_NOTE_BYTES,
@@ -160,6 +160,7 @@ interface RigOptions {
   onAcquire?: (docId: string, store: VaultDocStore) => void;
   /** Wire the production `readFile` dep (the pre-network checks need it). */
   readFile?: boolean;
+  diskBase?: (docId: string) => Promise<string | null>;
   lazyPhase?: boolean;
   failTrash?: boolean;
   syncPaused?: () => boolean;
@@ -194,6 +195,7 @@ function rig(opts: RigOptions) {
       release: (docId) => store.demote(docId),
       connect,
       ...(opts.readFile ? { readFile: (relPath: string) => harness.io.readFile(relPath) } : {}),
+      ...(opts.diskBase ? { diskBase: opts.diskBase } : {}),
     },
     isPushed: (id) => pushedSet.has(id),
     markPushed: (id) => {
@@ -377,6 +379,47 @@ describe("ContentUploader — pushing local content", () => {
 
     expect(r.server.text("d1")).toBe("theirs"); // our text was NOT pushed
     expect(r.harness.fs.get("Note.md")).toBe("theirs");
+  });
+
+  it("a read-only file still at its disk base is a teammate's newer text arriving: replaced, nobody told", async () => {
+    // Re-checked after an access change (or retried): the pull brings the
+    // owner's newer text, and the file still holds the text this device last
+    // agreed. That is not an edit, and "your edit was not saved" would be false.
+    reconcileReport.clear();
+    resetReadOnlyAnnouncements();
+    const server = new FakeServer();
+    server.seed("d1", "theirs, newer");
+    const r = rig({
+      files: { "Note.md": "theirs" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+      diskBase: async () => sha256Hex("theirs"),
+    });
+    await r.uploader.run();
+    expect(r.harness.fs.get("Note.md")).toBe("theirs, newer");
+    expect(r.uploader.failedDocs()).toEqual([]);
+    expect(reconcileReport.items()).toEqual([]);
+  });
+
+  it("a read-only file that left its disk base is an edit: reported and told", async () => {
+    reconcileReport.clear();
+    resetReadOnlyAnnouncements();
+    const server = new FakeServer();
+    server.seed("d1", "theirs");
+    const r = rig({
+      files: { "Note.md": "theirs + my offline words" },
+      notes: [{ docId: "d1", relPath: "Note.md" }],
+      server,
+      behaviour: { readOnly: new Set(["d1"]) },
+      readFile: true,
+      diskBase: async () => sha256Hex("theirs"),
+    });
+    await r.uploader.run();
+    expect(r.harness.fs.get("Note.md")).toBe("theirs");
+    expect(r.uploader.failedDocs()[0]).toMatchObject({ kind: "no-write-access" });
+    expect(reconcileReport.items()).toEqual([expect.objectContaining({ kind: "keptLocally", docId: "d1" })]);
   });
 
   it("a read-only doc keeps a copy of the file it is about to overwrite", async () => {

@@ -42,6 +42,7 @@ import type { NoteBridge } from "../bridge";
 import { UPLOAD_CONCURRENCY, runPool } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { announceUnsendableEdit } from "./readOnlyRejections";
+import { sha256Hex } from "../bridge/adapter";
 
 /**
  * `DocPush.whenSynced` rejected because the doc reached a status no reconnect
@@ -101,6 +102,13 @@ export interface ContentUploadDeps {
    * short-circuit and the size ceiling.
    */
   readFile?(relPath: string): Promise<string>;
+  /**
+   * The sha256 this device last agreed the file held (`ipc.getDiskBase`), or
+   * null when none is recorded. Optional like `readFile`; when present, a
+   * view-only file still at its base is the team's newer text arriving, not an
+   * edit, and is replaced without a word.
+   */
+  diskBase?(docId: string): Promise<string | null>;
 }
 
 /**
@@ -789,10 +797,21 @@ export class ContentUploader {
     // disk. The caller's provenance callback is deliberately stricter than
     // `fileText.length === 0`: a real user truncation must still be recovered.
     if (this.opts.isUnhydratedPlaceholder?.(docId, relPath, fileText)) return "replace";
+    // A file still at the text this device last agreed with the server was not
+    // edited here: the pull just brought a teammate's newer text (a view-only
+    // note re-checked after an access change, or retried). Nothing to report.
+    let base: string | null | undefined;
+    if (this.opts.deps.diskBase) {
+      const ask = this.opts.deps.diskBase;
+      const answer = await Promise.resolve().then(() => ask(docId)).catch(() => null);
+      base = typeof answer === "string" ? answer : null;
+      if (base !== null && (await sha256Hex(fileText)) === base) return "replace";
+    }
     // No copy is kept (decided 2026-11-19): the edit is reported, then replaced,
-    // and the person is told (the failure row alone reached no screen).
+    // and the person is told (the failure row alone reached no screen). Told
+    // only when the file provably left its base, or no base can be asked for.
     console.info(`[upload] ${relPath} is view-only for you; your edit there is replaced by the team's text`);
-    announceUnsendableEdit(docId, relPath);
+    if (base !== null) announceUnsendableEdit(docId, relPath);
     this.report({
       docId,
       relPath,

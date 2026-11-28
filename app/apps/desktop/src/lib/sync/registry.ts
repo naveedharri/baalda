@@ -2335,9 +2335,13 @@ export class VaultRegistry {
    * skip it in every future content run, so the freshly-emptied server doc would
    * never be re-filled from the file.
    */
-  unmarkPushed(docId: string): void {
+  unmarkPushed(docId: string, opts: { keepAck?: boolean } = {}): void {
     if (!this.pushed.delete(docId)) return;
-    this.ackedSvs.delete(docId);
+    // A re-check (Retry, an access change, publishing Home) only re-queues the
+    // doc: what the server holds is unchanged, so its ack stays. Dropping it made
+    // every op this device holds read as unsent, and a later teammate delete or
+    // access removal then said "your unsent changes went" about nothing.
+    if (!opts.keepAck) this.ackedSvs.delete(docId);
     this.checkpoint?.touch();
   }
 
@@ -3412,6 +3416,8 @@ export class VaultRegistry {
       /** Notes a teammate deleted that held work the server never saw: they
        *  leave all the same (deleted means deleted), and the person is told. */
       const unsentDeleted = new Set<string>();
+      /** Which of them hold CRDT ops the server never saw (the rest: the file left its disk base). */
+      const heldUnseenOf = new Set<string>();
       // Revoked or deleted notes whose file left its disk base (edited on disk,
       // not yet taken in): one index query per chunk, never a read per note. A
       // failed query falls back to reading each one.
@@ -3521,6 +3527,7 @@ export class VaultRegistry {
             (heldUnseen || (drifted ? drifted.has(gone.docId) : await this.fileAheadOfDiskBase(gone.docId, gone.path)))
           ) {
             unsentDeleted.add(gone.docId);
+            if (heldUnseen) heldUnseenOf.add(gone.docId);
           }
           if (!this.stopRun()) ready.push(gone);
         } catch (e) {
@@ -3638,7 +3645,7 @@ export class VaultRegistry {
         if (gone.reason === "deleted" && unsentDeleted.has(gone.docId)) {
           // Said once, like an access removal's unsent work: since the trash
           // went (2026-11-19) the words just vanished with no notice.
-          console.info(`[sync] ${gone.path}: deleted by a teammate with unsent changes here; told the person`);
+          console.info(`[sync] ${gone.path}: deleted by a teammate with unsent changes here (${heldUnseenOf.has(gone.docId) ? "ops the server never saw" : "file changed on disk"}); told the person`);
           reconcileReport.record({ kind: "deletedByTeammate", docId: gone.docId, path: gone.path });
         }
         if (gone.reason === "deleted" && gone.path.includes("/")) {

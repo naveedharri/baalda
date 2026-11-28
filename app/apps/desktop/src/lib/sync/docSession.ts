@@ -4617,6 +4617,7 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        diskBase: (docId) => ipc.getDiskBase(docId, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       markAcked: (docId, sv) => this.registry.recordAck?.(docId, sv),
@@ -6729,7 +6730,7 @@ export class SyncManager implements InboundHost {
     }
     // Use the normal single-writer queue, including pull-before-seed and echo
     // guards. Do not open a second provider or change permissions over a push.
-    this.registry.unmarkPushed(docId);
+    this.registry.unmarkPushed(docId, { keepAck: true });
     this.divergedDocs.add(docId);
     this.emptyEverywhere.delete(docId);
     this.localChanges.set(docId, relPath);
@@ -6847,7 +6848,7 @@ export class SyncManager implements InboundHost {
     this.permanentFailures.delete(docId);
     this.bulkFailures.delete(docId);
     this.invalidatedFailures.add(docId);
-    this.registry.unmarkPushed(docId);
+    this.registry.unmarkPushed(docId, { keepAck: true });
     this.divergedDocs.add(docId);
     // A `ready.empty` verdict for this doc would otherwise short-circuit the
     // push before it opens a socket; the user just told us to try again.
@@ -6924,7 +6925,7 @@ export class SyncManager implements InboundHost {
       this.permanentFailures.delete(docId);
       this.bulkFailures.delete(docId);
       this.invalidatedFailures.add(docId);
-      this.registry.unmarkPushed(docId);
+      this.registry.unmarkPushed(docId, { keepAck: true });
       this.divergedDocs.add(docId);
       released++;
     }
@@ -7291,6 +7292,7 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        diskBase: (docId) => ipc.getDiskBase(docId, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // Everything here is work by construction — the batch already decided it
@@ -7462,6 +7464,7 @@ export class SyncManager implements InboundHost {
             onSessionRejected: () => this.noteSessionRejected(),
           }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
+        diskBase: (docId) => ipc.getDiskBase(docId, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
       // The server's word beats our checkpoint: a doc it holds no content for is

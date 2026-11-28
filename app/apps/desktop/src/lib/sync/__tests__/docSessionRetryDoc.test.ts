@@ -310,7 +310,7 @@ describe("SyncManager.retryDoc", () => {
 
     // The believed-pushed claim is withdrawn straight away, before any await —
     // a doc the server may not have must never stay marked as confirmed.
-    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith(DOC);
+    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith(DOC, { keepAck: true });
     // And the remembered refusal is gone, so the doc is eligible again.
     expect(sm.syncFailures().content).toHaveLength(0);
 
@@ -530,9 +530,9 @@ describe("SyncManager access change (reauth) and permanent refusals", () => {
     // Access refusals are forgotten and their confirmation withdrawn; the
     // terminal kinds no grant can change stay put.
     expect([...failures(sm).keys()].sort()).toEqual(["doc-deleted", "doc-too-large"]);
-    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-no-access");
-    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-read-only");
-    expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalledWith("doc-too-large");
+    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-no-access", { keepAck: true });
+    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-read-only", { keepAck: true });
+    expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalledWith("doc-too-large", { keepAck: true });
 
     // Still refused: the push fails again, permanently. A burst of `reauth`
     // frames (a teammate's creates) must not re-mint it on every one.
@@ -543,13 +543,13 @@ describe("SyncManager access change (reauth) and permanent refusals", () => {
       engineHooks.opts!.onAclChanged!();
       engineHooks.opts!.onAclChanged!();
       expect(failures(sm).has("doc-no-access")).toBe(true);
-      expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalledWith("doc-no-access");
+      expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalledWith("doc-no-access", { keepAck: true });
 
       // When the wait ends it is re-asked once, without needing another frame,
       // so a grant that landed inside the wait is not lost.
       vi.advanceTimersByTime(60_000);
       expect(failures(sm).has("doc-no-access")).toBe(false);
-      expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-no-access");
+      expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-no-access", { keepAck: true });
     } finally {
       vi.useRealTimers();
     }

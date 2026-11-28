@@ -3802,3 +3802,23 @@ describe("a note listed again leaves the named-revocation set", () => {
     expect(refused).not.toContain("d2");
   });
 });
+
+describe("unmarkPushed and the server ack", () => {
+  it("a re-check keeps what the server is known to hold; only a history reset forgets it", () => {
+    const reg = new VaultRegistry(fakeApi({ notes: [] }));
+    const doc = new Y.Doc();
+    doc.getText("content").insert(0, "the team's text");
+    const sv = Y.encodeStateVector(doc);
+    reg.markPushed("d1");
+    reg.recordAck("d1", sv);
+    // Retry, an access change re-asking a view-only refusal, publishing Home:
+    // the doc is re-queued, the server's copy is unchanged.
+    reg.unmarkPushed("d1", { keepAck: true });
+    expect(reg.isPushed("d1")).toBe(false);
+    expect(reg.ackedSvOf("d1")).toEqual(sv);
+    // A history reset empties the server's copy: the ack goes with it.
+    reg.markPushed("d1");
+    reg.unmarkPushed("d1");
+    expect(reg.ackedSvOf("d1")).toBeNull();
+  });
+});
