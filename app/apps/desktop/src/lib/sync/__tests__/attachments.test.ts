@@ -204,6 +204,35 @@ describe("AttachmentSync.reconcile (two-way)", () => {
     expect(again).toHaveBeenCalledTimes(1); // owed once, not on every window
   });
 
+  it("a teammate's edit skipped inside an open window is replaced once that window closes", async () => {
+    // The live case: the file is here at the path a teammate's move brought
+    // it to, and their edit arrived inside the window that arrival opened.
+    const old = new Uint8Array([1, 1]);
+    const theirs = new Uint8Array([2, 2]);
+    const { deps, local } = makeDeps([{ relPath: "Team/sheet.csv", bytes: old }], [
+      { id: "blob-new", relPath: "Team/sheet.csv", bytes: theirs },
+    ]);
+    const listServer = deps.listServer;
+    deps.listServer = async () => (await listServer()).map((b) => ({ ...b, docId: "file-1" }));
+    const bases = new Map<string, string>([["file-1", "sha-1.1"]]);
+    deps.fileBase = (id) => bases.get(id) ?? null;
+    deps.setFileBase = (id, sha) => void bases.set(id, sha);
+    deps.knownFileId = (p) => (p === "Team/sheet.csv" ? "file-1" : null);
+    deps.writeTreeLocal = async (relPath, b) => void local.set(relPath, b);
+    let pending = true;
+    deps.isDeletePending = () => pending;
+    const sync = new AttachmentSync(deps);
+    const again = vi.spyOn(sync, "scheduleReconcile").mockImplementation(() => {});
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(Array.from(local.get("Team/sheet.csv")!)).toEqual([1, 1]);
+    pending = false;
+    sync.deleteWindowClosed();
+    expect(again).toHaveBeenCalledTimes(1);
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+    expect(Array.from(local.get("Team/sheet.csv")!)).toEqual([2, 2]);
+  });
+
   it("keeps syncing embeds after a standalone-file plan refusal", async () => {
     const { deps, local, server } = makeDeps(
       [{ relPath: "standalone.pdf", bytes: new Uint8Array([1]) },

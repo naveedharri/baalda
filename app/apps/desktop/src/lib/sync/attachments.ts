@@ -2041,7 +2041,10 @@ export class AttachmentSync {
     for (const f of plan.toFollow) {
       if (!this.current()) break;
       // A live window owns these paths; the delete queue pairs them itself.
-      if (this.deps.isDeletePending?.(f.from) || this.deps.isDeletePending?.(f.to)) continue;
+      if (this.deps.isDeletePending?.(f.from) || this.deps.isDeletePending?.(f.to)) {
+        this.skippedForPendingDelete = true;
+        continue;
+      }
       if (!(await this.deps.followFileMove?.(f.from, f.to))) continue;
       this.fileIds.delete(f.from);
       this.fileIds.set(f.to, f.docId);
