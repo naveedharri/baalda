@@ -1448,6 +1448,41 @@ impl Index {
         )?)
     }
 
+    /// Key the note at `rel` by the doc a bridge just wrote it for.
+    ///
+    /// `write_note` re-indexes the bytes it lands, and `index_one` reuses an id
+    /// only for a path it has seen: a background bridge writing a teammate's
+    /// note that is not on disk yet (or not indexed yet) got a FRESH id, so the
+    /// editor (keyed by the index id) and sync (keyed by the server id) held two
+    /// Y.Docs for one file. The writer's id wins when the row is new or its id
+    /// holds no local CRDT and no disk base; a row with history of its own (or
+    /// another registered note's never-hydrated placeholder, which has a disk
+    /// base) is left alone, as is an id another path holds (`rebind_note_id`
+    /// refuses).
+    pub fn adopt_writer_id(&self, rel: &str, doc_id: &str) -> AppResult<bool> {
+        let Some(current) = self.id_for_path(&self.conn, rel)? else {
+            return Ok(false);
+        };
+        if current == doc_id {
+            return Ok(true);
+        }
+        let has_history: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM yjs_updates WHERE doc_id = ?1)
+                 OR EXISTS(SELECT 1 FROM yjs_snapshot WHERE doc_id = ?1)
+                 OR EXISTS(SELECT 1 FROM yjs_disk_base WHERE doc_id = ?1)",
+            params![current],
+            |r| r.get(0),
+        )?;
+        if has_history {
+            return Ok(false);
+        }
+        let rebound = self.rebind_note_id(rel, doc_id)?;
+        if rebound {
+            log::info!("[index] {rel}: keyed by its doc id {doc_id} (was a fresh local id {current})");
+        }
+        Ok(rebound)
+    }
+
     /// Re-key the note row at `rel` to `doc_id`, keeping its content.
     ///
     /// The counterpart to [`Self::rename_note`] for a rename this app did NOT
@@ -4677,6 +4712,43 @@ mod tests {
     /// An out-of-app rename on a filesystem without stable identity: the
     /// watcher indexes a fresh uuid, so sync must put the registry's
     /// doc_id back onto the row. Backlinks must survive the re-key.
+    #[test]
+    fn a_bridge_write_keys_a_new_file_by_the_writers_doc_id() {
+        let (_tmp, v) = seed_vault();
+        let idx = Index::open(&v).unwrap();
+        idx.rebuild(&v).unwrap();
+
+        // A background bridge lands a teammate's note that was not on disk yet.
+        std::fs::write(v.join("Arrived.md"), "# arrived\n").unwrap();
+        idx.index_note(&v, &v.join("Arrived.md")).unwrap();
+        let fresh = idx.get_note_meta("Arrived.md").unwrap().unwrap().id;
+        assert_ne!(fresh, "server-doc");
+        assert!(idx.adopt_writer_id("Arrived.md", "server-doc").unwrap());
+        assert_eq!(idx.get_note_meta("Arrived.md").unwrap().unwrap().id, "server-doc");
+        // A second write is a no-op.
+        assert!(idx.adopt_writer_id("Arrived.md", "server-doc").unwrap());
+
+        // A row whose own id holds local history keeps it.
+        let beta = idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id;
+        idx.append_yjs_update(&beta, &[0, 0]).unwrap();
+        assert!(!idx.adopt_writer_id("sub/Beta.md", "other-doc").unwrap());
+        assert_eq!(idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id, beta);
+
+        // So does one with a disk base (a registered note's placeholder).
+        std::fs::write(v.join("Placeholder.md"), "").unwrap();
+        idx.index_note(&v, &v.join("Placeholder.md")).unwrap();
+        let ph = idx.get_note_meta("Placeholder.md").unwrap().unwrap().id;
+        idx.set_disk_base(&ph, "e3b0").unwrap();
+        assert!(!idx.adopt_writer_id("Placeholder.md", "other-doc").unwrap());
+        assert_eq!(idx.get_note_meta("Placeholder.md").unwrap().unwrap().id, ph);
+
+        // An id another path already holds is refused, never merged.
+        std::fs::write(v.join("Second.md"), "x").unwrap();
+        idx.index_note(&v, &v.join("Second.md")).unwrap();
+        assert!(!idx.adopt_writer_id("Second.md", "server-doc").unwrap());
+        assert_eq!(idx.get_note_meta("Arrived.md").unwrap().unwrap().id, "server-doc");
+    }
+
     #[test]
     fn rebind_note_id_rekeys_a_row_and_keeps_backlinks() {
         let (_tmp, v) = seed_vault();

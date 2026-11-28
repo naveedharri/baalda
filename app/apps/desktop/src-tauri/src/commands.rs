@@ -2002,6 +2002,13 @@ pub async fn write_note(
         guard.set_disk_base(doc_id, &notefile::sha256_hex(&content))?;
     }
     guard.index_note(&vault, &abs)?;
+    // One id per note: a file this write created (or a row that never held
+    // local history) takes the writer's doc id, not a fresh one.
+    if let Some(doc_id) = doc_id.as_deref() {
+        if let Err(e) = guard.adopt_writer_id(&path, doc_id) {
+            log::warn!("[index] couldn't key {path} by its doc id: {e}");
+        }
+    }
     Ok("written")
 }
 
