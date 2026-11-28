@@ -55,7 +55,15 @@ describe("planBinarySync — the decision table", () => {
       [S("b1", P, "v1", "D")],
       ctx({ [P]: "D" }, { D: "v1" }),
     );
-    expect(plan.toUpload).toEqual([{ relPath: P, sha256: "v3", baseSha: "v1" }]);
+    expect(plan.toUpload).toEqual([
+      {
+        relPath: P,
+        sha256: "v3",
+        baseSha: "v1",
+        // What a view-only refusal puts back (the server's current version).
+        serverVersion: { id: "b1", relPath: P, sha256: "v1", docId: "D" },
+      },
+    ]);
     expect(plan.toReplace).toEqual([]);
   });
 
@@ -136,6 +144,8 @@ class FakeServer {
   rows = new Map<string, { id: string; relPath: string; bytes: Uint8Array }>();
   pending = new Map<string, { docId: string; relPath: string; bytes?: Uint8Array }>();
   uploads: Array<{ device: string; sha: string; baseSha: string | null }> = [];
+  /** Docs whose edits the server refuses (403): view-only for every device. */
+  viewOnly = new Set<string>();
   private next = 1;
 
   seed(docId: string, relPath: string, content: string) {
@@ -208,6 +218,13 @@ function device(name: string, server: FakeServer, seed: Record<string, string>, 
     createIntent: async (input) => {
       const docId = input.docId as string;
       const cur = server.rows.get(docId);
+      if (server.viewOnly.has(docId)) {
+        throw Object.assign(new Error("read-only"), {
+          status: 403,
+          code: "no_write_access",
+          body: { error: "This vault is read-only for you", code: "no_write_access" },
+        });
+      }
       if (cur && shaOf(cur.bytes) === input.sha256) {
         return { deduped: true as const, blob: { ...server.meta(docId) } as never };
       }
@@ -384,6 +401,35 @@ describe("AttachmentSync three-way, two devices on one server", () => {
     await a.sync.reconcile();
     await b.sync.reconcile();
     expect(server.uploads.length).toBe(before);
+  });
+
+  it("a view-only edit is put back to the team's version, with a notice, and settles", async () => {
+    const server = new FakeServer();
+    server.seed("D", P, "V1");
+    const a = device("A", server, { [P]: "V1" }, { [P]: "D" });
+    await a.sync.reconcile();
+    server.viewOnly.add("D");
+    a.files.set(P, enc("mine"));
+    await a.sync.reconcile();
+    expect(server.current("D")).toBe("V1");
+    expect(read(a)).toBe("V1");
+    expect(a.bases.get("D")).toBe("sha:V1");
+    expect(a.notices).toEqual([
+      "You can only view report.docx, so your changes were replaced with your team's version.",
+    ]);
+    // Settled: another round neither uploads nor notifies.
+    await a.sync.reconcile();
+    expect(server.uploads).toEqual([]);
+    expect(a.notices.length).toBe(1);
+  });
+
+  it("a NEW file refused for want of write access stays on this computer", async () => {
+    const server = new FakeServer();
+    const a = device("A", server, { "Team/new.docx": "fresh" }, { "Team/new.docx": "N" });
+    server.viewOnly.add("N");
+    await a.sync.reconcile();
+    expect(dec(a.files.get("Team/new.docx")!)).toBe("fresh");
+    expect(a.notices).toEqual([]);
   });
 
   it("a genuine local edit still uploads, carrying its base", async () => {

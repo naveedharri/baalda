@@ -304,6 +304,10 @@ export type PlannedUpload = LocalAttachment & {
    *  pass looks again, so the local file follows the rename (see the upload
    *  loop) instead of staying under the old name until some unrelated pass. */
   serverPath?: string;
+  /** The server's current version of this file (an edit of a file the server
+   *  already holds). Put back when the upload is refused for want of write
+   *  access, as a view-only note's text is (see {@link ViewOnlyFile}). */
+  serverVersion?: ServerBlob & { docId: string; relPath: string };
 };
 
 /**
@@ -318,7 +322,7 @@ export interface BinaryReplace {
   local: LocalAttachment;
   blob: ServerBlob & { docId: string; relPath: string };
   keepCopy: boolean;
-  reason: "teammate-edit" | "no-base" | "conflict" | "stale-base";
+  reason: "teammate-edit" | "no-base" | "conflict" | "stale-base" | "view-only";
 }
 
 export interface BinaryPlan {
@@ -528,6 +532,7 @@ export function planBinarySync(
         toUpload.push({
           ...a,
           baseSha: base,
+          serverVersion: { ...current, docId, relPath: a.relPath },
           ...(pathKey(serverPath) !== pathKey(a.relPath) ? { serverPath } : {}),
         });
         continue;
@@ -716,6 +721,17 @@ class NotIndexedYet extends Error {
  * server's version, which the pass downloads instead (keeping the local bytes
  * in `.context/trash`).
  */
+/** An edit of a file the server holds, refused because this person may only
+ *  view it. Their bytes can never go up, so the team's version is put back
+ *  (with a notice), exactly as a view-only note's text is; before this the file
+ *  was skipped for the session and the two versions stayed apart for good. */
+class ViewOnlyFile extends Error {
+  constructor(public readonly current: ServerBlob & { docId: string; relPath: string }) {
+    super("view_only");
+    this.name = "ViewOnlyFile";
+  }
+}
+
 class StaleBase extends Error {
   constructor(public readonly current: ServerBlob) {
     super("stale_base");
@@ -2236,6 +2252,12 @@ export class AttachmentSync {
             waitingForIndex++;
             return;
           }
+          if (e instanceof ViewOnlyFile) {
+            replacements.push({ local: a, blob: e.current, keepCopy: true, reason: "view-only" });
+            this.setFileState(a.relPath, "queued");
+            console.info(`[attachments] ${a.relPath} is view-only here — putting the team's version back`);
+            return;
+          }
           if (e instanceof StaleBase) {
             // A teammate's newer version landed first. Ours goes to the trash
             // copy and theirs comes down — never a retry that retires theirs.
@@ -2384,13 +2406,14 @@ export class AttachmentSync {
     // The server's version of a file this disk holds a different one of (see
     // `planBinarySync`). After the plain downloads, through the same budget.
     const kept: string[] = [];
+    const viewOnly: string[] = [];
     await runPool(
       replaces,
       async (r) => {
         const relPath = r.local.relPath;
         this.setFileState(relPath, "syncing");
         try {
-          await bytes.run(r.blob.size ?? 0, () => this.replaceOne(r, kept));
+          await bytes.run(r.blob.size ?? 0, () => this.replaceOne(r, r.reason === "view-only" ? viewOnly : kept));
           downloaded++;
           this.fileIds.set(relPath, r.blob.docId);
           this.deps.rememberFileId?.(relPath, r.blob.docId);
@@ -2408,6 +2431,14 @@ export class AttachmentSync {
       },
       { concurrency: BINARY_CONCURRENCY, shouldStop: () => !this.current() },
     );
+    if (viewOnly.length > 0 && this.current()) {
+      this.deps.notify?.(
+        viewOnly.length === 1
+          ? `You can only view ${baseName(viewOnly[0])}, so your changes were replaced with your team's version.`
+          : `You can only view ${viewOnly.length} files you changed, so your changes were replaced with your team's version.`,
+        "neutral",
+      );
+    }
     if (kept.length > 0 && this.current()) {
       this.deps.notify?.(
         kept.length === 1
@@ -2684,6 +2715,11 @@ export class AttachmentSync {
         // access, which can change, never about these bytes. Ask again later.
         this.refuseEmbedForNow(a);
         return false;
+      }
+      if (status === 403 && a.baseSha && a.serverVersion && errCode(e) !== "not_readable") {
+        // An edit of a file the server already holds (its base is the server's
+        // version), refused for want of write access: view-only here.
+        throw new ViewOnlyFile(a.serverVersion);
       }
       if (status === 413 || status === 415 || status === 400 || status === 403) {
         // Permanent for these bytes: the file is over the cap or of a type the

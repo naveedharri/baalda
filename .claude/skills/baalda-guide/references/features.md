@@ -212,6 +212,9 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   it (or selects several) and chooses Unlock. Anything you can only view because you were given Can view
   (by name or through a group) shows a padlock too; it can't be unlocked, only changed on the
   People and access page.
+- **Changing something you can only view**: if you change a note or a file (a picture, a PDF)
+  that you can only view, for example from another app, Baalda can't send the change to the
+  team. It puts the team's version back on your computer and tells you so.
 - **Losing access** removes the note from the ex-reader's devices (the note itself stays on the
   server for everyone who can still read it); regaining access brings it back.
 - Not built (deferred): comments and @mentions, activity feed, audit log, sub-teams or custom
