@@ -172,6 +172,23 @@ describe("VaultRegistry — a folder renamed while the app was closed (#276)", (
     expect(reg.getFileId("Box/qa-move/moved-1.png")).toBe("file-1");
   });
 
+  it("a sub-folder moved OUT and its emptied parent deleted while closed is still one move", async () => {
+    const { api, reg } = await binariesSetup();
+    // Quit; `mv Examples/qa-move qa-move && rmdir Examples`; reopen.
+    vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree([], ["qa-move"])));
+    vi.mocked(ipc.listBinaries).mockResolvedValue([
+      { relPath: "qa-move/moved-1.png", sha256: "sha-1", size: 1 },
+      { relPath: "qa-move/moved-2.jpeg", sha256: "sha-2", size: 1 },
+    ] as never);
+
+    await reg.pull();
+
+    expect(api.updateFolder).toHaveBeenCalledWith("f-qa", { name: "qa-move", path: "qa-move", parentId: null });
+    expect(created(api)).not.toContain("qa-move");
+    expect(reg.getFolderId("qa-move")).toBe("f-qa");
+    expect(reg.getFileId("qa-move/moved-2.jpeg")).toBe("file-2");
+  });
+
   it("binaries whose bytes do not match their agreed base are no evidence: nothing moves", async () => {
     const { api, reg } = await binariesSetup();
     vi.mocked(ipc.listBinaries).mockResolvedValue([

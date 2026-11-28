@@ -3986,15 +3986,14 @@ export class VaultRegistry {
     const serverCi = new Set(serverFolders.map((f) => pathKey(f.path)));
     const mappedCi = new Set([...this.folderByPath.keys()].map((p) => pathKey(p)));
     const dead = new Set(folderTombstones ?? []);
-    const gone = topmost(
-      [...this.folderByPath]
-        .filter(([p, id]) => {
-          if (localCi.has(pathKey(p)) || dead.has(id)) return false;
-          const now = serverPathById.get(id);
-          return now !== undefined && samePath(now, p);
-        })
-        .map(([p]) => p),
-    );
+    const allGone = [...this.folderByPath]
+      .filter(([p, id]) => {
+        if (localCi.has(pathKey(p)) || dead.has(id)) return false;
+        const now = serverPathById.get(id);
+        return now !== undefined && samePath(now, p);
+      })
+      .map(([p]) => p);
+    const gone = topmost(allGone);
     if (gone.length === 0) return out;
     // Its parent must be the root, a registered folder, or itself a folder only
     // this disk has (the move registers it first, `moveOnServer`), up to one
@@ -4053,7 +4052,14 @@ export class VaultRegistry {
     };
     const usedCands = new Set<string>();
 
-    for (const g of gone) {
+    // Topmost first: a whole folder renamed moves as one. When one does not
+    // pair, its vanished sub-folders are tried on their own: "move Sub out of
+    // Parent, then delete the emptied Parent" left only Parent to judge, its
+    // notes matched nowhere, and Sub went over note by note into a folder with
+    // none of its sharing rows (2026-11-28 five-app test).
+    const queue = [...gone];
+    while (queue.length > 0) {
+      const g = queue.shift()!;
       if (this.stopRun()) break;
       const notesUnder = mappedNotes.filter((n) => under(n.relPath, g));
       const filesUnder = mappedFiles.filter((f) => under(f.relPath, g));
@@ -4082,7 +4088,10 @@ export class VaultRegistry {
         const score = matched.length + files;
         if (score >= need && (!best || score > best.score)) best = { to: c, matched, score };
       }
-      if (!best) continue;
+      if (!best) {
+        queue.push(...topmost(allGone.filter((p) => p !== g && under(p, g))));
+        continue;
+      }
       usedCands.add(best.to);
       const to = best.to;
       // Nothing may still write to the OLD paths once they move: a bridge that

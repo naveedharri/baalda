@@ -2095,6 +2095,31 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     );
   });
 
+  it("a sub-folder moved out with its emptied parent deleted in the same breath is still ONE move", async () => {
+    // `mv Old/sub Sub && rm -r Old`: the watcher names `Old` gone and `Sub`
+    // new. Judged against `Old` alone nothing matched and `Sub` went over note
+    // by note into a folder without its sharing rows.
+    const sm = new SyncManager();
+    const kids = [
+      { docId: "k1", relPath: "Old/sub/x.md" },
+      { docId: "k2", relPath: "Old/sub/y.md" },
+    ];
+    for (const n of kids) storeHooks.texts.set(n.docId, textOf(n.docId));
+    mapNotes([...kids, ...others], ["Old", "Old/sub", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["Sub", "Keep"]);
+    for (const n of kids) fakeDisk.files.set(n.relPath.replace(/^Old\/sub/, "Sub"), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "Sub", kind: "tree", gone: false },
+      { path: "Old", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old/sub", "Sub"]]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalledWith("Old/sub/x.md");
+    expect(fakeDisk.materialized[0]).toEqual(kids.map((n) => ({ relPath: n.relPath.replace(/^Old\/sub/, "Sub"), docId: n.docId })));
+  });
+
   it("deletes a note removed inside a moved folder while the move is still being paired", async () => {
     // The note was still mapped at its OLD path when its removal arrived, so the
     // event matched nothing, the delete was dropped, and the pull that followed

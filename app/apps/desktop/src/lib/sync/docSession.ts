@@ -3621,7 +3621,27 @@ export class SyncManager implements InboundHost {
     };
     const usedCands = new Set<string>();
 
-    for (const g of gone) {
+    // Topmost first; a vanished folder that does not pair hands its vanished
+    // sub-folders a turn of their own ("move Sub out, delete the emptied
+    // Parent" — see `registry.pairClosedAppFolderMoves`). Only the notes
+    // outside those sub-folders fall to the per-note pairing from here; each
+    // sub-folder that fails too sends its own.
+    // The watcher names only the TOPMOST vanished folder, so the registered
+    // folders below it that are gone too are read off the items they held.
+    const goneBelow = (g: string): string[] => {
+      const found = new Set<string>();
+      for (const p of [...mapped.map((n) => n.relPath), ...mappedFiles.map((f) => f.relPath)]) {
+        if (!isUnder(p, g) || p === g) continue;
+        for (let d = parentDirOf(p); d && d !== g && isUnder(d, g); d = parentDirOf(d)) {
+          if (!dirsCi.has(d.toLowerCase()) && this.registry.getFolderId?.(d)) found.add(d);
+        }
+      }
+      return topmost([...found]);
+    };
+    const queue = [...gone];
+    while (queue.length > 0) {
+      const g = queue.shift()!;
+      const inner = goneBelow(g);
       const under = mapped.filter((n) => isUnder(n.relPath, g));
       const filesUnder = mappedFiles.filter((f) => isUnder(f.relPath, g));
       // no evidence either way — the pull decides, as before
@@ -3657,10 +3677,12 @@ export class SyncManager implements InboundHost {
         }
       }
       if (!best) {
+        queue.push(...inner);
         // Below the ratio: the notes under G go through the per-note pairing
         // and then the delete drain, with every gate `queueDiskDelete` applies.
         if (this.liveSince == null) continue;
         for (const n of under) {
+          if (inner.some((s) => isUnder(n.relPath, s))) continue;
           if (!(this.registry.serverHoldsContent?.(n.docId) ?? this.registry.isPushed(n.docId))) continue;
           out.fallbackDeletes.push({ docId: n.docId, relPath: n.relPath });
         }
