@@ -3729,6 +3729,110 @@ export class SyncManager implements InboundHost {
     };
     for (const g of gone) if (!(await planFor(g))) return out;
 
+    // A ROTATION (`mv B C && mv A B`: "rename Plan to Plan 2025, then Draft to
+    // Plan"). A vanished, but its items sit in B, a folder still on disk and
+    // registered, so no NEW folder matched. By name alone B's notes went over
+    // one by one into C and A's into B: B's sharing reached A's notes (a leak),
+    // B's own notes left it, and A's were deleted and made again (2026-11-28
+    // five-app test). A registered folder is A's target only when A's items
+    // match there AND its own items no longer match at their own paths but do
+    // match under a new folder (or under the next folder of such a chain); it
+    // moves first, then A takes its path. Never a target at or around its own
+    // source, so `mkdir C; mv B/* C/` and `mv B/*.md B/Old/` stay as before.
+    // A straight swap of two folders that both stay has no vanished side and
+    // is not covered.
+    const regDirs = [...dirs].filter((d) => !unregistered(d));
+    const notesOf = (g: string) => mapped.filter((n) => isUnder(n.relPath, g));
+    const filesOf = (g: string) => mappedFiles.filter((f) => isUnder(f.relPath, g));
+    const crdtShas = new Map<string, string | null>();
+    /** The CRDT's own text, read without a bridge: a bridge on a path that now
+     *  holds another folder's file would ingest that file into this note. */
+    const crdtSha = async (docId: string): Promise<string | null> => {
+      if (crdtShas.has(docId)) return crdtShas.get(docId) ?? null;
+      let sha: string | null = null;
+      try {
+        const text = await this.localText(docId);
+        sha = text == null ? null : await sha256Hex(text);
+      } catch {
+        sha = null;
+      }
+      crdtShas.set(docId, sha);
+      return sha;
+    };
+    const scoreAt = async (g: string, c: string) => {
+      const notes = notesOf(g);
+      const files = filesOf(g);
+      const total = notes.length + files.length;
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      const shas = files.length > 0 ? await localBinaryShas() : null;
+      const matched = new Set<string>();
+      const matchedFiles = new Set<string>();
+      const present = notes.filter((n) => notesOnDisk.has(c + n.relPath.slice(g.length)));
+      const filesPresent = shas ? files.filter((f) => shas.has(c + f.relPath.slice(g.length))) : [];
+      if (total === 0 || present.length + filesPresent.length < need) return null;
+      for (const n of present) {
+        const a = await crdtSha(n.docId);
+        const b = await fileSha(c + n.relPath.slice(g.length));
+        if (a != null && a === b) matched.add(n.docId);
+      }
+      for (const f of filesPresent) if (shas!.get(c + f.relPath.slice(g.length)) === f.base) matchedFiles.add(f.relPath);
+      const score = matched.size + matchedFiles.size;
+      return score >= need ? { notes, files, matched, matchedFiles, score } : null;
+    };
+    /** Its own items no longer at home: missing, or holding other bytes. */
+    const vacated = async (r: string): Promise<boolean> => {
+      const notes = notesOf(r);
+      const files = filesOf(r);
+      const total = notes.length + files.length;
+      if (total === 0) return false;
+      const shas = files.length > 0 ? await localBinaryShas() : null;
+      let home = 0;
+      for (const n of notes) {
+        if (!notesOnDisk.has(n.relPath)) continue;
+        const a = await crdtSha(n.docId);
+        if (a != null && a === (await fileSha(n.relPath))) home++;
+      }
+      for (const f of files) if (shas?.get(f.relPath) === f.base) home++;
+      return total - home >= Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+    };
+    const claimed = (p: string) => plans.some((pl) => isUnder(p, pl.g) || isUnder(pl.g, p) || isUnder(p, pl.to) || isUnder(pl.to, p));
+    const rotateFrom = async (src: string, chain: ReadonlySet<string>): Promise<Plan[] | null> => {
+      for (const r of regDirs) {
+        if (chain.has(r) || isUnder(r, src) || isUnder(src, r) || claimed(r)) continue;
+        const here = await scoreAt(src, r);
+        if (!scope.isCurrent()) return null;
+        if (!here || !(await vacated(r))) continue;
+        let next: Plan[] | null = null;
+        let best: { c: string; s: NonNullable<Awaited<ReturnType<typeof scoreAt>>> } | null = null;
+        for (const c of cands) {
+          if (usedCands.has(c) || isUnder(c, r)) continue;
+          const s = await scoreAt(r, c);
+          if (s && (!best || s.score > best.s.score)) best = { c, s };
+        }
+        if (best) {
+          next = [{ g: r, to: best.c, under: best.s.notes, matched: best.s.matched, matchedFiles: best.s.matchedFiles, files: best.s.matchedFiles.size, filesTotal: best.s.files.length }];
+        } else {
+          next = await rotateFrom(r, new Set([...chain, r]));
+        }
+        if (!next) continue;
+        if (best) usedCands.add(best.c);
+        return [
+          ...next,
+          { g: src, to: r, under: here.notes, matched: here.matched, matchedFiles: here.matchedFiles, files: here.matchedFiles.size, filesTotal: here.files.length },
+        ];
+      }
+      return null;
+    };
+    for (const g of gone) {
+      if (plans.some((p) => isUnder(p.g, g))) continue;
+      const chain = await rotateFrom(g, new Set([g]));
+      if (!scope.isCurrent()) return out;
+      if (chain) {
+        console.info(`[sync] folder rotation: ${chain.map((p) => `${p.g} → ${p.to}`).join(", ")}`);
+        plans.push(...chain);
+      }
+    }
+
     // Below the ratio: the notes no plan carries go through the per-note
     // pairing and then the delete drain, with every gate `queueDiskDelete`
     // applies. Decided once the plan is whole: a sub-folder's notes are never
@@ -3749,8 +3853,19 @@ export class SyncManager implements InboundHost {
     // or was put back leaves its children for the next pass, as before.
     const done: Plan[] = [];
     const failed: Plan[] = [];
-    for (const p of [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length)) {
-      if (failed.some((f) => isUnder(p.g, f.g))) continue;
+    // Parents before children, and a folder whose path another plan takes over
+    // before that plan (a rotation); a cycle leaves the rest for the next pass.
+    const order: Plan[] = [];
+    const waiting = [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length);
+    const blocks = (q: Plan, p: Plan) => q !== p && (isUnder(p.g, q.g) || isUnder(p.to, q.g));
+    while (waiting.length > 0) {
+      const i = waiting.findIndex((p) => !waiting.some((q) => blocks(q, p)));
+      if (i < 0) break;
+      order.push(waiting.splice(i, 1)[0]);
+    }
+    const deferIndex: Array<() => Promise<void>> = [];
+    for (const p of order) {
+      if (failed.some((f) => isUnder(p.g, f.g) || isUnder(p.to, f.g))) continue;
       let anc: Plan | undefined;
       for (const d of done) if (d.g !== p.g && isUnder(p.g, d.g) && (!anc || d.g.length > anc.g.length)) anc = d;
       const at = (q: string) => (anc ? anc.to + q.slice(anc.g.length) : q);
@@ -3766,6 +3881,7 @@ export class SyncManager implements InboundHost {
               p.matched,
               notesOnDisk,
               scope,
+              deferIndex,
             );
       if (res) {
         out.movedFrom.push(p.g);
@@ -3774,6 +3890,10 @@ export class SyncManager implements InboundHost {
       if (res === true) done.push(p);
       else failed.push(p);
       if (!scope.isCurrent() || this.rootMissing) return out;
+    }
+    for (const reindex of deferIndex.reverse()) {
+      await reindex();
+      if (!scope.isCurrent()) return out;
     }
     // What appeared and was not a move target: its notes may still be renames.
     if (out.fallbackDeletes.length > 0) {
@@ -3798,6 +3918,7 @@ export class SyncManager implements InboundHost {
     matched: ReadonlySet<string>,
     notesOnDisk: ReadonlySet<string>,
     scope: VaultScope,
+    deferIndex?: Array<() => Promise<void>>,
   ): Promise<boolean | "reverted"> {
     console.info(
       `[sync] ${from} → ${to} (folder moved on disk; ${matched.size}/${under.length} notes matched, keeping every doc id)`,
@@ -3855,22 +3976,30 @@ export class SyncManager implements InboundHost {
     const items = under
       .map((n) => ({ relPath: to + n.relPath.slice(from.length), docId: n.docId }))
       .filter((i) => notesOnDisk.has(i.relPath));
-    if (items.length > 0) {
-      try {
-        await ipc.materializeNotesBatch(items, scope.vaultEpoch, { indexOnly: true });
-      } catch (e) {
-        if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${to}`, e);
+    const reindex = async () => {
+      if (items.length > 0) {
+        try {
+          await ipc.materializeNotesBatch(items, scope.vaultEpoch, { indexOnly: true });
+        } catch (e) {
+          if (!ipc.isVaultMismatch(e)) console.warn(`[sync] couldn't re-index ${to}`, e);
+        }
       }
-    }
+      if (!scope.isCurrent()) return;
+      // Edited in the same breath as the move: the new bytes still have to go.
+      let edited = 0;
+      for (const i of items) {
+        if (matched.has(i.docId)) continue;
+        this.localChanges.set(i.docId, i.relPath);
+        edited++;
+      }
+      if (edited > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+    };
+    // A batch of moves re-keys the index in REVERSE once every server move is
+    // made: in a rotation (`mv B C && mv A B`) a path of B's still carries B's
+    // note id until A's note takes it, and an id is never given to two rows.
+    if (deferIndex) deferIndex.push(reindex);
+    else await reindex();
     if (!scope.isCurrent()) return false;
-    // Edited in the same breath as the move: the new bytes still have to go.
-    let edited = 0;
-    for (const i of items) {
-      if (matched.has(i.docId)) continue;
-      this.localChanges.set(i.docId, i.relPath);
-      edited++;
-    }
-    if (edited > 0) this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
     this.note("info", "folder-moved", `${from} was moved to ${to} on this device, kept as a move for everyone`, {
       path: to,
     });

@@ -4140,11 +4140,102 @@ export class VaultRegistry {
     };
     for (const g of gone) if (!(await planFor(g))) return out;
 
+    // A ROTATION (`mv B C && mv A B`): A's items sit in B, a folder still on
+    // disk and registered. Same rule as the live `docSession.drainFolderMoves`:
+    // B is A's target only when A's items match there AND B's own items no
+    // longer match at their own paths but match under a new folder (or the next
+    // folder of a chain); B moves first, then A takes its path. By name alone
+    // B's sharing reached A's notes (2026-11-28 five-app test).
+    const regDirs = [...this.folderByPath.keys()].filter((p) => localCi.has(pathKey(p)));
+    const notesOf = (g: string) => mappedNotes.filter((n) => under(n.relPath, g));
+    const filesOf = (g: string) => mappedFiles.filter((f) => under(f.relPath, g));
+    const scoreAt = async (g: string, c: string) => {
+      const notes = notesOf(g);
+      const files = filesOf(g);
+      const total = notes.length + files.length;
+      const need = Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+      const shas = files.length > 0 ? await localBinaryShas() : null;
+      const at = (p: string) => c + p.slice(g.length);
+      const present = notes.filter((n) => notesOnDisk.has(at(n.relPath)));
+      const filesPresent = shas ? files.filter((f) => shas.has(at(f.relPath))) : [];
+      if (total === 0 || present.length + filesPresent.length < need) return null;
+      const matched = new Set<string>();
+      const matchedFiles = new Set<string>();
+      for (const n of present) {
+        const a = await docSha(n.docId);
+        if (a != null && a === (await fileSha(at(n.relPath)))) matched.add(n.docId);
+      }
+      for (const f of filesPresent) if (shas!.get(at(f.relPath)) === f.base) matchedFiles.add(f.relPath);
+      const score = matched.size + matchedFiles.size;
+      return score >= need ? { notes, matched, matchedFiles, score, total } : null;
+    };
+    const vacated = async (r: string): Promise<boolean> => {
+      const notes = notesOf(r);
+      const files = filesOf(r);
+      const total = notes.length + files.length;
+      if (total === 0) return false;
+      const shas = files.length > 0 ? await localBinaryShas() : null;
+      let home = 0;
+      for (const n of notes) {
+        if (!notesOnDisk.has(n.relPath)) continue;
+        const a = await docSha(n.docId);
+        if (a != null && a === (await fileSha(n.relPath))) home++;
+      }
+      for (const f of files) if (shas?.get(f.relPath) === f.base) home++;
+      return total - home >= Math.ceil(total * FOLDER_MOVE_MIN_RATIO);
+    };
+    const claimed = (p: string) => plans.some((pl) => under(p, pl.g) || under(pl.g, p) || under(p, pl.to) || under(pl.to, p));
+    const rotateFrom = async (src: string, chain: ReadonlySet<string>): Promise<Plan[] | null> => {
+      for (const r of regDirs) {
+        if (chain.has(r) || under(r, src) || under(src, r) || claimed(r)) continue;
+        const here = await scoreAt(src, r);
+        if (this.stale()) return null;
+        if (!here || !(await vacated(r))) continue;
+        let best: { c: string; s: NonNullable<Awaited<ReturnType<typeof scoreAt>>> } | null = null;
+        for (const c of cands) {
+          if (usedCands.has(c) || under(c, r)) continue;
+          const s = await scoreAt(r, c);
+          if (s && (!best || s.score > best.s.score)) best = { c, s };
+        }
+        const next: Plan[] | null = best
+          ? [{ g: r, to: best.c, notesUnder: best.s.notes, matched: best.s.matched, matchedFiles: best.s.matchedFiles, score: best.s.score, total: best.s.total }]
+          : await rotateFrom(r, new Set([...chain, r]));
+        if (!next) continue;
+        if (best) usedCands.add(best.c);
+        return [
+          ...next,
+          { g: src, to: r, notesUnder: here.notes, matched: here.matched, matchedFiles: here.matchedFiles, score: here.score, total: here.total },
+        ];
+      }
+      return null;
+    };
+    for (const g of gone) {
+      if (plans.some((p) => under(p.g, g))) continue;
+      const chain = await rotateFrom(g, new Set([g]));
+      if (this.stale()) return out;
+      if (chain) {
+        console.info(`[registry] folder rotation: ${chain.map((p) => `${p.g} → ${p.to}`).join(", ")}`);
+        plans.push(...chain);
+      }
+    }
+
     const done: Plan[] = [];
     const failed: Plan[] = [];
-    for (const p of [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length)) {
+    // Parents before children, and a folder whose path another plan takes over
+    // before that plan; index rows are re-keyed afterwards in REVERSE (in a
+    // rotation a path of B's still carries B's note id until A's note takes it).
+    const order: Plan[] = [];
+    const waiting = [...plans].sort((a, b) => a.g.split("/").length - b.g.split("/").length);
+    const blocks = (q: Plan, p: Plan) => q !== p && (under(p.g, q.g) || under(p.to, q.g));
+    while (waiting.length > 0) {
+      const i = waiting.findIndex((p) => !waiting.some((q) => blocks(q, p)));
+      if (i < 0) break;
+      order.push(waiting.splice(i, 1)[0]);
+    }
+    const rebinds: Array<() => Promise<boolean>> = [];
+    for (const p of order) {
       if (this.stopRun()) break;
-      if (failed.some((f) => under(p.g, f.g))) continue;
+      if (failed.some((f) => under(p.g, f.g) || under(p.to, f.g))) continue;
       let anc: Plan | undefined;
       for (const d of done) if (d.g !== p.g && under(p.g, d.g) && (!anc || d.g.length > anc.g.length)) anc = d;
       const now = (q: string) => (anc ? anc.to + q.slice(anc.g.length) : q);
@@ -4167,17 +4258,21 @@ export class VaultRegistry {
         if (this.stale()) return out;
         // The index row at each new note path was minted a fresh id on launch;
         // give it the kept doc id back (same local half `pairClosedAppRenames` does).
-        for (const n of p.notesUnder) {
-          const np = to + now(n.relPath).slice(from.length);
-          if (!notesOnDisk.has(np)) continue;
-          try {
-            await ipc.rebindNoteId(np, n.docId, this.epoch());
-          } catch (e) {
-            if (ipc.isVaultMismatch(e)) return out;
-            console.warn(`[registry] couldn't rebind ${np} to ${n.docId}`, e);
+        const items = p.notesUnder
+          .map((n) => ({ n, np: to + now(n.relPath).slice(from.length) }))
+          .filter((i) => notesOnDisk.has(i.np));
+        rebinds.push(async () => {
+          for (const { n, np } of items) {
+            try {
+              await ipc.rebindNoteId(np, n.docId, this.epoch());
+            } catch (e) {
+              if (ipc.isVaultMismatch(e)) return false;
+              console.warn(`[registry] couldn't rebind ${np} to ${n.docId}`, e);
+            }
+            this.host?.notePathChanged(n.docId, n.relPath, np);
           }
-          this.host?.notePathChanged(n.docId, n.relPath, np);
-        }
+          return true;
+        });
         const remap = (q: string) => (under(q, from) ? to + q.slice(from.length) : q);
         for (const f of serverFolders) {
           if (!under(f.path, from)) continue;
@@ -4196,6 +4291,9 @@ export class VaultRegistry {
       );
       done.push(p);
       out.set(p.g, to);
+    }
+    for (const rebind of rebinds.reverse()) {
+      if (!(await rebind()) || this.stale()) return out;
     }
     return out;
   }

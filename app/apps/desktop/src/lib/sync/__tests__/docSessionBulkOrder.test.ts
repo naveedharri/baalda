@@ -2095,6 +2095,38 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     );
   });
 
+  it("a rotation (mv B C && mv A B) moves B to C first, then A to B — never A's notes into B's sharing", async () => {
+    const sm = new SyncManager();
+    const a = [
+      { docId: "oa", relPath: "A/overview.md" },
+      { docId: "a1", relPath: "A/a1.md" },
+    ];
+    const b = [
+      { docId: "ob", relPath: "B/overview.md" },
+      { docId: "b1", relPath: "B/b1.md" },
+    ];
+    for (const n of [...a, ...b]) storeHooks.texts.set(n.docId, textOf(n.docId));
+    // The CRDT's own text, read without a bridge (the harness keeps no Yjs state).
+    vi.spyOn(sm, "localText").mockImplementation(async (id) => storeHooks.texts.get(id) ?? null);
+    mapNotes([...a, ...b, ...others], ["A", "B", "Keep"]);
+    await live(sm);
+    fakeDisk.dirs = new Set(["B", "C", "Keep"]);
+    for (const n of a) fakeDisk.files.set(n.relPath.replace(/^A\//, "B/"), textOf(n.docId));
+    for (const n of b) fakeDisk.files.set(n.relPath.replace(/^B\//, "C/"), textOf(n.docId));
+    sm.handleLocalFilesChanged([
+      { path: "C", kind: "tree", gone: false },
+      { path: "B", kind: "tree", gone: false },
+      { path: "A", kind: "tree", gone: true },
+    ]);
+    await drain();
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([
+      ["B", "C"],
+      ["A", "B"],
+    ]);
+    expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
+  });
+
   it("a folder and its sub-folder renamed in the same breath are two folder moves, parent first", async () => {
     // `mv Old/sub Old/sub2 && mv Old Archive`: by position alone the renamed
     // sub-folder sank the parent, its notes went over one by one into a new

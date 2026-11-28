@@ -250,6 +250,88 @@ describe("VaultRegistry — a folder renamed while the app was closed (#276)", (
     expect(reg.getMapping("Archive/a3.md")?.docId).toBe("a3");
   });
 
+  describe("a rotation (mv B C && mv A B)", () => {
+    const texts: Record<string, string> = { oa: "A overview", a1: "A one", ob: "B overview", b1: "B one" };
+    async function rotationSetup(after: Record<string, string>, dirs: string[]) {
+      const notes = [
+        { id: "oa", rel_path: "A/overview.md" },
+        { id: "a1", rel_path: "A/a1.md" },
+        { id: "ob", rel_path: "B/overview.md" },
+        { id: "b1", rel_path: "B/b1.md" },
+      ];
+      const api = fakeApi(notes, [
+        { id: "f-a", path: "A" },
+        { id: "f-b", path: "B" },
+      ]);
+      const reg = new VaultRegistry(api as unknown as ApiClient);
+      reg.setInboundHost(host({ localText: async (id) => texts[id] ?? null }));
+      await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(notes.map((n) => n.rel_path), ["A", "B"]));
+      api.createFolder.mockClear();
+      api.createNote.mockClear();
+      vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree(Object.keys(after), dirs)));
+      vi.mocked(ipc.readNote).mockImplementation(async (p: string) => after[p] ?? "");
+      return { api, reg };
+    }
+
+    it("moves B to C first, then A to B, and re-keys A's rows before B's", async () => {
+      const { api, reg } = await rotationSetup(
+        { "B/overview.md": "A overview", "B/a1.md": "A one", "C/overview.md": "B overview", "C/b1.md": "B one" },
+        ["B", "C"],
+      );
+
+      await reg.pull();
+
+      expect(api.updateFolder.mock.calls).toEqual([
+        ["f-b", { name: "C", path: "C", parentId: null }],
+        ["f-a", { name: "B", path: "B", parentId: null }],
+      ]);
+      expect(vi.mocked(ipc.rebindNoteId).mock.calls.map((c) => [c[0], c[1]])).toEqual([
+        ["B/overview.md", "oa"],
+        ["B/a1.md", "a1"],
+        ["C/overview.md", "ob"],
+        ["C/b1.md", "b1"],
+      ]);
+      expect(created(api)).toEqual([]);
+      expect(api.createNote).not.toHaveBeenCalled();
+      expect(reg.getFolderId("B")).toBe("f-a");
+      expect(reg.getFolderId("C")).toBe("f-b");
+      expect(reg.getMapping("B/overview.md")?.docId).toBe("oa");
+      expect(reg.getMapping("C/overview.md")?.docId).toBe("ob");
+    });
+
+    it("A's notes moved INTO a B that kept its own is no rotation: B keeps its id", async () => {
+      // `mv A/* B/ && rmdir A` with B's own notes still at home.
+      const { api, reg } = await rotationSetup(
+        { "B/a1.md": "A one", "B/overview.md": "B overview", "B/b1.md": "B one", "B/A overview.md": "A overview" },
+        ["B"],
+      );
+
+      await reg.pull();
+
+      expect(api.updateFolder).not.toHaveBeenCalled();
+      expect(reg.getFolderId("B")).toBe("f-b");
+    });
+
+    it("B copied to C (B still at home) is no rotation either", async () => {
+      // `cp -r B C && mv A/* B/`: B's notes match under C AND still at home.
+      const { api, reg } = await rotationSetup(
+        {
+          "B/overview.md": "B overview",
+          "B/b1.md": "B one",
+          "B/a1.md": "A one",
+          "C/overview.md": "B overview",
+          "C/b1.md": "B one",
+        },
+        ["B", "C"],
+      );
+
+      await reg.pull();
+
+      expect(api.updateFolder.mock.calls.map((c) => c[0])).not.toContain("f-b");
+      expect(reg.getFolderId("B")).toBe("f-b");
+    });
+  });
+
   it("pairs a folder of notes by their text and gives each index row its kept doc id", async () => {
     const api = fakeApi([{ id: "n1", rel_path: "Old/a.md" }, { id: "n2", rel_path: "Old/sub/b.md" }], [
       { id: "f-old", path: "Old" },
