@@ -5532,6 +5532,9 @@ export class SyncManager implements InboundHost {
     const store = this.docStore;
     if (!scope?.isCurrent()) return;
     const openByEditor = !!store && store.suppressedDoc() === docId;
+    /** The file still held the seed's exact bytes and the local doc now holds
+     *  the seed: record them as this note's disk base (below). */
+    let agreedAt: string | null = null;
     if (seed.fresh && store && !openByEditor) {
       const relPath = this.registry.pathForDocId(docId);
       if (relPath) {
@@ -5583,6 +5586,7 @@ export class SyncManager implements InboundHost {
         } finally {
           unclaim();
         }
+        if (!raced && differs === false) agreedAt = relPath;
         if (raced) {
           // Something seeded this doc between build and answer. Its ops are
           // NOT the server's; merging them would double the text. Drop the
@@ -5618,7 +5622,9 @@ export class SyncManager implements InboundHost {
     // would have queued (#406). The open note's editor ingests its own file.
     if (!seed.fresh && !openByEditor) {
       const relPath = this.registry.pathForDocId(docId);
-      if (relPath && (await this.fileDiffersFrom(relPath, seed.textSha256, scope)) === true) {
+      const differs = relPath ? await this.fileDiffersFrom(relPath, seed.textSha256, scope) : null;
+      if (differs === false) agreedAt = relPath;
+      if (relPath && differs === true) {
         if (!scope.isCurrent()) return;
         this.localChanges.set(docId, relPath);
         this.note("info", "push-queued", "Changed while it was being registered. Sending the newer text", {
@@ -5627,6 +5633,15 @@ export class SyncManager implements InboundHost {
         });
         this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
       }
+    }
+    // The disk base: the bytes this device and the CRDT last agreed on. A note
+    // created on this disk (an agent's or a script's file) never passed through
+    // a bridge read or write, so it had none, and the closed-app pass skips a
+    // note with no base: an edit made to it while the app was shut never went
+    // up (2026-11-28). The file still hashes to the seed and the doc holds it.
+    // A file that moved on is left unrecorded: its own push records it.
+    if (agreedAt && scope.isCurrent()) {
+      await ipc.setDiskBase(docId, seed.textSha256, scope.vaultEpoch).catch(() => {});
     }
   }
 

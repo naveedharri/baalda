@@ -50,6 +50,7 @@ const disk = vi.hoisted(() => ({ files: new Map<string, string>(), unreadable: n
 vi.mock("../../ipc", () => ({
   isVaultMismatch: () => false,
   clearYjsDoc: vi.fn(async () => {}),
+  setDiskBase: vi.fn(async () => {}),
   noteExists: vi.fn(async (p: string) => disk.files.has(p) || disk.unreadable.has(p)),
   readNote: vi.fn(async (p: string) => {
     if (disk.unreadable.has(p)) throw new Error("permission denied");
@@ -233,5 +234,34 @@ describe("noteSeeded when the file changed during registration (#406)", () => {
     expect(store.log).toEqual([]); // no bridge, so no egest re-creating the file
     expect(store.applied).toEqual([]);
     expect(merge).not.toHaveBeenCalled();
+  });
+
+  describe("the disk base (closed-app edits need one)", () => {
+    it("fresh seed, file unchanged: the seed's bytes become the disk base", async () => {
+      const { sm } = manager();
+      const seed = await seedOf(FILLED, true);
+      disk.files.set(REL, FILLED);
+      await sm.noteSeeded("d", null, seed);
+      expect(ipc.setDiskBase).toHaveBeenCalledWith("d", seed.textSha256, 1);
+    });
+
+    it("seed from the local CRDT, file unchanged: recorded too", async () => {
+      const { sm } = manager();
+      const seed = await seedOf(FILLED, false);
+      disk.files.set(REL, FILLED);
+      await sm.noteSeeded("d", null, seed);
+      expect(ipc.setDiskBase).toHaveBeenCalledWith("d", seed.textSha256, 1);
+    });
+
+    it("a file that moved on is never recorded at the seed's bytes", async () => {
+      for (const fresh of [true, false]) {
+        vi.clearAllMocks();
+        const { sm } = manager();
+        const seed = await seedOf("# README\n", fresh);
+        disk.files.set(REL, FILLED);
+        await sm.noteSeeded("d", null, seed);
+        expect(ipc.setDiskBase).not.toHaveBeenCalled();
+      }
+    });
   });
 });
