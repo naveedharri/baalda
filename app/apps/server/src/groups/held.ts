@@ -154,21 +154,28 @@ export async function heldByOwnSettings(
     if (!ctx || ctx.organizationId !== input.orgId) continue;
     const rows: ShareRow[] = indexedRowsFor(index, ctx.docId, ctx.folderIds);
     const gives: Level = place.gives ?? toLevel(rowsGroupGrant(rows, [input.groupId], ctx.docId, ctx.folderIds, input.orgId));
-    // Whether the group has a say here at all. A level just picked for the
-    // group here always counts. When people are ADDED, only a setting of the
-    // group's on this place or above it does: a group with nothing here gives
-    // nothing, which is not "less" than anyone's own level (2026-11-28
-    // five-app test: adding people to an EMPTY group asked about everyone's
-    // own Can edit everything, and "Use the group's for everyone" would have
-    // taken all their access away).
-    const speaks =
-      input.access !== undefined ||
-      rows.some(
-        (r) =>
-          r.principal_type === "group" &&
-          r.principal_id === input.groupId &&
-          (r.permission === "view" || r.permission === "edit" || r.permission === "denied"),
-      );
+    // Whether the group has a say here at all. A Can view or Can edit just
+    // picked for the group here always counts. A No access just picked counts
+    // only where a grant of the group's from above still reaches (the server
+    // then writes the group's No access here; elsewhere it just removes the
+    // group's row and the group gives nothing). When people are ADDED, only a
+    // setting of the group's on this place or above it counts. A group with
+    // nothing here gives nothing, which is not "less" than anyone's own level
+    // (2026-11-28 five-app test: adding people to an EMPTY group, or Remove all
+    // on a group, asked about everyone's own Can edit everything, and "Use the
+    // group's for everyone" would have taken all their access away).
+    const isThisPlace = (r: ShareRow) =>
+      r.resource_type === place.resourceType &&
+      r.resource_id === (place.resourceType === "vault" ? input.orgId : place.resourceId);
+    const speaks = input.access
+      ? input.access.mode !== "private" ||
+        toLevel(rowsGroupGrant(rows.filter((r) => !isThisPlace(r)), [input.groupId], ctx.docId, ctx.folderIds, input.orgId)) !== "none"
+      : rows.some(
+          (r) =>
+            r.principal_type === "group" &&
+            r.principal_id === input.groupId &&
+            (r.permission === "view" || r.permission === "edit" || r.permission === "denied"),
+        );
     for (const userId of place.only ? [place.only] : people) {
       const key = `${userId}\u0000${place.resourceType}\u0000${place.resourceId}`;
       if (seen.has(key)) continue;

@@ -269,6 +269,12 @@ function loadShareRows(orgId: string, targetId: string, limit: number) {
        LEFT JOIN notes n ON s.resource_type = 'file' AND n.id = s.resource_id AND n.deleted_at IS NULL
        LEFT JOIN files fl ON s.resource_type = 'file' AND fl.id = s.resource_id
       WHERE s.org_id = $1 AND s.principal_type = 'user' AND s.principal_id = $2
+        -- Settings the access conversion (migration 101) wrote to keep what
+        -- someone already had are not news: nobody granted anything.
+        AND NOT EXISTS (
+          SELECT 1 FROM access_personal_conversion_rows r
+           WHERE r.organization_id = s.org_id AND r.share_id = s.id AND r.action = 'inserted'
+        )
       ORDER BY s.created_at DESC
       LIMIT $3`,
     [orgId, targetId, limit],

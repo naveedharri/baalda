@@ -250,8 +250,20 @@ describe("the group giving less than a setting just for them (2026-11-28)", () =
     await userRow(f.org, "folder", f.specs, f.ana, "edit");
     expect(await heldByOwnSettings({ orgId: f.org, actorUserId: f.owner, groupId: fresh, addUserIds: [f.sam, f.ana] })).toEqual([]);
     // A group that reaches only one folder says nothing about the rest of the
-    // vault: adding Sam asks nothing about his own Can edit everything.
+    // vault: adding Sam asks nothing about his own Can edit everything, and
+    // Remove all (No access on the whole vault) asks nobody either.
     expect(await heldByOwnSettings({ orgId: f.org, actorUserId: f.owner, groupId: f.sales, addUserIds: [f.sam] })).toEqual([]);
+    expect(await heldByOwnSettings({
+      orgId: f.org, actorUserId: f.owner, groupId: f.sales,
+      access: { resources: [{ resourceType: "vault", resourceId: f.org }], mode: "private" },
+    })).toEqual([]);
+    // Even a group with a whole-vault level: No access there just removes the
+    // group's row, so the group gives nothing and nobody is held back.
+    await groupRow(f.org, f.sales, "vault", f.org, "view");
+    expect(await heldByOwnSettings({
+      orgId: f.org, actorUserId: f.owner, groupId: f.sales,
+      access: { resources: [{ resourceType: "vault", resourceId: f.org }], mode: "private" },
+    })).toEqual([]);
   });
 
   it("adding someone with their own Can edit everything to a group whose whole-vault level is lower is asked; using the group's removes it", async () => {
@@ -282,6 +294,8 @@ describe("the group giving less than a setting just for them (2026-11-28)", () =
 
   it("a group's No access on a folder asks only people whose own setting sits on that folder", async () => {
     const f = await fixture();
+    // The group's No access is real only under a grant of its own from above.
+    await groupRow(f.org, f.sales, "vault", f.org, "view");
     await userRow(f.org, "folder", f.specs, f.ana, "edit"); // Ana: on the folder itself
     await seedUserVaultGrant(f.org, f.sam, "edit"); // Sam: wider, vault-wide
     const held = await heldByOwnSettings({
@@ -290,6 +304,15 @@ describe("the group giving less than a setting just for them (2026-11-28)", () =
     });
     expect(held.map((h) => [h.userId, h.current, h.groupGives, h.ownAt])).toEqual([[f.ana, "edit", "none", "here"]]);
     expect(held[0]!.placeName).toBe("Specs");
+  });
+
+  it("a No access where no grant of the group's from above reaches asks nobody (the group just stops giving)", async () => {
+    const f = await fixture();
+    await userRow(f.org, "folder", f.specs, f.ana, "edit");
+    expect(await heldByOwnSettings({
+      orgId: f.org, actorUserId: f.owner, groupId: f.sales,
+      access: { resources: [{ resourceType: "folder", resourceId: f.specs }], mode: "private" },
+    })).toEqual([]);
   });
 
   it("Keep writes nothing: every setting just for them stays", async () => {

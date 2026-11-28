@@ -191,6 +191,8 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
   steps in one dialog: name and people, then what it can open; nothing reaches anyone until
   **Create group**. Wherever someone has their own setting that differs from what the group gives,
   the admin is asked once, per person: **Keep their own** (the default) or **Use the group's**.
+  Places the group gives nothing at all (it has no setting there) are never asked about, so adding
+  people to a new group or clearing a group's access never offers to remove anyone's own access.
 - **New members**: an invitation gives one of the three levels (**Can edit everything**, **Can view
   everything** or **No access**, which means nothing until something is shared with them or they
   join a group) or access groups, not both. There is no fourth "Only what's shared" or "Not shared"
