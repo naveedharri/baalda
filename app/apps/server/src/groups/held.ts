@@ -296,7 +296,14 @@ export async function letGroupDecide(
     // their groups decide. A mark could only raise, so nothing else applies.
     const groupGives = toLevel(rowsGroupGrant(rows, [input.groupId], ctx.docId, ctx.folderIds, input.orgId));
     if (RANK[groupGives] < RANK[b]) {
-      if (!ownRowHere) {
+      // Only where the group has a setting of its own on this place or above
+      // (as heldByOwnSettings asks): a group that says nothing here never
+      // takes anyone's own setting away, whatever list a caller sends.
+      const groupSpeaks = rows.some(
+        (r) => r.principal_type === "group" && r.principal_id === input.groupId &&
+          (r.permission === "view" || r.permission === "edit" || r.permission === "denied"),
+      );
+      if (!ownRowHere || !groupSpeaks) {
         plan.push({ e, action: "skipped", mark: false, before: b });
         continue;
       }

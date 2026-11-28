@@ -315,6 +315,16 @@ describe("the group giving less than a setting just for them (2026-11-28)", () =
     })).toEqual([]);
   });
 
+  it("Use the group's never removes an own setting where the group has no setting, whatever the caller sends", async () => {
+    const f = await fixture();
+    const fresh = await group(f.org, "Empty");
+    await seedUserVaultGrant(f.org, f.sam, "edit");
+    await join(f.org, fresh, f.sam);
+    const out = await letGroupDecide({ orgId: f.org, actorUserId: f.owner, groupId: fresh, entries: [{ userId: f.sam, resourceType: "vault", resourceId: f.org }] });
+    expect(out[0]).toMatchObject({ action: "skipped", before: "edit", after: "edit" });
+    expect(await effectivePermission(f.sam, f.other)).toBe("edit");
+  });
+
   it("Keep writes nothing: every setting just for them stays", async () => {
     const f = await fixture();
     const fresh = await group(f.org, "New");
