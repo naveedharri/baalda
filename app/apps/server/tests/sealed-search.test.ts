@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pool } from "../src/db/pool.js";
 import { appendUpdate } from "../src/yjs/persistence.js";
-import { indexDoc, pendingSearchPasses, searchNoteIndex } from "../src/index/indexer.js";
+import { indexDoc, newSearchStats, pendingSearchPasses, searchNoteIndex } from "../src/index/indexer.js";
 import { backfillVault } from "../src/crypto/backfill.js";
 import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { aadFor, open, seal } from "../src/crypto/envelope.js";
@@ -85,6 +85,18 @@ describe("sealed note_index (W3)", () => {
       expect(r.search_tokens).toBeNull();
       expect(r.search_enc.includes(Buffer.from("revenue"))).toBe(false);
     }
+  });
+
+  it("a search reports where its time went: candidates and how each was scored", async () => {
+    const k = await corpus(true);
+    const release = vaultKeyCache.acquire(k.vaultId, k.key, 1);
+    for (const id of Object.keys(k.ids)) await indexDoc(id);
+    release();
+    const stats = newSearchStats();
+    await searchNoteIndex({ vaultId: k.vaultId, query: "revenue plan", k: 3, readableDocIds: Object.keys(k.ids), crypto: k.crypto, db: pool, stats });
+    expect(stats.candidates).toBe(Object.keys(k.ids).length);
+    expect(stats.fromPages + stats.fromRows).toBe(Object.keys(k.ids).length);
+    expect(stats.bodyFetches).toBe(0);
   });
 
   it("keyed indexing seals the attachment reference excerpt beside the body", async () => {

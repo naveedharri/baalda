@@ -571,6 +571,10 @@ export async function searchNoteIndex(opts: {
    */
   crypto?: DocCrypto;
   db?: Queryable;
+  /** Filled with where the pass spent its time (ids and counts only), for the
+   *  slow-search log line. Best effort: a pass shared with another caller
+   *  fills the first caller's. */
+  stats?: SearchStats;
 }): Promise<NoteSearchHit[]> {
   if (opts.k <= 0) return [];
   const docIds = Array.from(opts.readableDocIds);
@@ -592,12 +596,31 @@ export async function searchNoteIndex(opts: {
     vaultWideReader: opts.vaultWideReader === true,
     legacySql: opts.keywordMode === "sql",
     crypto: opts.crypto,
+    stats: opts.stats,
   };
   // A keyed vault's search decrypts every candidate row, so concurrent ones
   // share a pass (see `joinPass`). A plaintext vault scores in SQL and the
   // database, not this process, carries the load.
   if (!opts.crypto || opts.db) return (await searchPass(scope, [query]))[0];
   return joinPass(scope, query);
+}
+
+/** Where one search pass spent its time; counts and milliseconds only. */
+export interface SearchStats {
+  candidates: number;
+  /** Notes scored from a search page (no row read). */
+  fromPages: number;
+  /** Notes scored from their own row (stale, unpaged or plaintext). */
+  fromRows: number;
+  /** Sealed rows whose whole body had to be fetched, one query each. */
+  bodyFetches: number;
+  pagesMs: number;
+  notesMs: number;
+  filesMs: number;
+}
+
+export function newSearchStats(): SearchStats {
+  return { candidates: 0, fromPages: 0, fromRows: 0, bodyFetches: 0, pagesMs: 0, notesMs: 0, filesMs: 0 };
 }
 
 /** One query inside a search pass. */
@@ -617,6 +640,7 @@ interface PassScope {
   vaultWideReader: boolean;
   legacySql: boolean;
   crypto?: DocCrypto;
+  stats?: SearchStats;
 }
 
 interface PassWaiter {
@@ -810,6 +834,7 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
           if (needBody.length === 0) continue;
           // Unopenable, or a row that needs its body: the full row, as before.
           rest = needBody;
+          if (scope.stats) scope.stats.bodyFetches++;
           searchEnc = await fullSealedRow(db, r.doc_id);
         }
         if (searchEnc) {
@@ -844,9 +869,15 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
   // Keyed: rows on a fresh search page are scored from the page; the rest
   // (edited since the page was built, never paged, a page that did not open)
   // from their own rows, exactly as without pages.
+  const st = scope.stats;
+  if (st) st.candidates = docIds.length;
+  let t0 = Date.now();
   const pages = crypto && !legacySql && docIds.length > 0 ? await loadPages(db, "note", crypto) : null;
+  if (st) st.pagesMs = Date.now() - t0;
+  t0 = Date.now();
   if (!pages || pages.rows.size === 0) {
     await scoreRows(docIds, (qi, docId, score) => scored[qi].push({ docId, score }));
+    if (st) st.fromRows = docIds.length;
   } else {
     const { rows: live } = await db.query<{ doc_id: string; stamp: string }>(
       `SELECT ni.doc_id, ni.updated_at::text AS stamp
@@ -857,6 +888,10 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
       [scope.vaultId, docIds],
     );
     const stale = live.filter((r) => pages.rows.get(r.doc_id)?.stamp !== r.stamp).map((r) => r.doc_id);
+    if (st) {
+      st.fromRows = stale.length;
+      st.fromPages = live.length - stale.length;
+    }
     const fromRows = new Map<string, number[]>();
     await scoreRows(stale, (qi, docId, score) => {
       let s = fromRows.get(docId);
@@ -885,9 +920,12 @@ async function searchPass(scope: PassScope, queries: PassQuery[]): Promise<NoteS
     }
   }
 
+  if (st) st.notesMs = Date.now() - t0;
+  t0 = Date.now();
   const fileHits = scope.includeFiles
     ? await searchBlobText(scope, queries, flatTokens, flatQuery)
     : queries.map(() => [] as NoteSearchHit[]);
+  if (st) st.filesMs = Date.now() - t0;
 
   // Stable sort over doc_id-ordered input, so equal scores keep a deterministic
   // order (the previous version left ties at the database's arbitrary order).

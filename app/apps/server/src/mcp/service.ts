@@ -30,7 +30,10 @@ import {
   resolveFolderParent,
   resolveParentFolder,
 } from "../registry/tree-ops.js";
-import { indexDoc, purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
+import { indexDoc, newSearchStats, purgeNoteIndex, searchNoteIndex } from "../index/indexer.js";
+
+/** A search slower than this logs where its time went. */
+const SLOW_SEARCH_MS = 5_000;
 import { vaultKeyCache } from "../crypto/key-cache.js";
 import type { McpAuth } from "./tokens.js";
 import {
@@ -1489,20 +1492,39 @@ export async function searchNotes(
   //    decides whether the doc-less `attachments/` blobs are candidates, which
   //    mirrors what the download gate would answer for them.
   // W3: a keyed vault's sealed rows are scored with this call's own key.
+  const started = Date.now();
   const crypto = await vaultCrypto(ctx.auth, vaultId);
+  const keyMs = Date.now() - started;
   const readable = await listReadableDocsInVault(ctx.auth.userId, vaultId);
+  const readableMs = Date.now() - started - keyMs;
   const wholeVault = await readsWholeVault(pool, ctx.auth.userId, vaultId);
-  return writeOrToolError(() =>
-    searchNoteIndex({
-      vaultId,
-      query,
-      k: limit,
-      readableDocIds: readable,
-      includeFiles,
-      vaultWideReader: wholeVault,
-      crypto,
-    }),
-  );
+  const stats = newSearchStats();
+  const beforeScore = Date.now();
+  try {
+    return await writeOrToolError(() =>
+      searchNoteIndex({
+        vaultId,
+        query,
+        k: limit,
+        readableDocIds: readable,
+        includeFiles,
+        vaultWideReader: wholeVault,
+        crypto,
+        stats,
+      }),
+    );
+  } finally {
+    // Where a slow search went (production showed 9-25 s with no breakdown).
+    // Ids and counts only.
+    if (Date.now() - started > SLOW_SEARCH_MS) {
+      console.warn(
+        `[mcp] search_notes timing vault=${vaultId} keyed=${!!crypto} files=${includeFiles} keyMs=${keyMs} readableMs=${readableMs} ` +
+          `wholeVaultMs=${beforeScore - started - keyMs - readableMs} scoreMs=${Date.now() - beforeScore} candidates=${stats.candidates} ` +
+          `fromPages=${stats.fromPages} fromRows=${stats.fromRows} bodyFetches=${stats.bodyFetches} pagesMs=${stats.pagesMs} ` +
+          `notesMs=${stats.notesMs} filesMs=${stats.filesMs}`,
+      );
+    }
+  }
 }
 
 // ── attachments / files ───────────────────────────────────────────────────
