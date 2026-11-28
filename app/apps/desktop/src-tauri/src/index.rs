@@ -1993,12 +1993,25 @@ impl Index {
             rows.collect::<Result<Vec<_>, _>>()?
         };
         // Hard links may share an identity. Never collapse ambiguous owners,
-        // and never adopt a copy while the old path still exists (any kind).
+        // and never adopt a copy while the old path still exists (any kind)...
         if let [(id, previous)] = candidates.as_slice() {
-            if std::fs::symlink_metadata(vault.join(previous))
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            {
-                return Ok(Some(id.clone()));
+            let prev_abs = vault.join(previous);
+            match std::fs::symlink_metadata(&prev_abs) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(id.clone())),
+                // ...unless the old path IS this file under another spelling: a
+                // case-insensitive disk answers `casef/b.md` for `CaseF/b.md`.
+                // A teammate's note written at the server's `casef/` into this
+                // disk's `CaseF/` folder is then reported by the watcher under
+                // the disk's spelling, and without this it got a SECOND row with
+                // a fresh id: the server's delete of the real id found no local
+                // note and the file came back for everyone as a new note.
+                Ok(_)
+                    if rel_from_abs(vault, abs).is_ok_and(|rel| rel != *previous && link_key(&rel) == link_key(previous))
+                        && note_file_identity::identity(&prev_abs).as_deref() == Some(file_id.as_str()) =>
+                {
+                    return Ok(Some(id.clone()));
+                }
+                _ => {}
             }
         }
         Ok(None)
@@ -4391,6 +4404,38 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1], "the copy gets its own doc_id");
+    }
+
+    #[test]
+    fn a_note_written_under_another_case_spelling_keeps_one_row_and_its_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        std::fs::create_dir(v.join("CaseF")).unwrap();
+        // Only a case-insensitive disk (macOS, Windows) makes the two spellings
+        // one file; on a case-sensitive one there is nothing to merge.
+        write_note(v, "casef/b.md", "# b").unwrap_or_default();
+        if !v.join("CaseF/b.md").exists() {
+            return;
+        }
+        let idx = Index::open(v).unwrap();
+        // The registry materializes the server's path and binds the server's id.
+        idx.index_note(v, &v.join("casef/b.md")).unwrap();
+        assert!(idx.rebind_note_id("casef/b.md", "server-id").unwrap());
+        // Then the watcher reports the same file under the disk's spelling.
+        idx.index_note(v, &v.join("CaseF/b.md")).unwrap();
+        let rows: Vec<(String, String)> = idx
+            .conn
+            .prepare("SELECT id, path FROM notes")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("server-id".to_string(), "CaseF/b.md".to_string())]);
+        // A real copy under a different name still gets its own row.
+        std::fs::copy(v.join("CaseF/b.md"), v.join("CaseF/copy.md")).unwrap();
+        idx.index_note(v, &v.join("CaseF/copy.md")).unwrap();
+        assert_ne!(idx.id_for_path(&idx.conn, "CaseF/copy.md").unwrap().as_deref(), Some("server-id"));
     }
 
     #[test]
