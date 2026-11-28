@@ -2148,6 +2148,50 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
   });
 
+  it("a folder still on disk that the watcher named is swept for changed notes AFTER the folder-move drain", async () => {
+    // A whole directory moved is ONE event: `mv A t; mv B A; mv t B` changed the
+    // bytes under both folders and no file event said so. The sweep must run
+    // after the drain: ingesting A's bytes into B's notes first would make a
+    // rotation read B as still at home.
+    const sm = new SyncManager();
+    const a = [
+      { docId: "oa", relPath: "A/overview.md" },
+      { docId: "a1", relPath: "A/a1.md" },
+    ];
+    const b = [
+      { docId: "ob", relPath: "B/overview.md" },
+      { docId: "b1", relPath: "B/b1.md" },
+    ];
+    for (const n of [...a, ...b]) storeHooks.texts.set(n.docId, textOf(n.docId));
+    vi.spyOn(sm, "localText").mockImplementation(async (id) => storeHooks.texts.get(id) ?? null);
+    mapNotes([...a, ...b, ...others], ["A", "B", "Keep"]);
+    await live(sm);
+    const internals = sm as unknown as { closedEditsPass: (s: unknown, only?: (p: string) => boolean) => Promise<void> };
+    const seen: Array<{ movesBefore: number; only?: (p: string) => boolean }> = [];
+    const pass = vi.spyOn(internals, "closedEditsPass").mockImplementation(async (_s, only) => {
+      seen.push({ movesBefore: fakeRegistry.renamePath.mock.calls.length, only });
+    });
+    fakeDisk.dirs = new Set(["B", "C", "Keep"]);
+    for (const n of a) fakeDisk.files.set(n.relPath.replace(/^A\//, "B/"), textOf(n.docId));
+    for (const n of b) fakeDisk.files.set(n.relPath.replace(/^B\//, "C/"), textOf(n.docId));
+    try {
+      sm.handleLocalFilesChanged([
+        { path: "C", kind: "tree", gone: false },
+        { path: "B", kind: "tree", gone: false },
+        { path: "A", kind: "tree", gone: true },
+      ]);
+      await drain();
+    } finally {
+      pass.mockRestore();
+    }
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].movesBefore).toBe(2);
+    expect(seen[0].only?.("B/overview.md")).toBe(true);
+    expect(seen[0].only?.("Keep/k.md")).toBe(false);
+    expect(seen[0].only?.("C/b1.md")).toBe(false);
+  });
+
   it("a folder and its sub-folder renamed in the same breath are two folder moves, parent first", async () => {
     // `mv Old/sub Old/sub2 && mv Old Archive`: by position alone the renamed
     // sub-folder sank the parent, its notes went over one by one into a new

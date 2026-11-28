@@ -1178,6 +1178,18 @@ mod tests {
     }
 
     #[test]
+    fn rename_never_lands_on_an_occupied_path() {
+        // An inbound chain keeps `A/n → B/n` because `B/n → C/n` vacates it;
+        // when the vacating rename fails, this refusal is what keeps B's file.
+        let tmp = tempfile::tempdir().unwrap();
+        write_note(tmp.path(), "A/n.md", "from A").unwrap();
+        write_note(tmp.path(), "B/n.md", "still B").unwrap();
+        assert!(rename_path(tmp.path(), "A/n.md", "B/n.md").is_err());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("B/n.md")).unwrap(), "still B");
+        assert_eq!(std::fs::read_to_string(tmp.path().join("A/n.md")).unwrap(), "from A");
+    }
+
+    #[test]
     fn sha_is_stable() {
         assert_eq!(sha256_hex("abc"), sha256_hex("abc"));
         assert_ne!(sha256_hex("abc"), sha256_hex("abd"));

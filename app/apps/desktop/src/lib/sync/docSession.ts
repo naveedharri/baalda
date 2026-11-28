@@ -2068,10 +2068,40 @@ export class SyncManager implements InboundHost {
   private async scanClosedAppEdits(scope: VaultScope): Promise<void> {
     if (this.closedEditsScanned || this.rootMissing) return;
     this.closedEditsScanned = true;
+    await this.closedEditsPass(scope);
+  }
+
+  /** Registered folders still on disk that a `tree` event named: their files
+   *  may be other files now (a swap), which no file event reported. */
+  private presentFolderSweeps = new Set<string>();
+
+  /**
+   * After a folder-move drain: the mapped notes under a registered folder that
+   * a `tree` event named while it was still there. A whole directory moved is
+   * ONE event, so a path under a folder that stayed can hold other bytes now
+   * (`mv A t; mv B A; mv t B`) and no file event says so; the watcher re-hashed
+   * the index rows under it and the closed-app pass pushes what drifted from
+   * its disk base, with every gate it applies (view-only, equal to the CRDT,
+   * the open note, empty files). Run after the drain, never before: a rotation
+   * reads B's notes against B's CRDT, and ingesting A's bytes into them first
+   * made the rotation unreadable (2026-11-28 five-app swap test: the owner's
+   * disk showed both notes swapped while the server and every teammate kept
+   * the old text, with no error).
+   */
+  private async sweepPresentFolders(scope: VaultScope): Promise<void> {
+    if (this.presentFolderSweeps.size === 0 || !scope.isCurrent() || this.rootMissing) return;
+    if (this.diskDeleteTimer || this.channelDown || this.liveSince == null) return; // the next drain takes them
+    const folders = [...this.presentFolderSweeps];
+    this.presentFolderSweeps.clear();
+    const under = (p: string) => folders.some((f) => isUnder(p, f));
+    await this.closedEditsPass(scope, under);
+  }
+
+  private async closedEditsPass(scope: VaultScope, only?: (relPath: string) => boolean): Promise<void> {
     const result = await runClosedAppEdits({
       isLive: () => this.liveSince != null,
       isCurrent: () => scope.isCurrent() && this.enabled,
-      mappedNotes: () => this.registry.mappedNotes(),
+      mappedNotes: () => (only ? this.registry.mappedNotes().filter((n) => only(n.relPath)) : this.registry.mappedNotes()),
       listDrift: (entries) => ipc.listDiskDrift(entries, scope.vaultEpoch),
       openDocId: () => this.docStore?.suppressedDoc() ?? null,
       isPermanentFailure: (docId) => this.permanentFailures.has(docId),
@@ -2102,7 +2132,8 @@ export class SyncManager implements InboundHost {
       log: (message) => this.note("info", "closed-app-edits", message),
     });
     if (result && result.queued > 0) {
-      this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
+      if (only) console.info(`[sync] ${result.queued} notes under a folder changed on disk are going out`);
+      else this.note("info", "closed-app-edits-done", `Queued ${result.queued} notes edited while closed`);
     }
   }
 
@@ -2538,6 +2569,12 @@ export class SyncManager implements InboundHost {
         // pass, ~1.5 s apart, for days (#98). The plan bug is fixed too, but no
         // planner asymmetry may ever be able to chain pulls through us again.
         if (this.registry.consumeMaterialized(relPath)) continue;
+        // A registered folder still there: what is inside may be other files
+        // now (see `sweepPresentFolders`), checked once the drain has run.
+        if (gone !== true && relPath && this.registry.getFolderId?.(relPath) && this.liveSince != null) {
+          this.presentFolderSweeps.add(relPath);
+          if (!this.diskDeleteTimer) this.armDiskDeleteDrain(scope, DISK_DELETE_GRACE_MS);
+        }
         // A path that APPEARED and that no registered folder owns yet: possibly
         // the new half of a folder move. Recorded either way; the drain checks
         // that it really is a folder before pairing anything with it.
@@ -2709,9 +2746,10 @@ export class SyncManager implements InboundHost {
     this.diskDeleteTimer = setTimeout(() => {
       this.diskDeleteTimer = null;
       if (!scope.isCurrent()) return;
-      void this.drainDiskDeletes(scope).catch((e) =>
-        console.warn("[sync] disk delete drain failed", e),
-      );
+      void this.drainDiskDeletes(scope)
+        .catch((e) => console.warn("[sync] disk delete drain failed", e))
+        .then(() => this.sweepPresentFolders(scope))
+        .catch((e) => console.warn("[sync] present-folder sweep failed", e));
     }, delayMs);
   }
 

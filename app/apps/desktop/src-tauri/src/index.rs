@@ -1940,6 +1940,24 @@ impl Index {
         Ok(true)
     }
 
+    /// Indexed note paths strictly below the folder `rel` (an exact path
+    /// prefix, case as stored). The watcher's present-folder sweep compares
+    /// them with what the walk found.
+    pub fn note_paths_under(&self, rel: &str) -> AppResult<Vec<String>> {
+        let prefix = format!("{rel}/");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM notes WHERE substr(path, 1, ?2) = ?1")?;
+        let rows = stmt.query_map(params![prefix, prefix.chars().count() as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     fn id_for_path(&self, tx: &Connection, rel: &str) -> AppResult<Option<String>> {
         Ok(tx
             .query_row("SELECT id FROM notes WHERE path = ?1", params![rel], |r| {
