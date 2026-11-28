@@ -5,6 +5,7 @@ import { pool } from "../src/db/pool.js";
 import { effectivePermission } from "../src/permissions/resolver.js";
 import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
 import { heldByOwnSettings, letGroupDecide } from "../src/groups/held.js";
+import { applyBulkAccess } from "../src/permissions/access-management.js";
 import { canEditFolder } from "../src/permissions/http-gates.js";
 import { applyNewMemberDefault } from "../src/members/invitation-access.js";
 import { resetDb } from "./helpers/db.js";
@@ -191,6 +192,55 @@ describe("a person's own setting decides over their groups", () => {
     expect((await marks(f.ana))).toHaveLength(0);
     const lock = await pool.query("SELECT 1 FROM shares WHERE resource_id = $1 AND principal_id = $2 AND permission = 'locked'", [f.specs, f.sam]);
     expect(lock.rowCount).toBe(1);
+  });
+
+  it("a setting made for them later on that place (or above it) outvotes an older mark", async () => {
+    const f = await fixture();
+    await seedUserVaultGrant(f.org, f.sam, "view");
+    const inner = await seedFolder(f.vault, f.specs, "Inner", "Specs/Inner", f.owner);
+    const deep = await seedNote(f.vault, inner, "Specs/Inner/B.md", f.owner);
+    await letGroupDecide({
+      orgId: f.org, actorUserId: f.owner, groupId: f.sales,
+      entries: [{ userId: f.sam, resourceType: "folder", resourceId: inner }],
+    });
+    expect(await effectivePermission(f.sam, deep)).toBe("edit");
+    // The owner now sets Sam to No access on Specs, the folder above the mark.
+    // Before: Sales kept lifting him inside, while the board said No access.
+    await applyBulkAccess({
+      organizationId: f.org, actorUserId: f.owner,
+      resources: [{ resourceType: "folder", resourceId: f.specs }],
+      audience: { type: "users", userIds: [f.sam] }, mode: "private",
+    });
+    expect(await marks(f.sam)).toEqual([]);
+    expect(await effectivePermission(f.sam, deep)).toBe("none");
+    expect((await listReadableDocsInVault(f.sam, f.vault)).has(deep)).toBe(false);
+    // Ana, in Sales with no setting of her own, is untouched.
+    expect(await effectivePermission(f.ana, deep)).toBe("edit");
+  });
+
+  it("a setting for them elsewhere leaves a mark alone", async () => {
+    const f = await fixture();
+    await seedUserVaultGrant(f.org, f.sam, "view");
+    const elsewhere = await seedFolder(f.vault, null, "Elsewhere", "Elsewhere", f.owner);
+    await letGroupDecide({
+      orgId: f.org, actorUserId: f.owner, groupId: f.sales,
+      entries: [{ userId: f.sam, resourceType: "folder", resourceId: f.specs }],
+    });
+    await applyBulkAccess({
+      organizationId: f.org, actorUserId: f.owner,
+      resources: [{ resourceType: "folder", resourceId: elsewhere }],
+      audience: { type: "users", userIds: [f.sam] }, mode: "private",
+    });
+    expect(await marks(f.sam)).toHaveLength(1);
+    expect(await effectivePermission(f.sam, f.spec)).toBe("edit");
+    // Set everything to …: the newest word on the whole vault, marks included.
+    await applyBulkAccess({
+      organizationId: f.org, actorUserId: f.owner,
+      resources: [{ resourceType: "vault", resourceId: f.org }],
+      audience: { type: "users", userIds: [f.sam] }, mode: "readonly",
+    });
+    expect(await marks(f.sam)).toEqual([]);
+    expect(await effectivePermission(f.sam, f.spec)).toBe("view");
   });
 
   it("a mark goes when they leave the group", async () => {

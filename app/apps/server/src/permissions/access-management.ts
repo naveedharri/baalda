@@ -308,6 +308,54 @@ async function clearResourceOverrides(
   return result.rowCount ?? 0;
 }
 
+/**
+ * Drop the "Sales may raise them" marks (`access_group_raises`) these people
+ * hold at `resource` and inside it. A setting made just for a person is the
+ * newest word on that place: it clears their own settings inside it
+ * ({@link clearResourceOverrides}), and a mark is one of those. Left in place, an
+ * older mark kept a group lifting them past the No access just written for
+ * them, while the owner saw No access and the person kept every note.
+ */
+export async function clearRaiseMarks(
+  db: Queryable,
+  organizationId: string,
+  resource: AccessResource,
+  userIds: string[],
+): Promise<number> {
+  if (userIds.length === 0) return 0;
+  if (resource.resourceType === "vault") {
+    const r = await db.query(
+      "DELETE FROM access_group_raises WHERE organization_id = $1 AND user_id = ANY($2::text[])",
+      [organizationId, userIds],
+    );
+    return r.rowCount ?? 0;
+  }
+  if (resource.resourceType === "file") {
+    const r = await db.query(
+      `DELETE FROM access_group_raises
+        WHERE organization_id = $1 AND user_id = ANY($3::text[]) AND resource_type = 'file' AND resource_id = $2`,
+      [organizationId, resource.resourceId, userIds],
+    );
+    return r.rowCount ?? 0;
+  }
+  const r = await db.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id FROM folders WHERE id = $2
+       UNION
+       SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+     ), target_files AS (
+       SELECT id FROM notes WHERE folder_id IN (SELECT id FROM subtree)
+       UNION SELECT id FROM files WHERE folder_id IN (SELECT id FROM subtree)
+     )
+     DELETE FROM access_group_raises
+      WHERE organization_id = $1 AND user_id = ANY($3::text[])
+        AND ((resource_type = 'folder' AND resource_id IN (SELECT id FROM subtree))
+          OR (resource_type = 'file' AND resource_id IN (SELECT id FROM target_files)))`,
+    [organizationId, resource.resourceId, userIds],
+  );
+  return r.rowCount ?? 0;
+}
+
 function storedPermission(mode: AccessMode): "denied" | "readonly" | "edit" {
   return mode === "private" ? "denied" : mode === "readonly" ? "readonly" : "edit";
 }
@@ -377,6 +425,9 @@ export async function applyBulkAccess(
         input.audience.type === "group" ? input.audience.groupId : null,
         removedPermissions,
       );
+      if (input.audience.type === "users") {
+        await clearRaiseMarks(client, input.organizationId, resource, selectedUsers);
+      }
     }
 
     const wholeVault = resources[0].resourceType === "vault";

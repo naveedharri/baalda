@@ -30,6 +30,7 @@ import {
 } from "../../permissions/access-summary.js";
 import { getSession } from "../session.js";
 import {
+  clearRaiseMarks,
   AccessManagementError,
   applyBulkAccess,
   DEFAULT_ACCESS_FIXED_MESSAGE,
@@ -541,6 +542,12 @@ export function createShareRoutes(deps: ShareDeps): Hono {
           accessRevision,
         ],
       );
+
+      // A level just for this person is the newest word on this place: an older
+      // "group may raise them" mark here or inside must not outvote it.
+      if (principalType === "user" && permission !== "locked") {
+        await clearRaiseMarks(client, gate.organizationId!, { resourceType, resourceId } as AccessResource, [principalId]);
+      }
 
       // An Everyone/org lock subsumes any per-user locks on the same resource —
       // drop them so a single Unlock actually unlocks. (Those users stay locked by
