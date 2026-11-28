@@ -727,6 +727,8 @@ export function planInbound(input: InboundInput): InboundPlan {
     }
   }
 
+  settleOccupiedRenames(plan);
+
   // Trash deepest-first, so a folder's contents leave before anything prunes it.
   plan.trash.sort((a, b) => b.path.split("/").length - a.path.split("/").length);
 
@@ -768,15 +770,63 @@ function pushRename(
   // places, the far half of a chain) is planned on the next one — exactly as it
   // is today, where such a rename fails at the IPC boundary and is retried.
   if (localPaths.has(pathKey(to))) {
-    plan.rejected.push({
-      kind: "rename",
-      path: to,
-      docId,
-      reason: `the server moved this note to ${to}, but another note already occupies that path, so it was left at ${from}`,
-    });
+    // Unless another rename of this same plan takes the occupant away (a
+    // teammate's rotation, `mv B C && mv A B`: B's note leaves the path A's
+    // takes). Judged once the plan is whole (`settleOccupiedRenames`).
+    let held = occupiedRenames.get(plan);
+    if (!held) occupiedRenames.set(plan, (held = []));
+    held.push({ docId, from, to });
     return;
   }
   plan.renames.push({ docId, from, to });
+}
+
+/** Renames whose destination another note held when planned, per plan. */
+const occupiedRenames = new WeakMap<InboundPlan, Array<{ docId: string; from: string; to: string }>>();
+
+/**
+ * Keep a held rename when another rename of the plan vacates its destination,
+ * and order the renames so the one leaving a path runs before the one taking
+ * it. Refused one by one, the far half of a chain was left at its old path
+ * while a placeholder for it took the freed name under a fresh id, and every
+ * later pass found the name occupied again: the note stayed split in two on
+ * every receiving device (2026-11-28 five-app test). A cycle (two notes
+ * swapping places) has no safe order and is refused as before.
+ */
+function settleOccupiedRenames(plan: InboundPlan): void {
+  const held = occupiedRenames.get(plan) ?? [];
+  occupiedRenames.delete(plan);
+  const refuse = (r: { docId: string; from: string; to: string }) =>
+    plan.rejected.push({
+      kind: "rename",
+      path: r.to,
+      docId: r.docId,
+      reason: `the server moved this note to ${r.to}, but another note already occupies that path, so it was left at ${r.from}`,
+    });
+  if (held.length === 0) return;
+  let kept = [...held];
+  for (;;) {
+    const leaving = new Set([...plan.renames, ...kept].map((r) => pathKey(r.from)));
+    const next = kept.filter((r) => leaving.has(pathKey(r.to)) && pathKey(r.to) !== pathKey(r.from));
+    if (next.length === kept.length) break;
+    kept = next;
+  }
+  for (const r of held) if (!kept.includes(r)) refuse(r);
+  if (kept.length === 0) return;
+  // Vacate first: a rename waits while another still has to leave its target.
+  const all = [...plan.renames, ...kept];
+  const ordered: typeof all = [];
+  const waiting = [...all];
+  while (waiting.length > 0) {
+    const i = waiting.findIndex((r) => !waiting.some((q) => q !== r && pathKey(q.from) === pathKey(r.to)));
+    if (i < 0) break;
+    ordered.push(waiting.splice(i, 1)[0]);
+  }
+  for (const r of waiting) {
+    if (kept.includes(r)) refuse(r);
+    else ordered.push(r);
+  }
+  plan.renames = ordered;
 }
 
 function pushTrash(

@@ -269,6 +269,39 @@ describe("planInbound — renames", () => {
     expect(p.trash).toEqual([]);
   });
 
+  it("a chain (mv B C && mv A B) moves the note leaving a path before the one taking it", () => {
+    const p = plan({
+      baseline: new Map([["oa", "A/overview.md"], ["ob", "B/overview.md"]]),
+      local: new Map([["oa", "A/overview.md"], ["ob", "B/overview.md"]]),
+      server: new Map([["oa", "B/overview.md"], ["ob", "C/overview.md"]]),
+    });
+    expect(p.renames).toEqual([
+      { docId: "ob", from: "B/overview.md", to: "C/overview.md" },
+      { docId: "oa", from: "A/overview.md", to: "B/overview.md" },
+    ]);
+    expect(p.rejected).toEqual([]);
+  });
+
+  it("two notes swapping places have no safe order: both stay, refused", () => {
+    const p = plan({
+      baseline: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      local: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      server: new Map([["x", "B/n.md"], ["y", "A/n.md"]]),
+    });
+    expect(p.renames).toEqual([]);
+    expect(p.rejected.map((r) => r.docId).sort()).toEqual(["x", "y"]);
+  });
+
+  it("a destination another note keeps is refused as before", () => {
+    const p = plan({
+      baseline: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      local: new Map([["x", "A/n.md"], ["y", "B/n.md"]]),
+      server: new Map([["x", "B/n.md"], ["y", "B/n.md"]]),
+    });
+    expect(p.renames).toEqual([]);
+    expect(p.rejected.map((r) => r.docId)).toEqual(["x"]);
+  });
+
   it("leaves a note WE moved for the outbound half to push", () => {
     const p = plan({
       baseline: new Map([["d1", "old.md"]]),
