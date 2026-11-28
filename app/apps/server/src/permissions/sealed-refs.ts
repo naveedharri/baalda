@@ -29,6 +29,37 @@ export async function vaultIsKeyed(vaultId: string, db: Queryable = defaultPool)
  *  statement timeout (the old single query read every body at once). */
 const BODY_CHUNK = 50;
 
+/**
+ * Answers for paths with no `/` (no anchor, so no excerpt can hold them),
+ * per note and per state of its row. A doc-less blob at the vault root that no
+ * note mentions would otherwise send every list back to every body, every
+ * time. Booleans about paths, in process memory only, keyed by the row's
+ * index stamp so an edit asks again; bounded, cleared whole when full.
+ */
+const BARE_MEMO_MAX = 200_000;
+const bareMemo = new Map<string, { stamp: string; found: Map<string, boolean> }>();
+function bareAnswer(vaultId: string, docId: string, stamp: string, path: string): boolean | undefined {
+  const m = bareMemo.get(`${vaultId}|${docId}`);
+  return m && m.stamp === stamp ? m.found.get(path) : undefined;
+}
+function rememberBare(vaultId: string, docId: string, stamp: string, answers: Array<[string, boolean]>): void {
+  const key = `${vaultId}|${docId}`;
+  let m = bareMemo.get(key);
+  if (!m || m.stamp !== stamp) {
+    if (!m && bareMemo.size >= BARE_MEMO_MAX) bareMemo.clear();
+    m = { stamp, found: new Map() };
+    bareMemo.set(key, m);
+  }
+  for (const [p, v] of answers) m.found.set(p, v);
+}
+/** Test hook. */
+export function clearBarePathMemo(): void {
+  bareMemo.clear();
+}
+
+/** A list slower than this logs its counts (ids and counts only). */
+const SLOW_LIST_MS = 1_000;
+
 function anchorOf(path: string): string | null {
   const slash = path.indexOf("/");
   return slash >= 0 ? path.slice(0, slash + 1) : null;
@@ -58,8 +89,13 @@ export async function sealedReferencedPaths(
   const hit = new Set<string>();
   if (readableIds.length === 0 || paths.length === 0) return hit;
   const needed = [...new Set(paths.map(anchorOf).filter((a): a is string => a !== null))];
-  const { rows } = await db.query<{ doc_id: string; ref_enc: Buffer | null }>(
-    `SELECT doc_id, CASE WHEN ref_enc IS NOT NULL AND ref_heads @> $3::text[] THEN ref_enc END AS ref_enc
+  const started = Date.now();
+  const bare = paths.filter((p) => anchorOf(p) === null);
+  const { rows } = await db.query<{ doc_id: string; ref_enc: Buffer | null; stamp: string }>(
+    // The stamp names the row's state without reading the body
+    // (`octet_length` of a stored value reads its header, not its bytes).
+    `SELECT doc_id, CASE WHEN ref_enc IS NOT NULL AND ref_heads @> $3::text[] THEN ref_enc END AS ref_enc,
+            updated_at::text || ':' || octet_length(search_enc) AS stamp
        FROM note_index
       WHERE vault_id = $1 AND doc_id = ANY($2::text[]) AND search_enc IS NOT NULL`,
     [vaultId, readableIds, needed],
@@ -69,7 +105,12 @@ export async function sealedReferencedPaths(
 
   const bodyFor: string[] = [];
   const unreadable = new Set<string>();
+  const stampOf = new Map<string, string>();
+  let fromExcerpt = 0;
   for (const r of rows) {
+    stampOf.set(r.doc_id, r.stamp);
+    // Bare paths this note was already read for, in this state of its row.
+    for (const p of bare) if (!hit.has(p) && bareAnswer(vaultId, r.doc_id, r.stamp, p) === true) hit.add(p);
     if (!r.ref_enc) {
       bodyFor.push(r.doc_id);
       continue;
@@ -82,46 +123,67 @@ export async function sealedReferencedPaths(
       bodyFor.push(r.doc_id);
       continue;
     }
+    fromExcerpt++;
     let needsBody = false;
     for (const p of paths) {
       if (hit.has(p)) continue;
       const anchor = anchorOf(p);
-      if (anchor === null) needsBody = true; // no anchor: only the body can say
-      else if (p.length - anchor.length <= REF_WINDOW_CHARS) {
+      // No anchor: only the body can say, unless this note was read for it already.
+      if (anchor === null) {
+        if (bareAnswer(vaultId, r.doc_id, r.stamp, p) === undefined) needsBody = true;
+      } else if (p.length - anchor.length <= REF_WINDOW_CHARS) {
         if (excerpt.includes(p)) hit.add(p);
       } else if (excerpt.includes(p.slice(0, anchor.length + REF_WINDOW_CHARS))) needsBody = true;
     }
     if (needsBody) bodyFor.push(r.doc_id);
   }
-  if (bodyFor.length === 0 || hit.size === paths.length) return hit;
+  let bodies = 0;
+  let healed = 0;
+  const done = () => {
+    const ms = Date.now() - started;
+    if (ms > SLOW_LIST_MS) {
+      console.warn(
+        `[sealed-refs] vault=${vaultId} rows=${rows.length} paths=${paths.length} bare=${bare.length} fromExcerpt=${fromExcerpt} ` +
+          `bodies=${bodies} healed=${healed} hits=${hit.size} ms=${ms}`,
+      );
+    }
+    return hit;
+  };
+  if (bodyFor.length === 0 || hit.size === paths.length) return done();
 
   const heads = await cachedRefHeads(vaultId, db);
   for (let i = 0; i < bodyFor.length && hit.size < paths.length; i += BODY_CHUNK) {
-    const { rows: bodies } = await db.query<{ doc_id: string; search_enc: Buffer; covered: boolean }>(
+    const { rows: chunk } = await db.query<{ doc_id: string; search_enc: Buffer; covered: boolean }>(
       `SELECT doc_id, search_enc, (ref_enc IS NOT NULL AND ref_heads @> $3::text[]) AS covered
          FROM note_index
         WHERE vault_id = $1 AND doc_id = ANY($2::text[]) AND search_enc IS NOT NULL`,
       [vaultId, bodyFor.slice(i, i + BODY_CHUNK), heads],
     );
     const heal: Array<{ id: string; enc: Buffer; sum: string }> = [];
-    for (const b of bodies) {
+    for (const b of chunk) {
+      bodies++;
       const body = openSearchRow(crypto, b.doc_id, b.search_enc).body;
+      const stamp = stampOf.get(b.doc_id);
+      if (stamp && bare.length > 0) rememberBare(vaultId, b.doc_id, stamp, bare.map((p) => [p, body.includes(p)]));
       // The excerpt answers for every path it can (scanning a few KB, not the
       // whole body once per path); the body only for the rest.
       const excerpt = refText(body, heads);
       for (const p of paths) {
         if (hit.has(p)) continue;
         const anchor = anchorOf(p);
-        const fromExcerpt = anchor !== null && heads.includes(anchor) && p.length - anchor.length <= REF_WINDOW_CHARS;
-        if (fromExcerpt ? excerpt.includes(p) : body.includes(p)) hit.add(p);
+        const useExcerpt = anchor !== null && heads.includes(anchor) && p.length - anchor.length <= REF_WINDOW_CHARS;
+        if (useExcerpt ? excerpt.includes(p) : body.includes(p)) hit.add(p);
       }
       if (b.covered && !unreadable.has(b.doc_id)) continue;
       const enc = sealRefText(crypto, b.doc_id, excerpt);
       if (enc) heal.push({ id: b.doc_id, enc, sum: createHash("md5").update(b.search_enc).digest("hex") });
     }
-    if (heal.length > 0) await healExcerpts(vaultId, heads, heal, db);
+    if (heal.length > 0) {
+      await healExcerpts(vaultId, heads, heal, db);
+      healed += heal.length;
+    }
   }
-  return hit;
+  return done();
 }
 
 /**

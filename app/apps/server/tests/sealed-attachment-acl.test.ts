@@ -7,7 +7,7 @@ import { makeVkCheck } from "../src/crypto/vk-check.js";
 import { KeyRequiredError } from "../src/crypto/transport.js";
 import type { DocCrypto } from "../src/crypto/doc-crypto.js";
 import { sealSearchRow } from "../src/index/sealed-index.js";
-import { sealedReferencedPaths } from "../src/permissions/sealed-refs.js";
+import { clearBarePathMemo, sealedReferencedPaths } from "../src/permissions/sealed-refs.js";
 import { resetDb } from "./helpers/db.js";
 import { seedMember, seedNote, seedOrg, seedUser, seedVault } from "./helpers/seed.js";
 
@@ -62,6 +62,7 @@ describe("attachment rule on keyed vaults (W3)", () => {
   beforeEach(async () => {
     vi.stubEnv("BAALDA_VAULT_KEYS", "on");
     await resetDb();
+    clearBarePathMemo();
     org = await seedOrg("Acl Co", `acl-${Date.now()}`);
     owner = await seedUser("owner@acl.test");
     member = await seedUser("member@acl.test");
@@ -121,6 +122,23 @@ describe("attachment rule on keyed vaults (W3)", () => {
     seen.length = 0;
     expect([...(await sealedReferencedPaths(keyed.vaultId, ids, short, keyed.crypto, spy))].sort()).toEqual(["attachments/Photo 1.jpg", "attachments/pic.png"]);
     expect(seen.some((s) => /SELECT doc_id, search_enc/.test(s))).toBe(false);
+
+    // A path with no folder that no note mentions (a stale root-level blob):
+    // read for once, then never again while the notes stay as they are.
+    const withBare = [...short, "stale-root.png", "readme.txt"];
+    expect([...(await sealedReferencedPaths(keyed.vaultId, ids, withBare, keyed.crypto, spy))].sort()).toEqual(["attachments/Photo 1.jpg", "attachments/pic.png", "readme.txt"]);
+    seen.length = 0;
+    expect([...(await sealedReferencedPaths(keyed.vaultId, ids, withBare, keyed.crypto, spy))].sort()).toEqual(["attachments/Photo 1.jpg", "attachments/pic.png", "readme.txt"]);
+    expect(seen.some((s) => /SELECT doc_id, search_enc/.test(s))).toBe(false);
+
+    // An edit asks that note again: its body no longer names readme.txt.
+    const three = (await pool.query("SELECT doc_id FROM note_index WHERE vault_id = $1 AND title = 'Three'", [keyed.vaultId])).rows[0].doc_id;
+    await pool.query("UPDATE note_index SET search_enc = $2, updated_at = now() WHERE doc_id = $1", [
+      three,
+      sealSearchRow(keyed.crypto!, three, { body: `long link ${LONG} only`, vector: [], tokens: null }),
+    ]);
+    seen.length = 0;
+    expect([...(await sealedReferencedPaths(keyed.vaultId, ids, withBare, keyed.crypto, spy))].sort()).toEqual(["attachments/Photo 1.jpg", "attachments/pic.png"]);
   });
 
   it("drops a note's excerpt when its sealed body is rewritten without one", async () => {
