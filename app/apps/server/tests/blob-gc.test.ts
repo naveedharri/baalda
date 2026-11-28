@@ -389,6 +389,26 @@ describe("orphan sweep", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("re-reads references cut by an older extractor before collecting (an angle-bracket embed)", async () => {
+    const kept = randomUUID();
+    const relPath = `attachments/${kept} copy.png`;
+    // Indexed by the old extractor: the note shows the picture as <path>, which
+    // it did not record. Another note's reference makes the vault look built.
+    const docId = await seedNote(vaultId, null, "Uses.md");
+    await pool.query("INSERT INTO note_index (doc_id, vault_id, title, content) VALUES ($1, $2, 'Uses', $3)", [docId, vaultId, `![p](<${relPath}>)`]);
+    await seedIndexedNote("attachments/other.png");
+    await pool.query("UPDATE vaults SET blob_refs_version = 2 WHERE id = $1", [vaultId]);
+    await pool.query(
+      `INSERT INTO blobs (id, vault_id, org_id, sha256, size, mime, rel_path, filename,
+                          storage_provider, status, data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 3, 'image/png', $5, 'x.png', 'postgres', 'ready',
+               decode('000102','hex'), now() - interval '90 days', now() - interval '90 days')`,
+      [kept, vaultId, orgId, randomUUID().replace(/-/g, "") + "e".repeat(32), relPath],
+    );
+    expect(await sweep()).toBe(0);
+    expect(await exists(kept)).toBe(true);
+  });
+
   it("never collects a registered tree file, however old and unreferenced", async () => {
     // `blob_refs` can only ever hold `attachments/…` paths (`refs.ts` returns
     // early on anything else), so a doc-backed blob — a registered PDF in a
