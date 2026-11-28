@@ -537,7 +537,27 @@ export function createBillingRoutes(deps: BillingDeps): Hono {
       // `billing_account_id` → legacy metadata `organization_id` → that
       // org's account (the store's fallback). An account-level checkout may
       // name no vault; it lands on the account's first attached vault.
-      const accountId = existing?.billing_account_id ?? event.accountId ?? null;
+      let accountId = existing?.billing_account_id ?? event.accountId ?? null;
+      // A billing account this server has never had: the checkout was made on
+      // ANOTHER server sharing the provider org (a local or staging instance).
+      // Writing it hit the account FK, rolled back the claim and answered 500,
+      // so the provider retried the same event for hours (2026-11-26, 40 times).
+      // With no vault of ours named either, the event is not ours: claim it and
+      // answer 2xx. With a vault of ours named, that vault's account decides.
+      if (!existing && accountId) {
+        const known = await client.query("SELECT 1 FROM billing_accounts WHERE id = $1", [accountId]);
+        if (known.rowCount === 0) {
+          const ours = event.organizationId
+            ? (await client.query("SELECT 1 FROM organization WHERE id = $1", [event.organizationId])).rowCount
+            : 0;
+          if (!ours) {
+            console.warn("billing webhook names a billing account and no vault this server knows: ignored");
+            await client.query("COMMIT");
+            return c.body(null, 202);
+          }
+          accountId = null;
+        }
+      }
       let orgId = existing?.organization_id ?? event.organizationId;
       if (!orgId && accountId) {
         orgId = (await orgIdsForAccount(client, accountId))[0] ?? "";
